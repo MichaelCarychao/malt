@@ -1,0 +1,58 @@
+name: Release
+
+# Triggers on pushing a tag like v0.2.0 — produces a DRAFT GitHub release
+# with Windows .msi/.exe and macOS .dmg attached. You review the draft
+# and publish it manually.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: # also allow a manual trigger from the Actions tab
+
+jobs:
+  release:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: "--target universal-apple-darwin"
+          - platform: windows-latest
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Universal macOS binary needs both targets.
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust dependency cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build + draft GitHub release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "malt ${{ github.ref_name }}"
+          releaseBody: "See CHANGELOG.md for what's in this release. Unsigned builds — Windows users may see a SmartScreen warning, macOS users right-click + Open the first time."
+          releaseDraft: true
+          prerelease: true
+          args: ${{ matrix.args }}

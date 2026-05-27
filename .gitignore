@@ -1,0 +1,31 @@
+# --- Frontend (SvelteKit / Vite) ---
+node_modules
+/build
+/.svelte-kit
+/package
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# --- Backend (Rust / Tauri) ---
+src-tauri/target
+src-tauri/gen
+src-tauri/WixTools
+# Local fastembed model cache (~33MB ONNX file, downloaded at first run).
+# CI will redownload; users will too. Don't commit.
+src-tauri/.fastembed_cache
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# --- Env / secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Local dev scratch ---
+.malt-dev
+# Local Claude Code tooling — permissions etc. are personal to the dev.
+.claude
