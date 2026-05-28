@@ -8,6 +8,7 @@ mod frontmatter;
 mod index;
 mod link_suggestions;
 mod notes;
+mod prompts;
 mod saved_searches;
 mod secrets;
 mod tagger;
@@ -544,6 +545,48 @@ async fn rewrite_text_streaming(
     .await
 }
 
+/// Brew (brainstorm) on a note body, streaming the AI's response. The
+/// note body is everything except malt-private markup — strip tags
+/// and frontmatter so the model sees prose, not tag detritus. If the
+/// body is too thin the prompt asks the model to say so explicitly.
+#[tauri::command]
+async fn brew_streaming(
+    body: String,
+    on_chunk: tauri::ipc::Channel<String>,
+) -> Result<(), String> {
+    if body.trim().is_empty() {
+        return Err("nothing to brew — the note is empty.".into());
+    }
+    let key = secrets::get_api_key().map_err(|e| format!("no API key: {e:?}"))?;
+    let model = config::load().completion_model;
+    // Strip tag line + inline #tags so the model isn't fishing meaning
+    // out of malt-private markup. Wikilinks stay intact (they're prose
+    // signal — they tell the model what entities the user is thinking
+    // about).
+    let cleaned = crate::tags::strip_tags_for_ai(&body);
+    ai::stream_brew(&key, &model, &cleaned, |text| {
+        let _ = on_chunk.send(text.to_string());
+    })
+    .await
+}
+
+// ─── Prompts management ────────────────────────────────────────────
+
+#[tauri::command]
+fn list_prompts() -> Vec<prompts::PromptInfo> {
+    prompts::list_all()
+}
+
+#[tauri::command]
+fn set_prompt(key: prompts::PromptKey, content: String) -> Result<(), String> {
+    prompts::set(key, content).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn reset_prompt(key: prompts::PromptKey) -> Result<(), String> {
+    prompts::reset(key).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn set_completion_model(model: String) -> Result<(), String> {
     let mut cfg = config::load();
@@ -922,6 +965,10 @@ pub fn run() {
             complete_text,
             complete_text_streaming,
             rewrite_text_streaming,
+            brew_streaming,
+            list_prompts,
+            set_prompt,
+            reset_prompt,
             is_note_encrypted,
             read_encrypted_note,
             save_encrypted_note,

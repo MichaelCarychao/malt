@@ -90,6 +90,7 @@
     onFinderReady,
     password = null,
     isEncrypted = false,
+    onBrew,
   }: {
     path: string | null;
     query?: string;
@@ -127,6 +128,11 @@
      * envelope. Distinguishes "no password supplied because the note
      * is plaintext" from "password is required but not yet known". */
     isEncrypted?: boolean;
+    /** Called when the user fires Cmd+Shift+B inside the editor. The
+     * parent decides where to route the brew (typically: open the
+     * secondary pane in brew mode with the note body passed back to
+     * the AI stream). */
+    onBrew?: (noteBody: string) => void;
   } = $props();
 
   // Right-click pill menu: floating div anchored at cursor.
@@ -628,14 +634,132 @@
     return false; // let the key's default behavior also run
   }
 
+  /**
+   * Toggle markdown wrapping around the selection (or current word if
+   * no selection). `marker` is the delimiter — "**" for bold, "_" for
+   * italic. Behavior:
+   *
+   *   1. If there's a selection, wrap it (or un-wrap if both ends are
+   *      already inside identical markers).
+   *   2. If there's no selection, expand to the word at the cursor and
+   *      wrap that. If the cursor isn't on a word (e.g. on whitespace),
+   *      insert the markers and place the cursor between them so the
+   *      next keystroke starts inside the styled span.
+   *
+   * The cursor lands after the (now-applied or stripped) marker on the
+   * trailing edge so typing can continue uninterrupted.
+   */
+  function toggleMarkdownWrap(v: EditorView, marker: string): void {
+    const state = v.state;
+    const sel = state.selection.main;
+    const doc = state.doc;
+    const docStr = doc.toString();
+    const len = marker.length;
+
+    let from = sel.from;
+    let to = sel.to;
+
+    // Empty selection → expand to the word at the cursor. Word chars
+    // are letters, digits, underscores, hyphens — close enough for prose.
+    if (from === to) {
+      const isWord = (c: string) => /[\p{L}\p{N}_\-']/u.test(c);
+      let s = from;
+      while (s > 0 && isWord(docStr[s - 1])) s--;
+      let e = to;
+      while (e < docStr.length && isWord(docStr[e])) e++;
+      // If cursor was between non-word chars, fall through to "insert
+      // empty marker pair and place cursor between" below.
+      from = s;
+      to = e;
+    }
+
+    const inner = docStr.slice(from, to);
+
+    // Check if the range is already wrapped — un-wrap if so.
+    const alreadyWrapped =
+      from >= len &&
+      to + len <= docStr.length &&
+      docStr.slice(from - len, from) === marker &&
+      docStr.slice(to, to + len) === marker;
+
+    if (alreadyWrapped) {
+      v.dispatch({
+        changes: [
+          { from: to, to: to + len, insert: "" },
+          { from: from - len, to: from, insert: "" },
+        ],
+        selection: { anchor: from - len, head: to - len },
+      });
+      return;
+    }
+
+    // If the selection itself starts and ends with the marker, strip
+    // the inner markers (covers "select **word** and toggle").
+    const inlineWrapped =
+      inner.length >= 2 * len &&
+      inner.startsWith(marker) &&
+      inner.endsWith(marker);
+    if (inlineWrapped) {
+      const stripped = inner.slice(len, inner.length - len);
+      v.dispatch({
+        changes: { from, to, insert: stripped },
+        selection: { anchor: from, head: from + stripped.length },
+      });
+      return;
+    }
+
+    // Wrap the range. Empty inner → just place cursor between markers
+    // so the user types inside the styled span.
+    if (inner.length === 0) {
+      v.dispatch({
+        changes: { from, to, insert: marker + marker },
+        selection: { anchor: from + len, head: from + len },
+      });
+    } else {
+      v.dispatch({
+        changes: { from, to, insert: marker + inner + marker },
+        selection: { anchor: from + len, head: from + len + inner.length },
+      });
+    }
+  }
+
   const completionKeymap = Prec.highest(
     keymap.of([
       {
-        // Mod-i = AI/Insert. Originally Mod-Space, but Cmd+Space is
-        // hardcoded to Spotlight on macOS and can't be intercepted.
-        key: "Mod-i",
+        // Mod-j = AI/Insert. Previously Mod-i, but i was reclaimed for
+        // markdown italics (the markdown-editor convention) — see
+        // boldItalicKeymap below. The j alias for "next note" used to
+        // also live here; that's now Mod-↓ only.
+        key: "Mod-j",
         run: (v) => {
           void fetchCompletion(v);
+          return true;
+        },
+      },
+      // Mod-b → toggle **bold** around selection or word at cursor.
+      // Mod-i → toggle _italic_ around selection or word at cursor.
+      // Wrapped in completionKeymap so they get Prec.highest like AI.
+      {
+        key: "Mod-b",
+        run: (v) => {
+          toggleMarkdownWrap(v, "**");
+          return true;
+        },
+      },
+      {
+        key: "Mod-i",
+        run: (v) => {
+          toggleMarkdownWrap(v, "_");
+          return true;
+        },
+      },
+      {
+        // Mod-Shift-b = brew. Fires onBrew callback; parent opens the
+        // brew pane and streams the model's response into it.
+        key: "Mod-Shift-b",
+        run: (v) => {
+          if (!onBrew) return false;
+          onBrew(v.state.doc.toString());
           return true;
         },
       },
@@ -881,6 +1005,113 @@
       decorations: (p) => p.decorations,
     }
   );
+
+  // ─── Inline markdown (bold / italic) ────────────────────────────────
+  //
+  // Visual rendering for **bold** and _italic_ markers. The actual
+  // styling is applied as a mark decoration on the inner text. When
+  // the user's cursor / selection isn't touching the span, the markers
+  // themselves get hidden via Decoration.replace, so the editor reads
+  // WYSIWYG. The malt.alwaysShowMarkdown setting disables the hide so
+  // markers are always visible (useful for plain-markdown purists).
+  //
+  // We deliberately only match **bold** and _italic_ — `*italic*` is
+  // skipped because it collides with bullet list markers, and `__bold__`
+  // gets the same shape as **bold** but is rarely typed by hand.
+
+  const BOLD_RE = /\*\*([^\s*][^*\n]*?[^\s*]|\S)\*\*/g;
+  const ITALIC_RE = /(?<![A-Za-z0-9_])_([^\s_][^_\n]*?[^\s_]|\S)_(?![A-Za-z0-9_])/g;
+
+  function getAlwaysShowMarkdown(): boolean {
+    return (
+      typeof localStorage !== "undefined" &&
+      localStorage.getItem("malt.alwaysShowMarkdown") === "1"
+    );
+  }
+
+  const mdInlineRedraw = StateEffect.define<void>();
+
+  const mdInlinePlugin = ViewPlugin.fromClass(
+    class {
+      decorations: DecorationSet;
+      constructor(view: EditorView) {
+        this.decorations = this.compute(view);
+      }
+      update(u: ViewUpdate) {
+        if (
+          u.docChanged ||
+          u.viewportChanged ||
+          u.selectionSet ||
+          u.transactions.some((tr) =>
+            tr.effects.some((e) => e.is(mdInlineRedraw))
+          )
+        ) {
+          this.decorations = this.compute(u.view);
+        }
+      }
+      compute(view: EditorView): DecorationSet {
+        type Add = { from: number; to: number; dec: Decoration };
+        const adds: Add[] = [];
+        const sel = view.state.selection.main;
+        const alwaysShow = getAlwaysShowMarkdown();
+        for (const { from, to } of view.visibleRanges) {
+          const text = view.state.doc.sliceString(from, to);
+          // Pass 1: **bold**
+          this.scan(adds, text, from, sel, BOLD_RE, "cm-md-bold", 2, alwaysShow);
+          // Pass 2: _italic_
+          this.scan(adds, text, from, sel, ITALIC_RE, "cm-md-italic", 1, alwaysShow);
+        }
+        adds.sort((a, b) => a.from - b.from || a.to - b.to);
+        const builder = new RangeSetBuilder<Decoration>();
+        for (const a of adds) builder.add(a.from, a.to, a.dec);
+        return builder.finish();
+      }
+      scan(
+        adds: { from: number; to: number; dec: Decoration }[],
+        text: string,
+        offset: number,
+        sel: { from: number; to: number },
+        re: RegExp,
+        cls: string,
+        markerLen: number,
+        alwaysShow: boolean,
+      ): void {
+        re.lastIndex = 0;
+        let m;
+        while ((m = re.exec(text)) !== null) {
+          const start = offset + m.index;
+          const end = start + m[0].length;
+          // Style the inner text. We mark the WHOLE span (markers
+          // included) so the visual bold/italic also colors the
+          // markers when they're visible — and so we can hide markers
+          // independently below without losing styling.
+          adds.push({ from: start, to: end, dec: Decoration.mark({ class: cls }) });
+          const cursorInside = sel.from <= end && sel.to >= start;
+          if (!cursorInside && !alwaysShow) {
+            adds.push({
+              from: start,
+              to: start + markerLen,
+              dec: Decoration.replace({}),
+            });
+            adds.push({
+              from: end - markerLen,
+              to: end,
+              dec: Decoration.replace({}),
+            });
+          }
+        }
+      }
+    },
+    {
+      decorations: (p) => p.decorations,
+    }
+  );
+
+  // Listen for the "always-show markdown" toggle changing in Settings —
+  // when it flips we need to recompute every editor's decorations.
+  function handleMdToggle() {
+    if (view) view.dispatch({ effects: mdInlineRedraw.of() });
+  }
 
   // ----- Hashtag plumbing ----------------------------------------------
   // Three ViewPlugins:
@@ -1284,6 +1515,10 @@
       // via class + inline style) wins. !important and inline styles on
       // the outer were both ineffective for the same reason.
       Prec.highest(wikilinkPlugin),
+      // Same Prec.highest trick as wikilinks: oneDark + lang-markdown
+      // already styles strong/em ranges, but we want our font-weight/style
+      // and marker-hiding to win, so we hoist precedence.
+      Prec.highest(mdInlinePlugin),
       tagWatcher,
       tagPillPlugin,
       tagLineHider,
@@ -1404,6 +1639,7 @@
 
   onMount(async () => {
     window.addEventListener("malt:vim-changed", handleVimChange);
+    window.addEventListener("malt:markdown-toggle-changed", handleMdToggle);
     // Use capture so the pill menu's Esc handling beats the parent's global
     // Esc-clears-search behavior in +page.svelte.
     window.addEventListener("keydown", handlePillMenuEsc, true);
@@ -1422,6 +1658,7 @@
 
   onDestroy(() => {
     window.removeEventListener("malt:vim-changed", handleVimChange);
+    window.removeEventListener("malt:markdown-toggle-changed", handleMdToggle);
     window.removeEventListener("keydown", handlePillMenuEsc, true);
     window.removeEventListener("keydown", handleLinkSuggestionsKey, true);
     unlistenNotes?.();
@@ -2039,5 +2276,11 @@
   }
   :global(.editor .cm-wikilink-broken:hover) {
     text-decoration-color: rgba(201, 122, 122, 1) !important;
+  }
+  :global(.editor .cm-md-bold) {
+    font-weight: 700;
+  }
+  :global(.editor .cm-md-italic) {
+    font-style: italic;
   }
 </style>

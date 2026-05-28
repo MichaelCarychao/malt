@@ -5,6 +5,7 @@
   import Settings from "$lib/Settings.svelte";
   import Editor from "$lib/Editor.svelte";
   import Linkbacks from "$lib/Linkbacks.svelte";
+  import BrewPane from "$lib/BrewPane.svelte";
   import { flushAllEditors } from "$lib/editorRegistry";
   import {
     type Tip,
@@ -95,6 +96,14 @@
   let editorWords = $state(0);
   let editorChars = $state(0);
   let secondaryPath = $state<string | null>(null);
+  // Secondary-pane mode: "editor" (default — shows the secondaryPath
+  // note in a normal editor) or "brew" (shows the AI brainstorm pane
+  // streaming from the primary note's body). When `brewActive` is
+  // true the BrewPane component takes over the secondary slot;
+  // `closeSecondary` also clears brew state.
+  let brewActive = $state(false);
+  let brewSourceTitle = $state("");
+  let brewSourceBody = $state("");
   let focusedPane = $state<"primary" | "secondary">("primary");
 
   // Export modal — per-note. Lives at +page.svelte because it operates on
@@ -1103,7 +1112,50 @@
   function closeSecondary() {
     secondaryPath = null;
     secondaryHistory = { stack: [], idx: -1 };
+    brewActive = false;
+    brewSourceTitle = "";
+    brewSourceBody = "";
     focusedPane = "primary";
+  }
+
+  // Cmd+Shift+B in the primary editor — open the brew pane and stream
+  // a brainstorm from the current note body. Reuses the secondary
+  // pane's real estate (closing it first if a regular note was open).
+  // `body` arrives from the editor pre-stringified.
+  function openBrewForPrimary(body: string) {
+    const title = selectedPath ? getTitleForPath(selectedPath) : "(untitled)";
+    secondaryPath = null;
+    secondaryHistory = { stack: [], idx: -1 };
+    brewSourceTitle = title;
+    brewSourceBody = body;
+    brewActive = true;
+    focusedPane = "secondary";
+  }
+  // Same as above but triggered from the secondary editor — brews on
+  // the secondary note's body. Output replaces the secondary's editor
+  // view; the primary stays put.
+  function openBrewForSecondary(body: string) {
+    const title = secondaryPath ? getTitleForPath(secondaryPath) : "(untitled)";
+    secondaryPath = null;
+    secondaryHistory = { stack: [], idx: -1 };
+    brewSourceTitle = title;
+    brewSourceBody = body;
+    brewActive = true;
+    focusedPane = "secondary";
+  }
+  // Append the streamed brew to the bottom of the source note. Writes
+  // the augmented file to disk; the watcher will reload editors that
+  // happen to be showing it.
+  async function appendBrewToSource(brew: string) {
+    if (!selectedPath) return;
+    try {
+      const current = await invoke<string>("read_note", { path: selectedPath });
+      const stamp = new Date().toLocaleString();
+      const augmented = `${current.trimEnd()}\n\n## Brew — ${stamp}\n\n${brew.trim()}\n`;
+      await invoke("save_note", { path: selectedPath, content: augmented });
+    } catch (e) {
+      console.error("appendBrewToSource failed", e);
+    }
   }
 
   // Bare click on a wikilink: stay in clicked pane. Cmd/Ctrl+click: open in
@@ -2061,9 +2113,10 @@
               onFinderReady={setPrimaryFinder}
               isEncrypted={selectedPath ? !!allNotes.find((n) => n.path === selectedPath)?.is_encrypted : false}
               password={selectedPath ? unlockedPasswords.get(selectedPath) ?? null : null}
+              onBrew={openBrewForPrimary}
             />
           </div>
-          {#if secondaryPath}
+          {#if secondaryPath || brewActive}
             <div
               class="vresize-handle"
               onmousedown={startSplitResize}
@@ -2077,39 +2130,51 @@
               onmousedowncapture={() => (focusedPane = "secondary")}
               onfocusincapture={() => (focusedPane = "secondary")}
             >
-              <div class="pane-title" class:active={focusedPane === "secondary"}>
-                <span class="pane-accent secondary-accent"></span>
-                <span class="pane-title-text" title="Double-click to rename" role="button" tabindex="-1"
-                  ondblclick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    if (secondaryPath) void openRename(secondaryPath);
-                  }}
-                >{getTitleForPath(secondaryPath)}</span>
-                <button
-                  class="pane-close"
-                  onclick={closeSecondary}
-                  title="Close secondary pane (Ctrl+W)"
-                  tabindex="-1"
-                  aria-label="Close secondary pane"
-                >×</button>
-              </div>
-              <Editor
-                path={secondaryPath}
-                query={query}
-                allNotes={allNotes}
-                onNavigate={openWikilinkFromSecondary}
-                onCreate={createFromSecondary}
-                onClose={closeSecondary}
-                onRename={(p) => void openRename(p)}
-                tagVocabulary={tagVocabulary}
-                allTags={allTagNames}
-                onTagClick={handleEditorTagClick}
-                onTagPromote={handleEditorTagPromote}
-                onFinderReady={setSecondaryFinder}
-                isEncrypted={secondaryPath ? !!allNotes.find((n) => n.path === secondaryPath)?.is_encrypted : false}
-                password={secondaryPath ? unlockedPasswords.get(secondaryPath) ?? null : null}
-              />
+              {#if !brewActive}
+                <div class="pane-title" class:active={focusedPane === "secondary"}>
+                  <span class="pane-accent secondary-accent"></span>
+                  <span class="pane-title-text" title="Double-click to rename" role="button" tabindex="-1"
+                    ondblclick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      if (secondaryPath) void openRename(secondaryPath);
+                    }}
+                  >{getTitleForPath(secondaryPath)}</span>
+                  <button
+                    class="pane-close"
+                    onclick={closeSecondary}
+                    title="Close secondary pane (Ctrl+W)"
+                    tabindex="-1"
+                    aria-label="Close secondary pane"
+                  >×</button>
+                </div>
+              {/if}
+              {#if brewActive}
+                <BrewPane
+                  noteTitle={brewSourceTitle}
+                  noteBody={brewSourceBody}
+                  onClose={closeSecondary}
+                  onAppendToSource={(brew) => void appendBrewToSource(brew)}
+                />
+              {:else}
+                <Editor
+                  path={secondaryPath}
+                  query={query}
+                  allNotes={allNotes}
+                  onNavigate={openWikilinkFromSecondary}
+                  onCreate={createFromSecondary}
+                  onClose={closeSecondary}
+                  onRename={(p) => void openRename(p)}
+                  tagVocabulary={tagVocabulary}
+                  allTags={allTagNames}
+                  onTagClick={handleEditorTagClick}
+                  onTagPromote={handleEditorTagPromote}
+                  onFinderReady={setSecondaryFinder}
+                  isEncrypted={secondaryPath ? !!allNotes.find((n) => n.path === secondaryPath)?.is_encrypted : false}
+                  password={secondaryPath ? unlockedPasswords.get(secondaryPath) ?? null : null}
+                  onBrew={openBrewForSecondary}
+                />
+              {/if}
             </div>
           {/if}
         </div>

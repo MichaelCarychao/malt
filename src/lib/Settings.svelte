@@ -66,8 +66,11 @@
     { keys: `${mod}+1 — ${mod}+9`,     action: "Activate saved search in that slot",           status: "live" },
     { keys: `Type # in editor`,        action: "Hashtag autocomplete (vocabulary + corpus)",   status: "live" },
     { keys: `${mod}+${shift}+L (in editor)`, action: "Suggest [[wikilinks]] for this note (review modal)", status: "live" },
+    { keys: `${mod}+${shift}+B (in editor)`, action: "Brew ideas — AI brainstorm in the secondary pane", status: "live" },
     { keys: `${mod}+${shift}+E`,             action: "Export current note (.md, .html, .epub, .txt, clipboard)", status: "live" },
     { keys: `${mod}+F`,                      action: "Find within current note (works from anywhere; press again to close)", status: "live" },
+    { keys: `${mod}+B (in editor)`,          action: "Toggle **bold** around selection / word at cursor",     status: "live" },
+    { keys: `${mod}+I (in editor)`,          action: "Toggle _italic_ around selection / word at cursor",     status: "live" },
     { keys: `tag:foo  -tag:foo`,       action: "Query operator: filter notes by hashtag",       status: "live" },
     { keys: `modified:<7d  <24h  >30d`, action: "Query operator: filter by recency",            status: "live" },
     { keys: `empty:true  empty:false`,  action: "Query operator: find blank notes (or only filled)", status: "live" },
@@ -80,9 +83,9 @@
     { keys: `${mod}+Click [[wikilink]]`, action: "Open linked note in the OTHER pane",        status: "live" },
     { keys: `${mod}+W (in editor)`,    action: "Close the secondary editor pane",             status: "live" },
     { keys: `Type [[ in editor`,       action: "Wikilink autocomplete dropdown",              status: "live" },
-    { keys: `${mod}+I (no selection)`,       action: "AI continue / infill at cursor (uses full doc)",  status: "live" },
-    { keys: `${mod}+I (with selection)`,     action: "AI rewrite selection — unpack, avoid clichés",    status: "live" },
-    { keys: `${mod}+I (re-press)`,           action: "Re-roll the current ghost suggestion",             status: "live" },
+    { keys: `${mod}+J (no selection)`,       action: "AI continue / infill at cursor (uses full doc)",  status: "live" },
+    { keys: `${mod}+J (with selection)`,     action: "AI rewrite selection — unpack, avoid clichés",    status: "live" },
+    { keys: `${mod}+J (re-press)`,           action: "Re-roll the current ghost suggestion",             status: "live" },
     { keys: `${mod}+Enter / Tab / Arrows / Click`, action: "Accept ghost completion",                    status: "live" },
     { keys: `Esc (in editor)`,               action: "Decline completion (or vim normal mode)",          status: "live" },
   ];
@@ -128,7 +131,16 @@
   let tagVocabularyError = $state<string | null>(null);
   let tagVocabularySaved = $state(false);
   let appVersion = $state("");
-  type SettingsTab = "general" | "shortcuts" | "searches" | "tags" | "ai" | "security" | "tips" | "about";
+  type SettingsTab =
+    | "general"
+    | "shortcuts"
+    | "searches"
+    | "tags"
+    | "ai"
+    | "prompts"
+    | "security"
+    | "tips"
+    | "about";
   function readInitialTab(): SettingsTab {
     if (typeof localStorage !== "undefined") {
       const t = localStorage.getItem("malt.settings.tab");
@@ -138,6 +150,7 @@
         t === "searches" ||
         t === "tags" ||
         t === "ai" ||
+        t === "prompts" ||
         t === "security" ||
         t === "tips" ||
         t === "about"
@@ -240,6 +253,93 @@
   let repromptOnBlur = $state(true);
   let securityLoaded = $state(false);
 
+  // Always-show-markdown toggle (Editor reveals **/_ markers even when
+  // the cursor isn't on the styled span). Stored in localStorage so the
+  // Editor can read it synchronously without an IPC round-trip.
+  let alwaysShowMarkdown = $state(
+    typeof localStorage !== "undefined" &&
+      localStorage.getItem("malt.alwaysShowMarkdown") === "1",
+  );
+  function toggleAlwaysShowMarkdown(e: Event) {
+    const target = e.target as HTMLInputElement;
+    alwaysShowMarkdown = target.checked;
+    if (typeof localStorage !== "undefined") {
+      if (alwaysShowMarkdown) localStorage.setItem("malt.alwaysShowMarkdown", "1");
+      else localStorage.removeItem("malt.alwaysShowMarkdown");
+    }
+    // Tell every open editor to recompute its bold/italic decorations.
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("malt:markdown-toggle-changed"));
+    }
+  }
+
+  // Prompts tab state. The PromptInfo shape comes from the backend
+  // verbatim; we keep an editable mirror per prompt so the textarea
+  // tracks user edits before they hit "save".
+  type PromptKey =
+    | "tag"
+    | "entities"
+    | "completion"
+    | "rewrite"
+    | "brew";
+  type PromptInfo = {
+    key: PromptKey;
+    label: string;
+    description: string;
+    default: string;
+    current: string;
+    is_overridden: boolean;
+  };
+  let promptsLoaded = $state(false);
+  let promptsList = $state<PromptInfo[]>([]);
+  let promptDrafts = $state<Record<string, string>>({});
+  let promptSaveStatus = $state<Record<string, "saved" | "error" | null>>({});
+
+  async function loadPrompts() {
+    try {
+      const list = await invoke<PromptInfo[]>("list_prompts");
+      promptsList = list;
+      const drafts: Record<string, string> = {};
+      for (const p of list) drafts[p.key] = p.current;
+      promptDrafts = drafts;
+    } catch {
+      promptsList = [];
+    } finally {
+      promptsLoaded = true;
+    }
+  }
+
+  async function savePrompt(key: PromptKey) {
+    const content = promptDrafts[key] ?? "";
+    try {
+      await invoke("set_prompt", { key, content });
+      promptSaveStatus = { ...promptSaveStatus, [key]: "saved" };
+      // Re-load to refresh is_overridden flag + current text.
+      await loadPrompts();
+      // Clear the "saved" toast after 2s.
+      setTimeout(() => {
+        promptSaveStatus = { ...promptSaveStatus, [key]: null };
+      }, 2000);
+    } catch (e) {
+      console.error("save_prompt failed", e);
+      promptSaveStatus = { ...promptSaveStatus, [key]: "error" };
+    }
+  }
+
+  async function resetPrompt(key: PromptKey) {
+    try {
+      await invoke("reset_prompt", { key });
+      await loadPrompts();
+      promptSaveStatus = { ...promptSaveStatus, [key]: "saved" };
+      setTimeout(() => {
+        promptSaveStatus = { ...promptSaveStatus, [key]: null };
+      }, 2000);
+    } catch (e) {
+      console.error("reset_prompt failed", e);
+      promptSaveStatus = { ...promptSaveStatus, [key]: "error" };
+    }
+  }
+
   const HAIKU = "claude-haiku-4-5";
   const SONNET = "claude-sonnet-4-6";
   const OPUS = "claude-opus-4-7";
@@ -315,6 +415,9 @@
     }
     if (open && !securityLoaded) {
       void loadSecurityConfig();
+    }
+    if (open && !promptsLoaded) {
+      void loadPrompts();
     }
     if (open) {
       // Tips state lives in localStorage; cheap to re-read every open
@@ -513,6 +616,7 @@
           <button class="panel-tab" class:active={activeTab === "searches"} onclick={() => (activeTab = "searches")}>Saved searches</button>
           <button class="panel-tab" class:active={activeTab === "tags"} onclick={() => (activeTab = "tags")}>Tags &amp; queries</button>
           <button class="panel-tab" class:active={activeTab === "ai"} onclick={() => (activeTab = "ai")}>AI</button>
+          <button class="panel-tab" class:active={activeTab === "prompts"} onclick={() => (activeTab = "prompts")}>Prompts</button>
           <button class="panel-tab" class:active={activeTab === "security"} onclick={() => (activeTab = "security")}>Security</button>
           <button class="panel-tab" class:active={activeTab === "tips"} onclick={() => (activeTab = "tips")}>Tips</button>
           <button class="panel-tab" class:active={activeTab === "about"} onclick={() => (activeTab = "about")}>About</button>
@@ -533,6 +637,30 @@
         {:else}
           <p class="hint-text">Off. Standard editor bindings apply.</p>
         {/if}
+      </section>
+      <section>
+        <h3>markdown display</h3>
+        <table>
+          <tbody>
+            <tr>
+              <td class="keys">**/_ markers</td>
+              <td class="action">
+                <label class="toggle-label">
+                  <input
+                    type="checkbox"
+                    checked={alwaysShowMarkdown}
+                    onchange={toggleAlwaysShowMarkdown}
+                  />
+                  {alwaysShowMarkdown ? "always shown" : "hidden when cursor is away"} —
+                  {alwaysShowMarkdown
+                    ? "every ** and _ stays visible while you edit."
+                    : "renders WYSIWYG; markers reveal when you touch the styled word."}
+                </label>
+              </td>
+              <td class="status"></td>
+            </tr>
+          </tbody>
+        </table>
       </section>
       <section>
         <h3>notes folder</h3>
@@ -789,6 +917,59 @@
             </tr>
           </tbody>
         </table>
+      </section>
+      {/if}
+
+      {#if activeTab === "prompts"}
+      <section>
+        <h3>prompts</h3>
+        <p class="hint-text">
+          Every system prompt malt sends to Claude. Edit any of them to
+          customize behavior, save to apply, or reset to restore the
+          shipped default. Overrides live in
+          <span class="op">~/.config/malt/prompts.json</span>.
+        </p>
+        {#if !promptsLoaded}
+          <p class="hint-text">loading…</p>
+        {:else}
+          {#each promptsList as p (p.key)}
+            <div class="prompt-card">
+              <div class="prompt-head">
+                <span class="prompt-title">
+                  {p.label}
+                  {#if p.is_overridden}
+                    <span class="prompt-badge">customized</span>
+                  {/if}
+                </span>
+                <span class="prompt-actions">
+                  {#if promptSaveStatus[p.key] === "saved"}
+                    <span class="vocab-status">saved</span>
+                  {:else if promptSaveStatus[p.key] === "error"}
+                    <span class="vocab-status err">error</span>
+                  {/if}
+                  <button
+                    class="ai-btn"
+                    onclick={() => void savePrompt(p.key)}
+                    disabled={promptDrafts[p.key] === p.current}
+                  >save</button>
+                  <button
+                    class="ai-btn"
+                    onclick={() => void resetPrompt(p.key)}
+                    disabled={!p.is_overridden}
+                    title="Drop your override; revert to the default malt ships with"
+                  >reset to default</button>
+                </span>
+              </div>
+              <div class="prompt-desc">{p.description}</div>
+              <textarea
+                class="prompt-textarea"
+                bind:value={promptDrafts[p.key]}
+                spellcheck="false"
+                rows="10"
+              ></textarea>
+            </div>
+          {/each}
+        {/if}
       </section>
       {/if}
 
@@ -1383,5 +1564,67 @@
     display: flex;
     gap: 4px;
     flex-shrink: 0;
+  }
+  .prompt-card {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid #2a2a2a;
+  }
+  .prompt-card:first-of-type {
+    border-top: 0;
+    margin-top: 4px;
+    padding-top: 0;
+  }
+  .prompt-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .prompt-title {
+    flex: 1;
+    color: #e0e0e0;
+    font-size: 12px;
+  }
+  .prompt-badge {
+    color: #d6b06a;
+    background: rgba(214, 176, 106, 0.1);
+    border: 1px solid rgba(214, 176, 106, 0.3);
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 1px 6px;
+    border-radius: 2px;
+    margin-left: 6px;
+    vertical-align: middle;
+  }
+  .prompt-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+  .prompt-desc {
+    color: #888;
+    font-size: 11px;
+    line-height: 1.4;
+    margin-bottom: 6px;
+  }
+  .prompt-textarea {
+    width: 100%;
+    box-sizing: border-box;
+    background: #0f0f0f;
+    border: 1px solid #333;
+    color: #cfcfcf;
+    font-family: "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.5;
+    padding: 8px 10px;
+    outline: 0;
+    resize: vertical;
+    min-height: 100px;
+  }
+  .prompt-textarea:focus {
+    border-color: #555;
   }
 </style>

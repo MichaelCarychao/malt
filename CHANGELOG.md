@@ -4,6 +4,45 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.3.0 — 2026-05-28
+
+The "brew" half of the tagline arrives.
+
+- **Brew Ideas (Cmd/Ctrl+Shift+B in the editor).** Streams a
+  brainstorm from Claude into the secondary pane: three sections —
+  threads to pull, where this connects, a few sharper framings.
+  Read-only view with `re-run` / `copy` / `append` actions. The
+  "append" button folds the brew into the source note under a
+  `## Brew — [timestamp]` heading. Background: AI gets the note body
+  (with malt-private markup stripped) plus a tight prompt that asks
+  for scannable, action-oriented brainstorming and tells it to bail
+  with a one-line message if the note is too thin.
+- **Bold and italic markdown shortcuts.** ⌘B wraps the selection (or
+  the word at the cursor) in `**…**`; ⌘I wraps in `_…_`. Toggling
+  off works either way — the action detects existing wrappers and
+  strips them.
+- **WYSIWYG markdown rendering for bold / italic.** A new
+  Prec.highest decoration plugin styles `**X**` and `_X_` spans
+  visually (font-weight / font-style) and hides the `**` / `_`
+  markers when the cursor isn't touching the span. Settings →
+  general → "**/_ markers" toggle disables the hiding for plain-text
+  purists. Same Prec trick as wikilinks: the markdown highlighter's
+  inner span would otherwise win the visual.
+- **AI ghost moved from Cmd+I to Cmd+J.** The italics-on-Cmd+I
+  convention is too entrenched in markdown editors to ignore;
+  hijacking it for AI was a non-starter. Cmd+J takes over AI
+  continue / rewrite / re-roll. Settings shortcut table + tip bank
+  + on-screen labels all updated.
+- **Prompts management (Settings → Prompts).** Every system prompt
+  malt sends to Claude is now listed, editable, and resettable per
+  prompt. User overrides live in
+  `~/.config/malt/prompts.json`; defaults ship in the binary so
+  `reset to default` always works. Backend factored out into a
+  dedicated `prompts.rs` module with a `PromptKey` enum;
+  `ai.rs` reads via `prompts::get(...)` instead of compile-time
+  constants. Covers tag / entities / completion / rewrite / brew
+  out of the gate.
+
 ## 0.2.10 — 2026-05-28
 
 - **Wikilink colors fixed at the root cause.** Three tries in, the

@@ -110,7 +110,7 @@ export const TIPS: Tip[] = [
     category: "shortcuts",
     headline: "Have Claude finish my thought",
     story:
-      "⌘I in the editor asks Claude to continue from your cursor. Select text first and ⌘I rewrites that selection. Re-press to re-roll.",
+      "⌘J in the editor asks Claude to continue from your cursor. Select text first and ⌘J rewrites that selection. Re-press to re-roll.",
   },
   {
     id: "s-esc-clear",
@@ -186,14 +186,14 @@ export const TIPS: Tip[] = [
     category: "ai",
     headline: "Accept a ghost suggestion three different ways",
     story:
-      "After ⌘I, accept the ghost with Tab, Enter, or an arrow key. Esc declines. The cursor lands at the end of the inserted text.",
+      "After ⌘J, accept the ghost with Tab, Enter, or an arrow key. Esc declines. The cursor lands at the end of the inserted text.",
   },
   {
     id: "ai-model-toggle",
     category: "ai",
     headline: "Pick fast, smart, or most-literary Claude",
     story:
-      "Settings → AI switches between Haiku (fast/cheap), Sonnet (better at long context), and Opus (most literary attention). Same ⌘I trigger.",
+      "Settings → AI switches between Haiku (fast/cheap), Sonnet (better at long context), and Opus (most literary attention). Same ⌘J trigger.",
   },
   {
     id: "ai-suggest-wikilinks",
@@ -208,6 +208,20 @@ export const TIPS: Tip[] = [
     headline: "Let malt tag my notes in the background",
     story:
       "Settings → AI → \"auto-tag\" quietly proposes inline #hashtags for each note. Off by default. Skips encrypted notes for obvious reasons.",
+  },
+  {
+    id: "ai-brew",
+    category: "ai",
+    headline: "Brew a note into next-step questions",
+    story:
+      "⌘⇧B in the editor opens the secondary pane and streams a brainstorm: threads to pull, connections to make, sharper framings. Click \"append\" to fold it into the note.",
+  },
+  {
+    id: "ai-prompts",
+    category: "ai",
+    headline: "Read and edit every prompt malt sends",
+    story:
+      "Settings → Prompts surfaces every system prompt Claude sees. Edit any of them; \"reset to default\" reverts. Overrides live in plain JSON.",
   },
 
   // ── security ────────────────────────────────────────────────────
