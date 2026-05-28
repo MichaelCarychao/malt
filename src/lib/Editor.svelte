@@ -39,7 +39,25 @@
     type CompletionResult,
     type Completion,
   } from "@codemirror/autocomplete";
-  import { search, searchKeymap, openSearchPanel } from "@codemirror/search";
+  import {
+    search,
+    searchKeymap,
+    openSearchPanel,
+    closeSearchPanel,
+  } from "@codemirror/search";
+
+  // Toggle CodeMirror's search panel: close if open, open if not.
+  // Detection via DOM presence of `.cm-search` (the panel form's class)
+  // — there's no exported "isPanelOpen" selector in @codemirror/search.
+  function toggleSearchPanel(view: EditorView): void {
+    const isOpen = !!view.dom.querySelector(".cm-search");
+    if (isOpen) {
+      closeSearchPanel(view);
+    } else {
+      view.focus();
+      openSearchPanel(view);
+    }
+  }
   import { markdown } from "@codemirror/lang-markdown";
   import { oneDark } from "@codemirror/theme-one-dark";
   import { vim, Vim } from "@replit/codemirror-vim";
@@ -1167,6 +1185,20 @@
       // search() adds the find/replace panel; searchKeymap binds Cmd+F /
       // Cmd+G / Cmd+Shift+G / Cmd+Alt+F (replace) etc. inside the editor.
       search({ top: true }),
+      // Override Mod-f with a TOGGLE before searchKeymap's open-only binding.
+      // Higher Prec + returning true short-circuits the searchKeymap version
+      // so a second press closes the panel instead of just refocusing it.
+      Prec.high(
+        keymap.of([
+          {
+            key: "Mod-f",
+            run: (v) => {
+              toggleSearchPanel(v);
+              return true;
+            },
+          },
+        ])
+      ),
       keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap, ...searchKeymap]),
       markdown(),
       oneDark,
@@ -1213,15 +1245,12 @@
     }
 
     onReady?.(view);
-    // Hand the parent a function that focuses + opens this view's search
-    // panel. The global Cmd+F handler uses it so search works from
-    // anywhere (sidebar, search bar, etc.), not just inside the editor.
+    // Hand the parent a function that TOGGLES this view's search panel.
+    // Used by the global Cmd+F forwarder; closing on a second press
+    // keeps behavior consistent with the in-editor binding.
     if (onFinderReady) {
       const v = view;
-      onFinderReady(() => {
-        v.focus();
-        openSearchPanel(v);
-      });
+      onFinderReady(() => toggleSearchPanel(v));
     }
   }
 

@@ -3211,7 +3211,7 @@ checksum = "670fdfda89751bc4a84ac13eaa63e205cf0fd22b4c9a5fbfa085b63c1f1d3a30"
 
 [[package]]
 name = "malt"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "dirs",
  "epub-builder",

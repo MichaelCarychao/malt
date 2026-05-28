@@ -4,6 +4,15 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.2.6 — 2026-05-28
+
+- **Cmd/Ctrl+F now toggles the find panel** instead of always opening
+  it. Second press closes (same as Esc). Applied both inside the
+  editor (override of CodeMirror's default Mod-f via `Prec.high`) and
+  to the global forwarder, so the behavior is consistent regardless
+  of where focus lives. The `onFinderReady` callback now exposes a
+  toggle rather than an opener.
+
 ## 0.2.5 — 2026-05-28
 
 UX round: navigability, discoverability, sync awareness.
