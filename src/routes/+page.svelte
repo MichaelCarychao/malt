@@ -14,6 +14,7 @@
     modified: number;
     tags?: string[];
     is_conflict?: boolean;
+    is_empty?: boolean;
     title_matches?: [number, number][];
     snippet_matches?: [number, number][];
   };
@@ -716,12 +717,43 @@
     void scrollSelectedIntoView("nearest");
   }
 
-  // List row click — bare opens in primary, Cmd/Ctrl+click opens in secondary.
+  // Strip Dropbox/Syncthing conflict suffixes from a stem to recover the
+  // canonical filename. Returns null if the name doesn't look like a
+  // conflict. Mirrors `is_conflict_filename` in notes.rs.
+  function canonicalNameFromConflict(path: string): string | null {
+    const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+    const dir = slash >= 0 ? path.slice(0, slash + 1) : "";
+    const base = slash >= 0 ? path.slice(slash + 1) : path;
+    if (!base.toLowerCase().endsWith(".md")) return null;
+    const stem = base.slice(0, -3);
+
+    // Syncthing: "name.sync-conflict-YYYYMMDD-HHMMSS-XXXXXXX"
+    const sync = stem.match(/^(.+?)\.sync-conflict-/i);
+    if (sync) return dir + sync[1] + ".md";
+
+    // Dropbox / generic parenthesized conflict marker near the end
+    const paren = stem.match(/^(.+?)\s*\([^)]*conflict[^)]*\)\s*$/i);
+    if (paren) return dir + paren[1] + ".md";
+
+    return null;
+  }
+
+  // List row click — bare opens in primary. Cmd/Ctrl+click opens in
+  // secondary. Bare click on a conflict file ALSO opens the canonical
+  // original in the secondary pane (if it exists) for side-by-side merge.
   function handleNoteClick(e: MouseEvent, path: string) {
     if (e.metaKey || e.ctrlKey) {
       openInSecondary(path);
-    } else {
-      openNote(path);
+      return;
+    }
+    openNote(path);
+    const note = allNotes.find((n) => n.path === path);
+    if (note?.is_conflict) {
+      const canonical = canonicalNameFromConflict(path);
+      if (canonical && allNotes.some((n) => n.path === canonical) && canonical !== path) {
+        openInSecondary(canonical);
+        focusedPane = "primary"; // keep focus on the conflict for editing
+      }
     }
   }
 
@@ -1489,6 +1521,7 @@
           class:selected={note.path === selectedPath}
           class:secondary={note.path === secondaryPath && note.path !== selectedPath}
           class:conflict={note.is_conflict}
+          class:empty-note={note.is_empty}
           onclick={(e) => handleNoteClick(e, note.path)}
           ondblclick={(e) => {
             e.preventDefault();
@@ -1650,6 +1683,12 @@
     updateState.kind === "error" ? `error: ${updateState.message}` : ""
   }
   canCheckForUpdates={updateState.kind !== "checking" && updateState.kind !== "downloading" && updateState.kind !== "installing"}
+  savedSearches={savedSearches}
+  onActivateSavedSearch={(s) => {
+    settingsOpen = false;
+    activateSavedSearch(s);
+  }}
+  onDeleteSavedSearch={(id) => void deleteSavedSearch(id)}
 />
 
 {#if rowMenu}
@@ -2448,6 +2487,22 @@
   }
   .note.conflict.selected .note-title {
     color: #ffc879;
+  }
+  /* Empty notes: dim the title so they recede until you intentionally fill
+     them. Selected state still wins to make the focused row readable. */
+  .note.empty-note .note-title {
+    color: #888;
+    font-style: italic;
+  }
+  .note.empty-note.selected .note-title {
+    color: #c8c8c8;
+    font-style: italic;
+  }
+  .note.empty-note .snippet::after {
+    content: "empty";
+    color: #555;
+    font-style: italic;
+    font-size: 10px;
   }
   .conflict-pill {
     background: rgba(232, 163, 61, 0.1);

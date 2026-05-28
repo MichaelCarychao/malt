@@ -3,16 +3,26 @@
   import { invoke } from "@tauri-apps/api/core";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
+  // Saved searches: passed in from parent so we don't duplicate the list
+  // fetching. Each entry has { id, name, query, slot }.
+  type SavedSearchRef = { id: string; name: string; query: string; slot: number | null };
+
   let {
     open = $bindable(),
     onCheckForUpdates,
     updateStatusLabel = "",
     canCheckForUpdates = true,
+    savedSearches = [],
+    onActivateSavedSearch,
+    onDeleteSavedSearch,
   }: {
     open: boolean;
     onCheckForUpdates?: () => void;
     updateStatusLabel?: string;
     canCheckForUpdates?: boolean;
+    savedSearches?: SavedSearchRef[];
+    onActivateSavedSearch?: (s: SavedSearchRef) => void;
+    onDeleteSavedSearch?: (id: string) => void;
   } = $props();
 
   const isMac = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
@@ -37,9 +47,10 @@
     { keys: `Type # in editor`,        action: "Hashtag autocomplete (vocabulary + corpus)",   status: "live" },
     { keys: `${mod}+${shift}+L (in editor)`, action: "Suggest [[wikilinks]] for this note (review modal)", status: "live" },
     { keys: `${mod}+${shift}+E`,             action: "Export current note (.md, .html, .epub, .txt, clipboard)", status: "live" },
-    { keys: `${mod}+F`,                      action: "Find within the current note (works from anywhere — forwards into the focused pane)", status: "live" },
+    { keys: `${mod}+F`,                      action: "Find within current note (works from anywhere; press again to close)", status: "live" },
     { keys: `tag:foo  -tag:foo`,       action: "Query operator: filter notes by hashtag",       status: "live" },
     { keys: `modified:<7d  <24h  >30d`, action: "Query operator: filter by recency",            status: "live" },
+    { keys: `empty:true  empty:false`,  action: "Query operator: find blank notes (or only filled)", status: "live" },
     { keys: `Enter (in search)`,       action: "Exact title → open; arrowed → open; else create new note", status: "live" },
     { keys: `Esc`,                     action: "Clear query + focus search (except in editor / modals)", status: "live" },
     { keys: `Tab (in search)`,         action: "Jump to editor",                              status: "live" },
@@ -78,8 +89,22 @@
   let tagVocabularyError = $state<string | null>(null);
   let tagVocabularySaved = $state(false);
   let appVersion = $state("");
-  type SettingsTab = "general" | "shortcuts" | "tags" | "ai" | "about";
-  let activeTab = $state<SettingsTab>("general");
+  type SettingsTab = "general" | "shortcuts" | "searches" | "tags" | "ai" | "about";
+  function readInitialTab(): SettingsTab {
+    if (typeof localStorage !== "undefined") {
+      const t = localStorage.getItem("malt.settings.tab");
+      if (t === "general" || t === "shortcuts" || t === "searches" || t === "tags" || t === "ai" || t === "about") {
+        return t;
+      }
+    }
+    return "general";
+  }
+  let activeTab = $state<SettingsTab>(readInitialTab());
+  $effect(() => {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("malt.settings.tab", activeTab);
+    }
+  });
 
   // Pull the live version from the backend at mount — single source of truth
   // is Cargo.toml (env! macro reads CARGO_PKG_VERSION at compile time).
@@ -352,6 +377,7 @@
         <nav class="panel-tabs">
           <button class="panel-tab" class:active={activeTab === "general"} onclick={() => (activeTab = "general")}>General</button>
           <button class="panel-tab" class:active={activeTab === "shortcuts"} onclick={() => (activeTab = "shortcuts")}>Shortcuts</button>
+          <button class="panel-tab" class:active={activeTab === "searches"} onclick={() => (activeTab = "searches")}>Saved searches</button>
           <button class="panel-tab" class:active={activeTab === "tags"} onclick={() => (activeTab = "tags")}>Tags &amp; queries</button>
           <button class="panel-tab" class:active={activeTab === "ai"} onclick={() => (activeTab = "ai")}>AI</button>
           <button class="panel-tab" class:active={activeTab === "about"} onclick={() => (activeTab = "about")}>About</button>
@@ -446,6 +472,72 @@
       {/if}
       {/if}
 
+      {#if activeTab === "searches"}
+      <section>
+        <h3>saved searches</h3>
+        <p class="hint-text">
+          Saved searches are queries you've named so you can recall them with one keystroke.
+          They live in <span class="op">~/malt/.malt/saved-searches.json</span> and are written
+          to plain text — no DB, no cloud.
+        </p>
+        <table class="query-ops">
+          <tbody>
+            <tr>
+              <td class="op">{mod}+S</td>
+              <td>With focus in the search bar, save the current query. A small prompt asks for a name.</td>
+            </tr>
+            <tr>
+              <td class="op">{mod}+1 — {mod}+9</td>
+              <td>Activate the saved search bound to that slot. Slots are assigned in the order you save.</td>
+            </tr>
+            <tr>
+              <td class="op">delete</td>
+              <td>Remove a saved search from the list below; its slot is freed up for the next save.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        {#if savedSearches.length === 0}
+          <p class="hint-text" style="margin-top: 10px;">
+            <em>No saved searches yet.</em> Try typing
+            <span class="op">tag:draft modified:&lt;7d</span> in the search bar, then press {mod}+S.
+          </p>
+        {:else}
+          <table class="searches-table">
+            <thead>
+              <tr>
+                <th class="keys">slot</th>
+                <th class="action">name &amp; query</th>
+                <th class="status"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each savedSearches as s (s.id)}
+                <tr>
+                  <td class="keys">{s.slot != null ? `${mod}+${s.slot}` : "—"}</td>
+                  <td class="action search-row">
+                    <button
+                      class="search-name"
+                      onclick={() => onActivateSavedSearch?.(s)}
+                      title="Activate this search"
+                    >{s.name}</button>
+                    <span class="search-query">{s.query}</span>
+                  </td>
+                  <td class="status">
+                    <button
+                      class="ai-btn"
+                      onclick={() => onDeleteSavedSearch?.(s.id)}
+                      title="Delete saved search"
+                    >del</button>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+      </section>
+      {/if}
+
       {#if activeTab === "ai"}
       <section>
         <h3>ai (claude)</h3>
@@ -532,7 +624,7 @@
                     onchange={toggleTagging}
                     disabled={!configLoaded}
                   />
-                  {taggingEnabled ? "on" : "off"} — write YAML frontmatter with topic tags
+                  {taggingEnabled ? "on" : "off"} — append inline #hashtags at the bottom of each note
                 </label>
               </td>
               <td class="status"></td>
@@ -943,5 +1035,52 @@
     background: rgba(108, 182, 255, 0.06);
     padding: 0 4px;
     border-radius: 3px;
+  }
+  .searches-table {
+    width: 100%;
+    margin-top: 12px;
+    border-top: 1px solid #2a2a2a;
+  }
+  .searches-table th {
+    color: #555;
+    font-weight: normal;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    text-align: left;
+    padding: 8px 0 4px;
+    border-bottom: 1px solid #2a2a2a;
+  }
+  .searches-table th.status {
+    text-align: right;
+  }
+  .searches-table td {
+    padding: 5px 0;
+    border-bottom: 1px solid #1f1f1f;
+    vertical-align: middle;
+  }
+  .search-row {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .search-name {
+    background: transparent;
+    border: 0;
+    color: #d6b06a;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    padding: 0;
+    text-align: left;
+  }
+  .search-name:hover {
+    text-decoration: underline;
+  }
+  .search-query {
+    color: #888;
+    font-family: "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11px;
   }
 </style>

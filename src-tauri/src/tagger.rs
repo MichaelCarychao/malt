@@ -64,7 +64,7 @@ impl Tagger {
         }
 
         let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        let (mut fm, body) = frontmatter::split(&content);
+        let (_fm, body) = frontmatter::split(&content);
         let body_trimmed = body.trim();
         if body_trimmed.is_empty() {
             return Ok(false);
@@ -86,17 +86,12 @@ impl Tagger {
         let body_for_api: String = cleaned.chars().take(MAX_BODY_CHARS).collect();
         let new_tags = ai::propose_tags(&key, &body_for_api).await?;
 
-        // Merge: preserve any user-added tags, append novel proposed ones.
-        let mut tags = fm.tags.take().unwrap_or_default();
-        for t in new_tags {
-            if !tags.iter().any(|x| x.eq_ignore_ascii_case(&t)) {
-                tags.push(t);
-            }
-        }
-        tags.truncate(8);
-        fm.tags = Some(tags);
-
-        let new_content = frontmatter::merge(&fm, body);
+        // Pivot from YAML to inline: merge_tags_into_file unions the
+        // proposed tags with any existing tags (inline + canonical line +
+        // legacy YAML), wipes the legacy YAML tag list, and writes a fresh
+        // canonical tag line at the bottom of the body. The user's editor
+        // will hide that line and surface the tags as pills.
+        let new_content = crate::tags::merge_tags_into_file(&content, &new_tags);
         std::fs::write(&path, &new_content).map_err(|e| e.to_string())?;
 
         {

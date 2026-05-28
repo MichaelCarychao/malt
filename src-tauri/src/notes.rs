@@ -24,6 +24,13 @@ pub struct NoteSummary {
     /// Renders a badge in the sidebar so the user can resolve manually.
     #[serde(default)]
     pub is_conflict: bool,
+    /// True when the body has no meaningful content — fresh stub notes
+    /// or notes whose entire body has been deleted. We strip malt-private
+    /// markup (frontmatter, canonical tag line, inline #tags, [[link]]
+    /// brackets) before checking, so a note that's *only* tags counts
+    /// as empty.
+    #[serde(default)]
+    pub is_empty: bool,
     #[serde(default)]
     pub title_matches: Vec<(usize, usize)>,
     #[serde(default)]
@@ -335,6 +342,10 @@ pub fn list_notes() -> Vec<NoteSummary> {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let is_conflict = is_conflict_filename(&title);
+        // Strip private markup before checking emptiness so a note that's
+        // *only* tags / wikilinks still counts as empty content-wise.
+        let stripped = crate::tags::strip_tags_for_ai(body);
+        let is_empty = stripped.trim().is_empty();
         notes.push(NoteSummary {
             path: path.to_string_lossy().to_string(),
             title,
@@ -342,6 +353,7 @@ pub fn list_notes() -> Vec<NoteSummary> {
             modified,
             tags,
             is_conflict,
+            is_empty,
             title_matches: Vec::new(),
             snippet_matches: Vec::new(),
         });

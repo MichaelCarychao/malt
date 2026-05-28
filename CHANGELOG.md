@@ -12,6 +12,46 @@ bumps for meaningful feature batches, patch bumps for fixes.
   to the global forwarder, so the behavior is consistent regardless
   of where focus lives. The `onFinderReady` callback now exposes a
   toggle rather than an opener.
+- **Empty-note awareness, three places.**
+  - Sidebar rows for blank notes get a muted-italic title and a
+    discreet `empty` glyph in the snippet column. Selection still
+    highlights cleanly without being garish.
+  - Wikilinks now have three states instead of two: live (default),
+    `cm-wikilink-empty` (muted + italic, points to a note that exists
+    but is blank), and `cm-wikilink-broken` (red, points nowhere). Lets
+    you see at a glance which stubs are still unwritten.
+  - New query operator `empty:true` / `empty:false` filters the note
+    list to just blank (or just non-blank) notes. Composable with the
+    rest — `empty:true modified:<7d` finds recent stubs you started
+    but didn't get back to.
+- **Cmd/Ctrl+Shift+L "create new notes if needed" checkbox.** The
+  link-suggestions modal can now materialize each suggested wikilink
+  as an empty `.md` file in one shot instead of leaving you with red
+  broken links to chase. Preference is persisted in `localStorage`;
+  off by default to keep the original review-first flow intact.
+- **Saved searches: dedicated Settings tab.** The shortcuts table is
+  too dense to learn from — new "Saved searches" tab explains how
+  `Cmd+S` works, how the `Cmd+1`–`Cmd+9` slots get assigned, and
+  shows your current list with one-click activate + delete. The tab
+  closes settings and runs the search when you click a name.
+- **Settings tab persistence.** The active tab is remembered across
+  sessions in `localStorage` (`malt.settings.tab`) — open settings and
+  you land where you left off.
+- **Sync conflict files auto-open their canonical sibling in the
+  secondary pane.** Click a Dropbox `(conflicted copy …)` or Syncthing
+  `.sync-conflict-…` row and the original opens beside it so you can
+  diff and merge by eye, then delete the conflict file. The pattern
+  detection lives in `canonicalNameFromConflict()` and matches both
+  vendors.
+- **AI tagger pivots from YAML frontmatter to inline hashtags.** The
+  background tagger now appends a `#tag` line at the bottom of each
+  note instead of writing a YAML `tags:` block at the top. Existing
+  YAML tags are merged in and the YAML key is wiped — single source
+  of truth is the canonical inline line, which the editor hides and
+  surfaces as pills. Tagger is still off by default; toggle lives in
+  Settings → AI. The AI section's label now reads "append inline
+  #hashtags at the bottom of each note" so the behavior matches the
+  copy.
 
 ## 0.2.5 — 2026-05-28
 

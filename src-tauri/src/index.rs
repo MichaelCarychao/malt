@@ -16,6 +16,9 @@ pub struct NoteIndex {
     body_field: Field,
     tags_field: Field,
     modified_field: Field,
+    /// 0 when the note has meaningful content, 1 when it's empty (no body
+    /// after stripping malt-private markup). Used for `empty:true` queries.
+    empty_field: Field,
     rebuild_lock: Mutex<()>,
 }
 
@@ -30,6 +33,7 @@ impl NoteIndex {
         // add_text() calls per doc.
         let tags_field = sb.add_text_field("tags", STRING);
         let modified_field = sb.add_u64_field("modified", INDEXED | STORED | FAST);
+        let empty_field = sb.add_u64_field("empty", INDEXED | STORED | FAST);
         let schema = sb.build();
         let index = Index::create_in_ram(schema);
         let reader = index
@@ -44,6 +48,7 @@ impl NoteIndex {
             body_field,
             tags_field,
             modified_field,
+            empty_field,
             rebuild_lock: Mutex::new(()),
         })
     }
@@ -65,6 +70,7 @@ impl NoteIndex {
                 doc.add_text(self.tags_field, tag);
             }
             doc.add_u64(self.modified_field, note.modified);
+            doc.add_u64(self.empty_field, if note.is_empty { 1 } else { 0 });
             writer.add_document(doc)?;
         }
         writer.commit()?;
@@ -135,6 +141,14 @@ impl NoteIndex {
                     Bound::Included(Term::from_field_u64(self.modified_field, range.1)),
                 )) as Box<dyn Query>
             }),
+            "empty" => {
+                let want_empty = matches!(value.to_lowercase().as_str(), "true" | "1" | "yes");
+                let v = if want_empty { 1u64 } else { 0u64 };
+                Some(Box::new(TermQuery::new(
+                    Term::from_field_u64(self.empty_field, v),
+                    IndexRecordOption::Basic,
+                )) as Box<dyn Query>)
+            }
             _ => None,
         }
     }

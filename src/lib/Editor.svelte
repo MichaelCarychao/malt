@@ -70,7 +70,7 @@
     stripTagsForAI,
   } from "./tags";
 
-  type NoteRef = { path: string; title: string };
+  type NoteRef = { path: string; title: string; is_empty?: boolean };
 
   let {
     path,
@@ -132,6 +132,22 @@
   let linkAiSuggestions = $state<LinkSuggestion[]>([]);
   let linkSuggestionsOpen = $state(false);
   let linkSuggestionsLoading = $state(false);
+  /// When true, accepting an AI-proposed new-note suggestion ALSO creates
+  /// the empty .md file so the wikilink resolves immediately. When false,
+  /// the brackets are inserted but the link stays broken until the user
+  /// clicks it to create. Persisted across modal sessions.
+  let createNotesIfNeeded = $state(
+    typeof localStorage !== "undefined" &&
+      localStorage.getItem("malt.linkSuggestions.createNotes") === "1"
+  );
+  $effect(() => {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(
+        "malt.linkSuggestions.createNotes",
+        createNotesIfNeeded ? "1" : "0"
+      );
+    }
+  });
   // Tracked separately from the deterministic load so the user sees
   // "scanning… AI thinking…" once the deterministic results are visible.
   let linkAiLoading = $state(false);
@@ -215,7 +231,7 @@
     linkAiError = null;
   }
 
-  function applyLinkSuggestions() {
+  async function applyLinkSuggestions() {
     if (!view) return;
     // Build a change set wrapping each selected occurrence in [[...]].
     // Casing is preserved verbatim from the doc — the wikilink resolver
@@ -223,11 +239,15 @@
     // suggestions (kind: "create"), clicking the broken link will create
     // a file with whatever title is in the brackets.
     const changes: { from: number; to: number; insert: string }[] = [];
+    const acceptedCreates: { title: string }[] = [];
     for (const s of [...linkSuggestions, ...linkAiSuggestions]) {
       if (!linkSuggestionChecked[suggestionKey(s)]) continue;
       for (const [from, to] of s.positions) {
         const original = view.state.doc.sliceString(from, to);
         changes.push({ from, to, insert: `[[${original}]]` });
+      }
+      if (s.kind === "create" && createNotesIfNeeded) {
+        acceptedCreates.push({ title: s.candidate_title });
       }
     }
     if (changes.length === 0) {
@@ -239,6 +259,17 @@
     // keeps the mental model clean).
     changes.sort((a, b) => b.from - a.from);
     view.dispatch({ changes });
+    // Fire-and-forget create_note for the accepted "create" suggestions.
+    // If a collision occurs (note already exists by that title), the
+    // backend errors — we silently skip since the wikilink will still
+    // resolve to the existing note via fuzzy/slug matching.
+    for (const c of acceptedCreates) {
+      try {
+        await invoke<string>("create_note", { title: c.title });
+      } catch {
+        /* note may already exist by some name variation — fine */
+      }
+    }
     cancelLinkSuggestions();
   }
 
@@ -800,12 +831,19 @@
             const end = start + m[0].length;
             const target = m[1].trim();
             const resolved = resolveWikilink(target);
+            // Three states for wikilinks:
+            //   - broken: no matching note → cm-wikilink-broken (dashed amber)
+            //   - empty:  matching note but the body is empty → cm-wikilink-empty (muted)
+            //   - filled: matching note with content → cm-wikilink (live blue)
+            const cls = !resolved
+              ? "cm-wikilink-broken"
+              : resolved.is_empty
+                ? "cm-wikilink cm-wikilink-empty"
+                : "cm-wikilink";
             adds.push({
               from: start,
               to: end,
-              dec: Decoration.mark({
-                class: resolved ? "cm-wikilink" : "cm-wikilink-broken",
-              }),
+              dec: Decoration.mark({ class: cls }),
             });
             // Hide `[[` and `]]` unless the cursor / selection is anywhere
             // inside [start, end] (inclusive at both ends — so the cursor
@@ -1402,6 +1440,10 @@
         <div class="link-modal-tools">
           <button class="link-tool-btn" onclick={() => toggleAllSuggestions(true)}>select all</button>
           <button class="link-tool-btn" onclick={() => toggleAllSuggestions(false)}>select none</button>
+          <label class="link-create-toggle">
+            <input type="checkbox" bind:checked={createNotesIfNeeded} />
+            Create new-note files immediately
+          </label>
         </div>
       {/if}
       <div class="link-modal-body">
@@ -1699,6 +1741,18 @@
     border-color: #555;
     color: #e0e0e0;
   }
+  .link-create-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: #aaa;
+    font-size: 11px;
+    cursor: pointer;
+    margin-left: auto;
+  }
+  .link-create-toggle input {
+    margin: 0;
+  }
   .link-modal-body {
     flex: 1 1 auto;
     overflow-y: auto;
@@ -1900,6 +1954,19 @@
   }
   :global(.editor .cm-wikilink:hover) {
     text-decoration-color: rgba(108, 182, 255, 0.9);
+  }
+  :global(.editor .cm-wikilink-empty) {
+    /* Resolves to an existing note that has no real content — render
+       dimmer than a filled wikilink but still solid (not dashed) so the
+       distinction from a fully broken link is clear. */
+    color: #97a3b0 !important;
+    text-decoration: underline;
+    text-decoration-color: rgba(151, 163, 176, 0.45);
+    font-style: italic;
+  }
+  :global(.editor .cm-wikilink-empty:hover) {
+    color: #b8c5d0 !important;
+    text-decoration-color: rgba(151, 163, 176, 1);
   }
   :global(.editor .cm-wikilink-broken) {
     color: #c97a7a;

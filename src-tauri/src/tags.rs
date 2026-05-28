@@ -101,6 +101,123 @@ pub fn canonicalize(raw: &str) -> String {
     cleaned
 }
 
+/// Merge `new_tags` into a `(frontmatter, body)` pair. Strips any existing
+/// inline `#tags` + canonical tag line from the body, unions the parsed
+/// tags with the new set, and emits a fresh canonical tag line at the
+/// bottom. YAML frontmatter is preserved on disk for interop but its
+/// tag list is wiped to avoid duplicate sources of truth.
+///
+/// Returns the new full-file content (with frontmatter, body, canonical
+/// tag line) ready to write.
+pub fn merge_tags_into_file(
+    content: &str,
+    new_tags: &[String],
+) -> String {
+    let (mut fm, body) = crate::frontmatter::split(content);
+
+    // Collect existing tags from all three sources, then strip the body of
+    // tag markup so the canonical line is the only place tags live.
+    let mut merged: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for t in extract_tags_from_body(body) {
+        merged.insert(t);
+    }
+    if let Some(yaml_tags) = fm.tags.as_ref() {
+        for t in yaml_tags {
+            let canon = canonicalize(t);
+            if !canon.is_empty() {
+                merged.insert(canon);
+            }
+        }
+    }
+    for t in new_tags {
+        let canon = canonicalize(t);
+        if !canon.is_empty() {
+            merged.insert(canon);
+        }
+    }
+
+    // Wipe the YAML tag list — we're now single-source-of-truth on the
+    // canonical line. We keep any other frontmatter fields (currently none,
+    // but defensive).
+    fm.tags = None;
+
+    // Drop any existing tag markup from the body without touching wikilink
+    // brackets — strip_tags_for_ai is for the AI-prompt path; we want to
+    // preserve the user's [[X]] links when rewriting in place.
+    let body_no_tags = strip_only_tags_from_body(body);
+
+    let mut out = body_no_tags.trim_end().to_string();
+    let sorted: Vec<String> = merged.into_iter().collect();
+    if !sorted.is_empty() {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(
+            &sorted
+                .iter()
+                .map(|t| format!("#{}", t))
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+    }
+    out.push('\n');
+
+    // Re-attach frontmatter if it has anything to emit (currently nothing
+    // since we wiped tags); merge() handles the "no frontmatter" case.
+    crate::frontmatter::merge(&fm, &out)
+}
+
+/// Strip canonical tag line + inline #tags only (NOT wikilink brackets),
+/// for cases where we're rewriting the file in place.
+fn strip_only_tags_from_body(body: &str) -> String {
+    // Drop the canonical tag line.
+    let mut lines: Vec<String> = body.split('\n').map(String::from).collect();
+    let mut last_nonempty: Option<usize> = None;
+    for (i, l) in lines.iter().enumerate().rev() {
+        if !l.trim().is_empty() {
+            last_nonempty = Some(i);
+            break;
+        }
+    }
+    if let Some(idx) = last_nonempty {
+        if is_canonical_tag_line(&lines[idx]) {
+            lines.remove(idx);
+            if idx > 0 && lines[idx - 1].trim().is_empty() {
+                lines.remove(idx - 1);
+            }
+        }
+    }
+    let joined = lines.join("\n");
+
+    // Strip inline hashtags via the same shared scanner.
+    let inline = inline_tag_positions(&joined);
+    let mut out = String::with_capacity(joined.len());
+    let mut cursor = 0usize;
+    for (from, to) in inline {
+        out.push_str(&joined[cursor..from]);
+        let after = joined.as_bytes().get(to).copied();
+        if matches!(after, Some(b' ') | Some(b'\t')) {
+            cursor = to + 1;
+        } else if out.ends_with(' ') || out.ends_with('\t') {
+            out.pop();
+            cursor = to;
+        } else {
+            cursor = to;
+        }
+    }
+    out.push_str(&joined[cursor..]);
+
+    let mut result = out
+        .split('\n')
+        .map(|l| l.trim_end().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    while result.contains("\n\n\n") {
+        result = result.replace("\n\n\n", "\n\n");
+    }
+    result
+}
+
 /// Strip `[[X]]` brackets, preserving inner text. The AI sees prose, not
 /// markup. Same-line regex equivalent (multi-line wikilinks aren't a thing).
 pub fn strip_wikilink_brackets(text: &str) -> String {
