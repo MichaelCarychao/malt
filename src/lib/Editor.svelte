@@ -452,9 +452,11 @@
           return;
         }
         accumulated += chunk;
-        const cleaned = accumulated.replace(/\r/g, "");
-        const display = started ? cleaned : cleaned.replace(/^[ \t]+/, "");
-        if (display.trim()) {
+        // Trim edges: model occasionally starts with a newline or ends with
+        // trailing whitespace despite the "OUTPUT ONLY" rule. Interior
+        // whitespace is intentional and preserved.
+        const display = accumulated.replace(/\r/g, "").replace(/^\s+|\s+$/g, "");
+        if (display) {
           started = true;
           v.dispatch({
             effects: setGhost.of({ mode: "rewrite", text: display, from: sel.from, to: sel.to }),
@@ -495,9 +497,11 @@
         return;
       }
       accumulated += chunk;
-      const cleaned = accumulated.replace(/\r/g, "");
-      const display = started ? cleaned : cleaned.replace(/^[ \t]+/, "");
-      if (display.trim()) {
+      // Trim edges: model occasionally starts with a newline or ends with
+      // trailing whitespace despite the "OUTPUT ONLY" rule. Interior
+      // whitespace is intentional and preserved.
+      const display = accumulated.replace(/\r/g, "").replace(/^\s+|\s+$/g, "");
+      if (display) {
         started = true;
         v.dispatch({
           effects: setGhost.of({ mode: "insert", text: display, pos: cursor }),
@@ -556,7 +560,9 @@
   const completionKeymap = Prec.highest(
     keymap.of([
       {
-        key: "Mod-Space",
+        // Mod-i = AI/Insert. Originally Mod-Space, but Cmd+Space is
+        // hardcoded to Spotlight on macOS and can't be intercepted.
+        key: "Mod-i",
         run: (v) => {
           void fetchCompletion(v);
           return true;

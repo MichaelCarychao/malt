@@ -38,9 +38,9 @@
     { keys: `${mod}+Click [[wikilink]]`, action: "Open linked note in the OTHER pane",        status: "live" },
     { keys: `${mod}+W (in editor)`,    action: "Close the secondary editor pane",             status: "live" },
     { keys: `Type [[ in editor`,       action: "Wikilink autocomplete dropdown",              status: "live" },
-    { keys: `${mod}+Space (no selection)`,   action: "Continue / infill at cursor (uses full doc)",     status: "live" },
-    { keys: `${mod}+Space (with selection)`, action: "Rewrite selection — unpack, avoid clichés",        status: "live" },
-    { keys: `${mod}+Space (re-press)`,       action: "Re-roll the current ghost suggestion",             status: "live" },
+    { keys: `${mod}+I (no selection)`,       action: "AI continue / infill at cursor (uses full doc)",  status: "live" },
+    { keys: `${mod}+I (with selection)`,     action: "AI rewrite selection — unpack, avoid clichés",    status: "live" },
+    { keys: `${mod}+I (re-press)`,           action: "Re-roll the current ghost suggestion",             status: "live" },
     { keys: `${mod}+Enter / Tab / Arrows / Click`, action: "Accept ghost completion",                    status: "live" },
     { keys: `Esc (in editor)`,               action: "Decline completion (or vim normal mode)",          status: "live" },
   ];

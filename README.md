@@ -28,7 +28,7 @@ Roam/Obsidian/Tana, without locking their notes into a proprietary database.
   [fastembed-rs](https://crates.io/crates/fastembed). Shows top-5 cosine-similar
   notes alongside the explicit backlinks.
 - **AI assistance** (optional, BYO Anthropic API key):
-  - Ghost-text continuation at cursor (Cmd/Ctrl+Space)
+  - Ghost-text continuation at cursor (Cmd/Ctrl+I)
   - Selection rewrite that unpacks generalities
   - Cmd/Ctrl+Shift+L: post-hoc review of proposed wikilinks for the current
     note — both deterministic title matches and AI-extracted entities

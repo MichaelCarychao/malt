@@ -52,6 +52,14 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Ad-hoc codesign on macOS: signs with no developer identity,
+          # which satisfies Gatekeeper enough that users get the milder
+          # "cannot verify developer" warning (right-click → Open works)
+          # instead of the harsh "is damaged" rejection that fully-unsigned
+          # apps get. Costs nothing, no Apple Developer ID required.
+          # Replace with a real APPLE_SIGNING_IDENTITY + APPLE_CERTIFICATE
+          # when we set up proper signing for 1.0.
+          APPLE_SIGNING_IDENTITY: "-"
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "malt ${{ github.ref_name }}"

@@ -4,6 +4,22 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.2.2 — 2026-05-27
+
+macOS Gatekeeper fix + one keybinding change.
+
+- Ad-hoc codesign the macOS bundle in CI (`APPLE_SIGNING_IDENTITY=-`).
+  Without it, fully-unsigned + quarantined .dmg downloads trigger
+  Gatekeeper's harsh "malt is damaged and can't be opened" rejection.
+  With ad-hoc signing, users see the milder "cannot verify developer"
+  warning and can right-click → Open to install.
+- **AI completion keybinding changed from `Mod+Space` to `Mod+I`**.
+  `Cmd+Space` is hardcoded to Spotlight on macOS — can't be intercepted.
+  `Cmd/Ctrl+I` reads as "Insert / AI / Idea" and is free on both
+  platforms. Same three behaviors: bare press = continue, with selection
+  = rewrite, re-press = re-roll the current ghost suggestion.
+- Real Developer ID signing + notarization is deferred until 1.0.
+
 ## 0.2.1 — 2026-05-27
 
 Build fixes only — no app behavior changes from 0.2.0.
