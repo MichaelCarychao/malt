@@ -39,6 +39,7 @@
     type CompletionResult,
     type Completion,
   } from "@codemirror/autocomplete";
+  import { search, searchKeymap, openSearchPanel } from "@codemirror/search";
   import { markdown } from "@codemirror/lang-markdown";
   import { oneDark } from "@codemirror/theme-one-dark";
   import { vim, Vim } from "@replit/codemirror-vim";
@@ -68,6 +69,7 @@
     onTagClick,
     onTagPromote,
     onSaved,
+    onFinderReady,
   }: {
     path: string | null;
     query?: string;
@@ -91,6 +93,10 @@
     // Fires after an autosave completes successfully — parent uses this for
     // the "saved" status-bar pulse.
     onSaved?: () => void;
+    // Called once per mounted view with a function that focuses + opens
+    // CodeMirror's search panel. Used by the global Cmd+F forwarder so
+    // pressing Cmd+F from the sidebar / search bar still lands in find.
+    onFinderReady?: (openFind: () => void) => void;
   } = $props();
 
   // Right-click pill menu: floating div anchored at cursor.
@@ -1158,7 +1164,10 @@
       // and invisible even though it exists in CM's internal state.
       tooltips({ position: "fixed" }),
       highlightActiveLine(),
-      keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap]),
+      // search() adds the find/replace panel; searchKeymap binds Cmd+F /
+      // Cmd+G / Cmd+Shift+G / Cmd+Alt+F (replace) etc. inside the editor.
+      search({ top: true }),
+      keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap, ...searchKeymap]),
       markdown(),
       oneDark,
       EditorView.lineWrapping,
@@ -1204,6 +1213,16 @@
     }
 
     onReady?.(view);
+    // Hand the parent a function that focuses + opens this view's search
+    // panel. The global Cmd+F handler uses it so search works from
+    // anywhere (sidebar, search bar, etc.), not just inside the editor.
+    if (onFinderReady) {
+      const v = view;
+      onFinderReady(() => {
+        v.focus();
+        openSearchPanel(v);
+      });
+    }
   }
 
   function handleVimChange(e: Event) {

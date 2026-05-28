@@ -19,10 +19,36 @@ pub struct NoteSummary {
     pub modified: u64,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// True when the filename matches a known sync-conflict pattern
+    /// (Dropbox "conflicted copy", Syncthing ".sync-conflict-", etc.).
+    /// Renders a badge in the sidebar so the user can resolve manually.
+    #[serde(default)]
+    pub is_conflict: bool,
     #[serde(default)]
     pub title_matches: Vec<(usize, usize)>,
     #[serde(default)]
     pub snippet_matches: Vec<(usize, usize)>,
+}
+
+/// Detect sync-conflict filenames produced by Dropbox / Syncthing / etc.
+/// Conservative — won't false-positive on a note actually named "conflict
+/// resolution" because we require either the explicit Syncthing marker or
+/// a parenthesized "conflict[ed]" phrase near the end.
+pub fn is_conflict_filename(stem: &str) -> bool {
+    let lower = stem.to_lowercase();
+    // Syncthing pattern: name.sync-conflict-DATE-TIME-XXXXX
+    if lower.contains(".sync-conflict-") {
+        return true;
+    }
+    // Dropbox: "name (Michael's conflicted copy 2024-01-15)"
+    // Generic parenthesized "(... conflict[ed] ...)" near end of stem.
+    if let Some(open) = lower.rfind('(') {
+        let inside = &lower[open + 1..];
+        if inside.contains("conflict") {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn notes_dir() -> PathBuf {
@@ -308,12 +334,14 @@ pub fn list_notes() -> Vec<NoteSummary> {
             .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
             .unwrap_or(0);
+        let is_conflict = is_conflict_filename(&title);
         notes.push(NoteSummary {
             path: path.to_string_lossy().to_string(),
             title,
             snippet,
             modified,
             tags,
+            is_conflict,
             title_matches: Vec::new(),
             snippet_matches: Vec::new(),
         });

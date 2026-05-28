@@ -4,6 +4,33 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.2.5 — 2026-05-28
+
+UX round: navigability, discoverability, sync awareness.
+
+- **Settings split into tabs** — General / Shortcuts / Tags & queries /
+  AI / About. The modal had outgrown a single scroll; tabs make it
+  feel like proper preferences. Notes-folder controls moved from About
+  to General. Vim shortcuts only render under Shortcuts when vim mode
+  is enabled.
+- **Find in current note** — `Ctrl+F` (or `Cmd+F`) inside the editor
+  opens CodeMirror's native search panel: highlighted matches,
+  next/prev navigation (`Ctrl+G` / `Ctrl+Shift+G`), regex toggle,
+  case-sensitive toggle. Closes with `Esc`.
+- **"Start writing" CTA** for empty-notes-folder state — replaces the
+  terse "No notes yet" with a centered card explaining how to create
+  the first note. Stale "(coming in M4b)" copy removed from the
+  no-matches state.
+- **Embedding model download indicator** — the first time fastembed
+  loads (~33MB ONNX download), a pulsing amber `indexing…` pill
+  appears in the status bar so users know what's happening. Disappears
+  once the model is ready.
+- **Sync conflict detection** — files matching Dropbox `(conflicted
+  copy …)` or Syncthing `.sync-conflict-…` patterns get a `⚠` badge
+  next to the title and a corpus-wide conflict count in the status
+  bar. Click the count to clear the search and find them all. Manual
+  merge for now; resolution UI is a future enhancement.
+
 ## 0.2.4 — 2026-05-27
 
 **In-app auto-updater** — going forward, malt checks GitHub Releases for

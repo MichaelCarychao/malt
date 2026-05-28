@@ -10,6 +10,13 @@ on:
       - "v*"
   workflow_dispatch: # also allow a manual trigger from the Actions tab
 
+# Opt every JS-based action (actions/checkout, actions/setup-node, etc.)
+# into Node.js 24 runtime. Node 20 is being removed from the runners on
+# 2026-09-16; this env var is GitHub's documented opt-in path until our
+# action versions all natively target Node 24.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   release:
     permissions:

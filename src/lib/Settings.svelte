@@ -37,6 +37,7 @@
     { keys: `Type # in editor`,        action: "Hashtag autocomplete (vocabulary + corpus)",   status: "live" },
     { keys: `${mod}+${shift}+L (in editor)`, action: "Suggest [[wikilinks]] for this note (review modal)", status: "live" },
     { keys: `${mod}+${shift}+E`,             action: "Export current note (.md, .html, .epub, .txt, clipboard)", status: "live" },
+    { keys: `${mod}+F`,                      action: "Find within the current note (works from anywhere — forwards into the focused pane)", status: "live" },
     { keys: `tag:foo  -tag:foo`,       action: "Query operator: filter notes by hashtag",       status: "live" },
     { keys: `modified:<7d  <24h  >30d`, action: "Query operator: filter by recency",            status: "live" },
     { keys: `Enter (in search)`,       action: "Exact title → open; arrowed → open; else create new note", status: "live" },
@@ -77,6 +78,8 @@
   let tagVocabularyError = $state<string | null>(null);
   let tagVocabularySaved = $state(false);
   let appVersion = $state("");
+  type SettingsTab = "general" | "shortcuts" | "tags" | "ai" | "about";
+  let activeTab = $state<SettingsTab>("general");
 
   // Pull the live version from the backend at mount — single source of truth
   // is Cargo.toml (env! macro reads CARGO_PKG_VERSION at compile time).
@@ -345,6 +348,71 @@
         <button class="close" onclick={() => (open = false)} aria-label="Close settings">×</button>
       </header>
 
+      <div class="panel-body">
+        <nav class="panel-tabs">
+          <button class="panel-tab" class:active={activeTab === "general"} onclick={() => (activeTab = "general")}>General</button>
+          <button class="panel-tab" class:active={activeTab === "shortcuts"} onclick={() => (activeTab = "shortcuts")}>Shortcuts</button>
+          <button class="panel-tab" class:active={activeTab === "tags"} onclick={() => (activeTab = "tags")}>Tags &amp; queries</button>
+          <button class="panel-tab" class:active={activeTab === "ai"} onclick={() => (activeTab = "ai")}>AI</button>
+          <button class="panel-tab" class:active={activeTab === "about"} onclick={() => (activeTab = "about")}>About</button>
+        </nav>
+
+        <div class="panel-content">
+
+      {#if activeTab === "general"}
+      <section>
+        <h3>
+          <label>
+            <input type="checkbox" bind:checked={vimMode} />
+            vim mode
+          </label>
+        </h3>
+        {#if vimMode}
+          <p class="hint-text">Enabled. See the Shortcuts tab for the vim keymap.</p>
+        {:else}
+          <p class="hint-text">Off. Standard editor bindings apply.</p>
+        {/if}
+      </section>
+      <section>
+        <h3>notes folder</h3>
+        <table>
+          <tbody>
+            <tr>
+              <td class="keys">path</td>
+              <td class="action ai-row">
+                <span class="mono notes-path">{notesDirPath || "…"}</span>
+              </td>
+              <td class="status"></td>
+            </tr>
+            <tr>
+              <td class="keys"></td>
+              <td class="action ai-row">
+                <button class="ai-btn" onclick={pickNotesDir}>change…</button>
+                <button class="ai-btn" onclick={revealNotesDir} title="Open in file manager">reveal</button>
+                <button class="ai-btn" onclick={resetNotesDir} title="Reset to ~/malt/">reset to default</button>
+              </td>
+              <td class="status"></td>
+            </tr>
+            {#if notesDirDirty}
+              <tr>
+                <td class="keys"></td>
+                <td class="action test-result">Restart malt for the new folder to take effect.</td>
+                <td class="status"></td>
+              </tr>
+            {/if}
+            {#if notesDirError}
+              <tr>
+                <td class="keys"></td>
+                <td class="action test-result err">{notesDirError}</td>
+                <td class="status"></td>
+              </tr>
+            {/if}
+          </tbody>
+        </table>
+      </section>
+      {/if}
+
+      {#if activeTab === "shortcuts"}
       <section>
         <h3>malt shortcuts</h3>
         <table>
@@ -360,28 +428,25 @@
         </table>
       </section>
 
+      {#if vimMode}
       <section>
-        <h3>
-          <label>
-            <input type="checkbox" bind:checked={vimMode} />
-            vim mode
-          </label>
-        </h3>
-        {#if vimMode}
-          <table>
-            <tbody>
-              {#each vimShortcuts as s (s.keys)}
-                <tr class={s.status}>
-                  <td class="keys">{s.keys}</td>
-                  <td class="action">{s.action}</td>
-                  <td class="status">{s.status === "soon" ? "soon" : ""}</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        {/if}
+        <h3>vim shortcuts</h3>
+        <table>
+          <tbody>
+            {#each vimShortcuts as s (s.keys)}
+              <tr class={s.status}>
+                <td class="keys">{s.keys}</td>
+                <td class="action">{s.action}</td>
+                <td class="status">{s.status === "soon" ? "soon" : ""}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
       </section>
+      {/if}
+      {/if}
 
+      {#if activeTab === "ai"}
       <section>
         <h3>ai (claude)</h3>
         <table>
@@ -475,7 +540,9 @@
           </tbody>
         </table>
       </section>
+      {/if}
 
+      {#if activeTab === "tags"}
       <section>
         <h3>tags &amp; queries</h3>
         <table>
@@ -529,35 +596,13 @@
           </tbody>
         </table>
       </section>
+      {/if}
 
+      {#if activeTab === "about"}
       <section>
         <h3>about</h3>
         <table>
           <tbody>
-            <tr>
-              <td class="keys">notes folder</td>
-              <td class="action ai-row">
-                <span class="mono notes-path">{notesDirPath || "…"}</span>
-                <button class="ai-btn" onclick={pickNotesDir}>change…</button>
-                <button class="ai-btn" onclick={revealNotesDir} title="Open in file manager">reveal</button>
-                <button class="ai-btn" onclick={resetNotesDir} title="Reset to ~/malt/">reset</button>
-              </td>
-              <td class="status"></td>
-            </tr>
-            {#if notesDirDirty}
-              <tr>
-                <td class="keys"></td>
-                <td class="action test-result">Restart malt for the new folder to take effect.</td>
-                <td class="status"></td>
-              </tr>
-            {/if}
-            {#if notesDirError}
-              <tr>
-                <td class="keys"></td>
-                <td class="action test-result err">{notesDirError}</td>
-                <td class="status"></td>
-              </tr>
-            {/if}
             <tr>
               <td class="keys">version</td>
               <td class="action ai-row">
@@ -594,6 +639,10 @@
           </tbody>
         </table>
       </section>
+      {/if}
+
+        </div>
+      </div>
     </div>
   </div>
 {/if}
@@ -613,9 +662,11 @@
     background: #1a1a1a;
     border: 1px solid #333;
     color: #e0e0e0;
-    width: min(680px, 100%);
+    width: min(820px, 100%);
     max-height: calc(100vh - 68px);
-    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
   }
   .panel-header {
@@ -628,6 +679,50 @@
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.05em;
+  }
+  .panel-body {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .panel-tabs {
+    flex: 0 0 140px;
+    display: flex;
+    flex-direction: column;
+    background: #161616;
+    border-right: 1px solid #2a2a2a;
+    padding: 8px 0;
+  }
+  .panel-tab {
+    background: transparent;
+    border: 0;
+    color: #888;
+    font: inherit;
+    font-size: 12px;
+    text-align: left;
+    padding: 7px 14px;
+    cursor: pointer;
+    border-left: 2px solid transparent;
+  }
+  .panel-tab:hover {
+    color: #ccc;
+    background: #1c1c1c;
+  }
+  .panel-tab.active {
+    color: #e0e0e0;
+    border-left-color: #d6b06a;
+    background: #1a1a1a;
+  }
+  .panel-content {
+    flex: 1;
+    overflow-y: auto;
+    min-width: 0;
+  }
+  .hint-text {
+    color: #888;
+    font-size: 12px;
+    margin: 0 0 4px;
   }
   .close {
     background: transparent;

@@ -13,6 +13,7 @@
     snippet: string;
     modified: number;
     tags?: string[];
+    is_conflict?: boolean;
     title_matches?: [number, number][];
     snippet_matches?: [number, number][];
   };
@@ -269,6 +270,21 @@
   let booting = $state(true);
   // Right-click context menu on sidebar note rows.
   let rowMenu = $state<{ path: string; x: number; y: number } | null>(null);
+
+  // Embedding worker status (loading / ready / error). The first run
+  // downloads ~33MB of ONNX model; we want a visible hint that's happening.
+  let embedStatus = $state<"idle" | "loading" | "ready" | "error">("idle");
+
+  // Derived: how many sync-conflict files exist in the current corpus.
+  let conflictCount = $derived(allNotes.filter((n) => n.is_conflict).length);
+
+  // Per-pane "open find" functions exposed by the editor instances.
+  // Used by the global Cmd+F handler to forward into whichever pane has
+  // focus (primary as default).
+  let primaryFinder: (() => void) | null = $state(null);
+  let secondaryFinder: (() => void) | null = $state(null);
+  function setPrimaryFinder(fn: () => void) { primaryFinder = fn; }
+  function setSecondaryFinder(fn: () => void) { secondaryFinder = fn; }
 
   // Auto-updater state — see handleUpdateCheck for the flow.
   type UpdateState =
@@ -627,6 +643,25 @@
       e.preventDefault();
       e.stopPropagation();
       void openSaveSearchModal();
+      return;
+    }
+    if (key === "f") {
+      // Find in current note — open the focused editor's search panel.
+      // If the cursor is already in the editor, the editor's own keymap
+      // handles it; we only forward when focus is elsewhere (sidebar,
+      // search bar, etc.).
+      const active = document.activeElement;
+      const inEditor =
+        active instanceof HTMLElement && !!active.closest(".cm-content");
+      if (!inEditor) {
+        const fn = activePane() === "secondary" ? secondaryFinder : primaryFinder;
+        if (fn) {
+          e.preventDefault();
+          e.stopPropagation();
+          fn();
+          return;
+        }
+      }
       return;
     }
     if (key.length === 1 && key >= "1" && key <= "9") {
@@ -1296,9 +1331,15 @@
     void setWindowTitle(p ? getTitleForPath(p) : null);
   });
 
+  let unlistenEmbedStatus: UnlistenFn | null = null;
+
   onMount(async () => {
     unlisten = await listen("notes_changed", async () => {
       await Promise.all([performSearch(query), refreshAllNotes(), refreshTagMeta()]);
+    });
+    unlistenEmbedStatus = await listen<string>("embedding_status", (e) => {
+      const p = e.payload;
+      if (p === "loading" || p === "ready" || p === "error") embedStatus = p;
     });
     window.addEventListener("keydown", handleGlobalKey, true);
     await Promise.all([
@@ -1327,6 +1368,7 @@
 
   onDestroy(() => {
     unlisten?.();
+    unlistenEmbedStatus?.();
     window.removeEventListener("keydown", handleGlobalKey, true);
   });
 </script>
@@ -1408,6 +1450,18 @@
         role="button"
         tabindex="-1"
       ></span>
+      {#if embedStatus === "loading"}
+        <span class="sep">·</span>
+        <span class="status-pill" title="Downloading semantic-search model (one-time, ~33MB)">indexing…</span>
+      {/if}
+      {#if conflictCount > 0}
+        <span class="sep">·</span>
+        <button
+          class="conflict-pill"
+          onclick={() => (query = "")}
+          title={`${conflictCount} sync-conflict file${conflictCount === 1 ? "" : "s"} in your notes folder — open each to merge manually`}
+        >⚠ {conflictCount} conflict{conflictCount === 1 ? "" : "s"}</button>
+      {/if}
       {#if justSaved}
         <span class="saved-flash" title="Note autosaved">saved</span>
       {/if}
@@ -1434,6 +1488,7 @@
           class="note"
           class:selected={note.path === selectedPath}
           class:secondary={note.path === secondaryPath && note.path !== selectedPath}
+          class:conflict={note.is_conflict}
           onclick={(e) => handleNoteClick(e, note.path)}
           ondblclick={(e) => {
             e.preventDefault();
@@ -1442,16 +1497,33 @@
           }}
           oncontextmenu={(e) => handleNoteContextMenu(e, note.path)}
         >
-          <span class="note-title">{@html highlight(note.title, note.title_matches)}</span>
+          <span class="note-title">
+            {#if note.is_conflict}<span class="conflict-badge" title="Sync conflict — manually merge with the original">⚠</span>{/if}
+            {@html highlight(note.title, note.title_matches)}
+          </span>
           <span class="snippet">{@html highlight(note.snippet, note.snippet_matches)}</span>
           <span class="modified">{formatModified(note.modified)}</span>
         </li>
       {/each}
       {#if notes.length === 0 && query}
-        <li class="empty">No matches. Press Enter to create "{query}" (coming in M4b)</li>
+        <li class="empty">No matches. Press Enter to create "{query}".</li>
       {/if}
       {#if notes.length === 0 && !query}
-        <li class="empty">No notes yet. Drop a .md file into ~/malt/</li>
+        <li class="empty empty-cta">
+          <div class="empty-cta-title">No notes yet</div>
+          <div class="empty-cta-desc">
+            Type a title in the search bar and press <kbd>Enter</kbd> to create your first note.
+          </div>
+          <button
+            class="empty-cta-btn"
+            onclick={() => {
+              query = "";
+              void tick().then(() => {
+                searchInput?.focus();
+              });
+            }}
+          >Start writing →</button>
+        </li>
       {/if}
     </ul>
     <div class="editor-pane">
@@ -1490,6 +1562,7 @@
               onTagClick={handleEditorTagClick}
               onTagPromote={handleEditorTagPromote}
               onSaved={flashSaved}
+              onFinderReady={setPrimaryFinder}
             />
           </div>
           {#if secondaryPath}
@@ -1534,6 +1607,8 @@
                 tagVocabulary={tagVocabulary}
                 allTags={allTagNames}
                 onTagClick={handleEditorTagClick}
+                onTagPromote={handleEditorTagPromote}
+                onFinderReady={setSecondaryFinder}
               />
             </div>
           {/if}
@@ -2322,6 +2397,89 @@
   .empty {
     padding: 24px 12px;
     color: #666;
+  }
+  .empty-cta {
+    text-align: center;
+    padding: 36px 16px;
+  }
+  .empty-cta-title {
+    color: #e0e0e0;
+    font-size: 14px;
+    font-weight: 500;
+    margin-bottom: 6px;
+  }
+  .empty-cta-desc {
+    color: #888;
+    font-size: 12px;
+    margin-bottom: 16px;
+    line-height: 1.5;
+  }
+  .empty-cta-desc kbd {
+    background: #232323;
+    border: 1px solid #333;
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-size: 10px;
+    font-family: "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+    color: #d6b06a;
+  }
+  .empty-cta-btn {
+    background: transparent;
+    border: 1px solid #d6b06a;
+    color: #d6b06a;
+    font: inherit;
+    font-size: 12px;
+    padding: 6px 16px;
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  .empty-cta-btn:hover {
+    background: rgba(214, 176, 106, 0.1);
+    color: #f1d394;
+  }
+  .conflict-badge {
+    color: #e8a33d;
+    margin-right: 4px;
+    font-size: 11px;
+    cursor: help;
+  }
+  .note.conflict .note-title {
+    color: #e8a33d;
+  }
+  .note.conflict.selected .note-title {
+    color: #ffc879;
+  }
+  .conflict-pill {
+    background: rgba(232, 163, 61, 0.1);
+    border: 1px solid rgba(232, 163, 61, 0.3);
+    color: #e8a33d;
+    font: inherit;
+    font-size: 10px;
+    padding: 1px 7px;
+    border-radius: 9px;
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .conflict-pill:hover {
+    background: rgba(232, 163, 61, 0.18);
+    color: #f4b955;
+  }
+  .status-pill {
+    background: rgba(214, 176, 106, 0.08);
+    border: 1px solid rgba(214, 176, 106, 0.25);
+    color: #d6b06a;
+    font-size: 10px;
+    padding: 1px 7px;
+    border-radius: 9px;
+    text-transform: none;
+    letter-spacing: 0;
+    font-style: italic;
+    animation: pulse-soft 1.6s ease-in-out infinite;
+  }
+  @keyframes pulse-soft {
+    0%, 100% { opacity: 0.7; }
+    50% { opacity: 1; }
   }
   .editor-pane {
     overflow: hidden;

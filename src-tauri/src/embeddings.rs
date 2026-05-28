@@ -183,20 +183,25 @@ impl EmbedIndex {
         out
     }
 
-    fn load_model(&self) -> bool {
+    fn load_model(&self, app_handle: &AppHandle) -> bool {
         let mut m = self.model.lock().expect("model lock");
         if m.is_some() {
             return true;
         }
+        // Frontend listens for this — drives the "preparing semantic index…"
+        // banner. Emit before the (potentially slow) first-call download.
+        let _ = app_handle.emit("embedding_status", "loading");
         match TextEmbedding::try_new(
             InitOptions::new(EmbeddingModel::BGESmallENV15).with_show_download_progress(false),
         ) {
             Ok(model) => {
                 *m = Some(model);
+                let _ = app_handle.emit("embedding_status", "ready");
                 true
             }
             Err(e) => {
                 eprintln!("embeddings: model load failed: {e:?}");
+                let _ = app_handle.emit("embedding_status", "error");
                 false
             }
         }
@@ -211,7 +216,7 @@ impl EmbedIndex {
         next
     }
 
-    fn process(&self, path: PathBuf) -> Result<bool, String> {
+    fn process(&self, path: PathBuf, app_handle: &AppHandle) -> Result<bool, String> {
         if !path.is_file() {
             // File no longer exists — clean up if we still hold a row.
             let path_str = path.to_string_lossy().to_string();
@@ -252,7 +257,7 @@ impl EmbedIndex {
             }
         }
 
-        if !self.load_model() {
+        if !self.load_model(app_handle) {
             return Err("model not available".into());
         }
 
@@ -323,7 +328,7 @@ pub fn start(index: Arc<EmbedIndex>, app_handle: AppHandle) {
     std::thread::spawn(move || loop {
         std::thread::sleep(TICK);
         let Some(path) = index.next() else { continue };
-        match index.process(path) {
+        match index.process(path, &app_handle) {
             Ok(true) => {
                 let _ = app_handle.emit("related_changed", ());
             }
