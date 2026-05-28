@@ -659,6 +659,22 @@ fn delete_saved_search(id: String) -> Result<Vec<saved_searches::SavedSearch>, S
 }
 
 #[tauri::command]
+fn rename_saved_search(
+    id: String,
+    name: String,
+) -> Result<Vec<saved_searches::SavedSearch>, String> {
+    saved_searches::rename(&id, name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn reorder_saved_search(
+    id: String,
+    target_position: u32,
+) -> Result<Vec<saved_searches::SavedSearch>, String> {
+    saved_searches::reorder(&id, target_position as usize).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn next_free_search_slot() -> Option<u8> {
     saved_searches::next_free_slot()
 }
@@ -782,6 +798,8 @@ pub fn run() {
             list_saved_searches,
             upsert_saved_search,
             delete_saved_search,
+            rename_saved_search,
+            reorder_saved_search,
             next_free_search_slot,
             get_tag_vocabulary,
             set_tag_vocabulary,

@@ -214,6 +214,23 @@
   let saveSearchInputEl: HTMLInputElement | null = $state(null);
   let saveSearchSlot = $state<number | null>(null);
 
+  // Saved-search context menu (right-click on a chip). Mirrors rowMenu's
+  // floating-menu pattern.
+  let savedMenu = $state<{ id: string; name: string; slot: number | null; x: number; y: number } | null>(null);
+  // Rename + reorder modals share state with savedMenu (the id we're acting on).
+  let renameSearchOpen = $state(false);
+  let renameSearchId = $state<string | null>(null);
+  let renameSearchName = $state("");
+  let renameSearchInputEl: HTMLInputElement | null = $state(null);
+  let reorderSearchOpen = $state(false);
+  let reorderSearchId = $state<string | null>(null);
+  let reorderSearchPosition = $state(1);
+  let reorderSearchInputEl: HTMLInputElement | null = $state(null);
+  // Drag-and-drop reorder. dragId is the id being dragged; dragOverId is
+  // the chip currently being hovered (for the drop indicator).
+  let savedDragId = $state<string | null>(null);
+  let savedDragOverId = $state<string | null>(null);
+
   // Tag vocabulary + corpus tags, fed to the editor for autocomplete.
   let tagVocabulary = $state<string[]>([]);
   let allTagCounts = $state<TagCount[]>([]);
@@ -1220,6 +1237,124 @@
     }
   }
 
+  // ── Saved-search context menu + rename/reorder modals ────────────────
+
+  function openSavedSearchMenu(e: MouseEvent, s: SavedSearch) {
+    e.preventDefault();
+    savedMenu = { id: s.id, name: s.name, slot: s.slot, x: e.clientX, y: e.clientY };
+  }
+  function dismissSavedMenu() {
+    savedMenu = null;
+  }
+  function startRenameSavedSearch(id: string, currentName: string) {
+    savedMenu = null;
+    renameSearchId = id;
+    renameSearchName = currentName;
+    renameSearchOpen = true;
+    void tick().then(() => {
+      renameSearchInputEl?.focus();
+      renameSearchInputEl?.select();
+    });
+  }
+  function cancelRenameSavedSearch() {
+    renameSearchOpen = false;
+    renameSearchId = null;
+  }
+  async function confirmRenameSavedSearch() {
+    const id = renameSearchId;
+    const name = renameSearchName.trim();
+    if (!id || !name) return;
+    try {
+      savedSearches = await invoke<SavedSearch[]>("rename_saved_search", { id, name });
+    } catch (e) {
+      console.error("rename saved search failed", e);
+    }
+    renameSearchOpen = false;
+    renameSearchId = null;
+  }
+  function startReorderSavedSearch(id: string, currentSlot: number | null) {
+    savedMenu = null;
+    reorderSearchId = id;
+    // Default to current slot if any, else to current position + 1 (end of list).
+    if (currentSlot != null) {
+      reorderSearchPosition = currentSlot;
+    } else {
+      const idx = savedSearches.findIndex((x) => x.id === id);
+      reorderSearchPosition = idx >= 0 ? idx + 1 : savedSearches.length;
+    }
+    reorderSearchOpen = true;
+    void tick().then(() => {
+      reorderSearchInputEl?.focus();
+      reorderSearchInputEl?.select();
+    });
+  }
+  function cancelReorderSavedSearch() {
+    reorderSearchOpen = false;
+    reorderSearchId = null;
+  }
+  async function confirmReorderSavedSearch() {
+    const id = reorderSearchId;
+    const target = Math.max(1, Math.min(savedSearches.length, Math.floor(reorderSearchPosition)));
+    if (!id || !Number.isFinite(target)) return;
+    try {
+      savedSearches = await invoke<SavedSearch[]>("reorder_saved_search", {
+        id,
+        targetPosition: target,
+      });
+    } catch (e) {
+      console.error("reorder saved search failed", e);
+    }
+    reorderSearchOpen = false;
+    reorderSearchId = null;
+  }
+  function deleteSavedSearchWithConfirm(id: string, name: string) {
+    savedMenu = null;
+    if (confirm(`Delete saved search "${name}"?`)) {
+      void deleteSavedSearch(id);
+    }
+  }
+
+  // ── Drag and drop reorder ────────────────────────────────────────────
+
+  function savedDragStart(e: DragEvent, id: string) {
+    savedDragId = id;
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = "move";
+      // Set some payload so the browser actually treats this as a drag.
+      e.dataTransfer.setData("text/plain", id);
+    }
+  }
+  function savedDragOver(e: DragEvent, overId: string) {
+    if (!savedDragId || savedDragId === overId) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+    savedDragOverId = overId;
+  }
+  function savedDragLeave(overId: string) {
+    if (savedDragOverId === overId) savedDragOverId = null;
+  }
+  async function savedDrop(e: DragEvent, overId: string) {
+    e.preventDefault();
+    const sourceId = savedDragId;
+    savedDragId = null;
+    savedDragOverId = null;
+    if (!sourceId || sourceId === overId) return;
+    const targetIdx = savedSearches.findIndex((x) => x.id === overId);
+    if (targetIdx < 0) return;
+    try {
+      savedSearches = await invoke<SavedSearch[]>("reorder_saved_search", {
+        id: sourceId,
+        targetPosition: targetIdx + 1,
+      });
+    } catch (err) {
+      console.error("reorder saved search (drop) failed", err);
+    }
+  }
+  function savedDragEnd() {
+    savedDragId = null;
+    savedDragOverId = null;
+  }
+
   function handleEditorTagClick(tag: string) {
     // Click a pill in the editor → filter the note list by that tag.
     query = `tag:${tag}`;
@@ -1429,20 +1564,23 @@
       ⚙
     </button>
   </header>
-  {#if savedSearches.length > 0}
+  {#if savedSearches.some((s) => s.slot != null)}
     <div class="saved-row">
-      {#each savedSearches as s (s.id)}
+      {#each savedSearches.filter((s) => s.slot != null) as s (s.id)}
         <button
           class="saved-chip"
           class:active={query === s.query}
+          class:dragging={savedDragId === s.id}
+          class:drag-over={savedDragOverId === s.id && savedDragId !== s.id}
           onclick={() => activateSavedSearch(s)}
-          oncontextmenu={(e) => {
-            e.preventDefault();
-            if (confirm(`Delete saved search "${s.name}"?`)) {
-              void deleteSavedSearch(s.id);
-            }
-          }}
-          title={`${s.query}${s.slot ? ` — Ctrl+${s.slot}` : ""}`}
+          oncontextmenu={(e) => openSavedSearchMenu(e, s)}
+          draggable={true}
+          ondragstart={(e) => savedDragStart(e, s.id)}
+          ondragover={(e) => savedDragOver(e, s.id)}
+          ondragleave={() => savedDragLeave(s.id)}
+          ondrop={(e) => void savedDrop(e, s.id)}
+          ondragend={savedDragEnd}
+          title={`${s.query}${s.slot ? ` — Ctrl+${s.slot} · right-click for options · drag to reorder` : ""}`}
           tabindex="-1"
         >
           <span class="saved-name">{s.name}</span>
@@ -1688,7 +1826,13 @@
     settingsOpen = false;
     activateSavedSearch(s);
   }}
-  onDeleteSavedSearch={(id) => void deleteSavedSearch(id)}
+  onDeleteSavedSearch={(id) => {
+    const s = savedSearches.find((x) => x.id === id);
+    if (s) deleteSavedSearchWithConfirm(id, s.name);
+  }}
+  onRenameSavedSearch={(id, currentName) => startRenameSavedSearch(id, currentName)}
+  onReorderSavedSearch={(id, currentSlot) => startReorderSavedSearch(id, currentSlot)}
+  onSavedSearchesUpdated={(list) => (savedSearches = list)}
 />
 
 {#if rowMenu}
@@ -1712,6 +1856,106 @@
     <button class="row-menu-item" onclick={() => void rowMenuReveal(rowMenu!.path)}>Reveal in file manager</button>
     <div class="row-menu-sep"></div>
     <button class="row-menu-item danger" onclick={() => rowMenuDelete(rowMenu!.path)}>Delete…</button>
+  </div>
+{/if}
+
+{#if savedMenu}
+  <div
+    class="pill-menu-backdrop"
+    role="presentation"
+    onclick={dismissSavedMenu}
+    oncontextmenu={(e) => { e.preventDefault(); dismissSavedMenu(); }}
+  ></div>
+  <div
+    class="row-menu"
+    style:left={`${savedMenu.x}px`}
+    style:top={`${savedMenu.y}px`}
+    role="menu"
+  >
+    <button class="row-menu-item" onclick={() => {
+      const s = savedSearches.find((x) => x.id === savedMenu!.id);
+      dismissSavedMenu();
+      if (s) activateSavedSearch(s);
+    }}>Activate</button>
+    <div class="row-menu-sep"></div>
+    <button class="row-menu-item" onclick={() => startRenameSavedSearch(savedMenu!.id, savedMenu!.name)}>Rename…</button>
+    <button class="row-menu-item" onclick={() => startReorderSavedSearch(savedMenu!.id, savedMenu!.slot)}>Reorder…</button>
+    <div class="row-menu-sep"></div>
+    <button class="row-menu-item danger" onclick={() => deleteSavedSearchWithConfirm(savedMenu!.id, savedMenu!.name)}>Delete</button>
+  </div>
+{/if}
+
+{#if renameSearchOpen}
+  <div
+    class="rename-backdrop"
+    role="presentation"
+    onclick={cancelRenameSavedSearch}
+  >
+    <div
+      class="rename-panel"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Rename saved search"
+      onclick={(e) => e.stopPropagation()}
+    >
+      <div class="rename-label">rename saved search</div>
+      <input
+        class="rename-input"
+        type="text"
+        bind:this={renameSearchInputEl}
+        bind:value={renameSearchName}
+        onkeydown={(e) => {
+          if (e.key === "Enter") { e.preventDefault(); void confirmRenameSavedSearch(); }
+          else if (e.key === "Escape") { e.preventDefault(); cancelRenameSavedSearch(); }
+        }}
+      />
+      <div class="rename-actions">
+        <button class="rename-btn cancel" onclick={cancelRenameSavedSearch}>cancel</button>
+        <button
+          class="rename-btn confirm"
+          onclick={() => void confirmRenameSavedSearch()}
+          disabled={!renameSearchName.trim()}
+        >rename</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if reorderSearchOpen}
+  <div
+    class="rename-backdrop"
+    role="presentation"
+    onclick={cancelReorderSavedSearch}
+  >
+    <div
+      class="rename-panel"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Reorder saved search"
+      onclick={(e) => e.stopPropagation()}
+    >
+      <div class="rename-label">move saved search to position</div>
+      <input
+        class="rename-input"
+        type="number"
+        min="1"
+        max={savedSearches.length}
+        bind:this={reorderSearchInputEl}
+        bind:value={reorderSearchPosition}
+        onkeydown={(e) => {
+          if (e.key === "Enter") { e.preventDefault(); void confirmReorderSavedSearch(); }
+          else if (e.key === "Escape") { e.preventDefault(); cancelReorderSavedSearch(); }
+        }}
+      />
+      <div class="reorder-hint">
+        1 = first on the bar. Positions past 9 stay in Settings only;
+        everything else shifts to accommodate.
+      </div>
+      <div class="rename-actions">
+        <button class="rename-btn cancel" onclick={cancelReorderSavedSearch}>cancel</button>
+        <button class="rename-btn confirm" onclick={() => void confirmReorderSavedSearch()}>move</button>
+      </div>
+    </div>
   </div>
 {/if}
 
@@ -2052,6 +2296,21 @@
     border-color: #6cb6ff;
     color: #e0e0e0;
     background: rgba(108, 182, 255, 0.08);
+  }
+  .saved-chip.dragging {
+    opacity: 0.4;
+  }
+  .saved-chip.drag-over {
+    /* Left edge accent indicates "drop here, this position" — items push right. */
+    border-left: 2px solid #d6b06a;
+    padding-left: 7px;
+  }
+  .reorder-hint {
+    color: #888;
+    font-size: 11px;
+    line-height: 1.4;
+    margin-top: -4px;
+    margin-bottom: 6px;
   }
   .saved-slot {
     color: #6cb6ff;

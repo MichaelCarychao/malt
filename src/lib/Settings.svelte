@@ -15,6 +15,9 @@
     savedSearches = [],
     onActivateSavedSearch,
     onDeleteSavedSearch,
+    onRenameSavedSearch,
+    onReorderSavedSearch,
+    onSavedSearchesUpdated,
   }: {
     open: boolean;
     onCheckForUpdates?: () => void;
@@ -23,6 +26,12 @@
     savedSearches?: SavedSearchRef[];
     onActivateSavedSearch?: (s: SavedSearchRef) => void;
     onDeleteSavedSearch?: (id: string) => void;
+    onRenameSavedSearch?: (id: string, currentName: string) => void;
+    onReorderSavedSearch?: (id: string, currentSlot: number | null) => void;
+    /** Called whenever Settings mutates the saved-searches list via IPC
+     * (e.g. drag-and-drop reorder). Parent should set its state from the
+     * passed list rather than re-fetching. */
+    onSavedSearchesUpdated?: (list: SavedSearchRef[]) => void;
   } = $props();
 
   const isMac = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
@@ -105,6 +114,53 @@
       localStorage.setItem("malt.settings.tab", activeTab);
     }
   });
+
+  // Drag-and-drop reorder inside the Settings saved-search list. Mirrors
+  // the chip-bar version in +page.svelte; both call onReorderSavedSearch
+  // through the parent (which knows the IPC + slot semantics).
+  let settingsDragId = $state<string | null>(null);
+  let settingsDragOverId = $state<string | null>(null);
+  function settingsDragStart(e: DragEvent, id: string) {
+    settingsDragId = id;
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", id);
+    }
+  }
+  function settingsDragOver(e: DragEvent, overId: string) {
+    if (!settingsDragId || settingsDragId === overId) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+    settingsDragOverId = overId;
+  }
+  function settingsDragLeave(overId: string) {
+    if (settingsDragOverId === overId) settingsDragOverId = null;
+  }
+  async function settingsDrop(e: DragEvent, overId: string) {
+    e.preventDefault();
+    const sourceId = settingsDragId;
+    settingsDragId = null;
+    settingsDragOverId = null;
+    if (!sourceId || sourceId === overId) return;
+    const targetIdx = savedSearches.findIndex((x) => x.id === overId);
+    if (targetIdx < 0) return;
+    // Use invoke directly here — Settings already has access to the @tauri-apps/api
+    // import for the rest of the panel and we want immediate feedback without
+    // a round-trip through the parent component for drag-drop.
+    try {
+      const updated = await invoke<SavedSearchRef[]>("reorder_saved_search", {
+        id: sourceId,
+        targetPosition: targetIdx + 1,
+      });
+      onSavedSearchesUpdated?.(updated);
+    } catch (err) {
+      console.error("settings reorder saved search failed", err);
+    }
+  }
+  function settingsDragEnd() {
+    settingsDragId = null;
+    settingsDragOverId = null;
+  }
 
   // Pull the live version from the backend at mount — single source of truth
   // is Cargo.toml (env! macro reads CARGO_PKG_VERSION at compile time).
@@ -476,9 +532,10 @@
       <section>
         <h3>saved searches</h3>
         <p class="hint-text">
-          Saved searches are queries you've named so you can recall them with one keystroke.
-          They live in <span class="op">~/malt/.malt/saved-searches.json</span> and are written
-          to plain text — no DB, no cloud.
+          Saved searches are queries you've named. The first nine get keyboard
+          shortcuts ({mod}+1 – {mod}+9) and appear on the chip bar above the
+          note list. Beyond that you can save as many as you want — extras
+          live here in Settings.
         </p>
         <table class="query-ops">
           <tbody>
@@ -487,12 +544,16 @@
               <td>With focus in the search bar, save the current query. A small prompt asks for a name.</td>
             </tr>
             <tr>
-              <td class="op">{mod}+1 — {mod}+9</td>
-              <td>Activate the saved search bound to that slot. Slots are assigned in the order you save.</td>
+              <td class="op">{mod}+1 – {mod}+9</td>
+              <td>Activate the saved search in that slot. Slots track list order — drag to reorder.</td>
             </tr>
             <tr>
-              <td class="op">delete</td>
-              <td>Remove a saved search from the list below; its slot is freed up for the next save.</td>
+              <td class="op">right-click chip</td>
+              <td>Activate / Rename / Reorder / Delete menu for any chip on the bar.</td>
+            </tr>
+            <tr>
+              <td class="op">drag chip</td>
+              <td>Drop on another chip (or row below) to move into that position; others shift.</td>
             </tr>
           </tbody>
         </table>
@@ -503,37 +564,55 @@
             <span class="op">tag:draft modified:&lt;7d</span> in the search bar, then press {mod}+S.
           </p>
         {:else}
-          <table class="searches-table">
-            <thead>
-              <tr>
-                <th class="keys">slot</th>
-                <th class="action">name &amp; query</th>
-                <th class="status"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each savedSearches as s (s.id)}
-                <tr>
-                  <td class="keys">{s.slot != null ? `${mod}+${s.slot}` : "—"}</td>
-                  <td class="action search-row">
-                    <button
-                      class="search-name"
-                      onclick={() => onActivateSavedSearch?.(s)}
-                      title="Activate this search"
-                    >{s.name}</button>
-                    <span class="search-query">{s.query}</span>
-                  </td>
-                  <td class="status">
-                    <button
-                      class="ai-btn"
-                      onclick={() => onDeleteSavedSearch?.(s.id)}
-                      title="Delete saved search"
-                    >del</button>
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
+          <ul class="searches-list" aria-label="saved searches">
+            {#each savedSearches as s (s.id)}
+              <li
+                class="search-item"
+                class:dragging={settingsDragId === s.id}
+                class:drag-over={settingsDragOverId === s.id && settingsDragId !== s.id}
+                draggable={true}
+                ondragstart={(e) => settingsDragStart(e, s.id)}
+                ondragover={(e) => settingsDragOver(e, s.id)}
+                ondragleave={() => settingsDragLeave(s.id)}
+                ondrop={(e) => void settingsDrop(e, s.id)}
+                ondragend={settingsDragEnd}
+              >
+                <span class="search-handle" aria-hidden="true">⋮⋮</span>
+                <span class="search-slot">
+                  {#if s.slot != null}
+                    <span class="search-slot-badge">{mod}+{s.slot}</span>
+                  {:else}
+                    <span class="search-slot-none">—</span>
+                  {/if}
+                </span>
+                <span class="search-meta">
+                  <button
+                    class="search-name"
+                    onclick={() => onActivateSavedSearch?.(s)}
+                    title="Activate this search"
+                  >{s.name}</button>
+                  <span class="search-query">{s.query}</span>
+                </span>
+                <span class="search-actions">
+                  <button
+                    class="ai-btn"
+                    onclick={() => onRenameSavedSearch?.(s.id, s.name)}
+                    title="Rename saved search"
+                  >rename</button>
+                  <button
+                    class="ai-btn"
+                    onclick={() => onReorderSavedSearch?.(s.id, s.slot)}
+                    title="Move to a specific position"
+                  >reorder</button>
+                  <button
+                    class="ai-btn"
+                    onclick={() => onDeleteSavedSearch?.(s.id)}
+                    title="Delete saved search"
+                  >del</button>
+                </span>
+              </li>
+            {/each}
+          </ul>
         {/if}
       </section>
       {/if}
@@ -1036,34 +1115,67 @@
     padding: 0 4px;
     border-radius: 3px;
   }
-  .searches-table {
-    width: 100%;
-    margin-top: 12px;
+  .searches-list {
+    list-style: none;
+    margin: 12px 0 0;
+    padding: 0;
     border-top: 1px solid #2a2a2a;
   }
-  .searches-table th {
-    color: #555;
-    font-weight: normal;
-    font-size: 9px;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    text-align: left;
-    padding: 8px 0 4px;
-    border-bottom: 1px solid #2a2a2a;
-  }
-  .searches-table th.status {
-    text-align: right;
-  }
-  .searches-table td {
-    padding: 5px 0;
+  .search-item {
+    display: grid;
+    grid-template-columns: auto auto 1fr auto;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 4px;
     border-bottom: 1px solid #1f1f1f;
-    vertical-align: middle;
+    cursor: grab;
   }
-  .search-row {
+  .search-item:active {
+    cursor: grabbing;
+  }
+  .search-item.dragging {
+    opacity: 0.4;
+  }
+  .search-item.drag-over {
+    border-top: 2px solid #d6b06a;
+    padding-top: 5px;
+  }
+  .search-handle {
+    color: #444;
+    font-size: 12px;
+    line-height: 1;
+    user-select: none;
+    width: 12px;
+    text-align: center;
+  }
+  .search-item:hover .search-handle {
+    color: #888;
+  }
+  .search-slot {
+    min-width: 5ch;
+    text-align: center;
+  }
+  .search-slot-badge {
+    display: inline-block;
+    color: #6cb6ff;
+    font-size: 10px;
+    background: rgba(108, 182, 255, 0.12);
+    border: 1px solid rgba(108, 182, 255, 0.3);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-family: "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+  .search-slot-none {
+    color: #444;
+    font-size: 10px;
+  }
+  .search-meta {
     display: flex;
     align-items: baseline;
-    gap: 12px;
+    gap: 10px;
     flex-wrap: wrap;
+    min-width: 0;
   }
   .search-name {
     background: transparent;
@@ -1082,5 +1194,14 @@
     color: #888;
     font-family: "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
     font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .search-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
   }
 </style>

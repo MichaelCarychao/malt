@@ -52,6 +52,18 @@ bumps for meaningful feature batches, patch bumps for fixes.
   Settings → AI. The AI section's label now reads "append inline
   #hashtags at the bottom of each note" so the behavior matches the
   copy.
+- **Saved searches: no slot cap, drag to reorder, right-click for
+  options.** Right-clicking a chip used to delete-with-confirm — now
+  it opens a proper menu: Activate / Rename / Reorder / Delete. Drag
+  any chip onto another to drop it into that position; the rest shift
+  to accommodate. The Reorder action opens a small modal that takes a
+  1-indexed position number for keyboard-only reordering. You can save
+  more than nine searches now — extras live in Settings → Saved
+  searches (full drag-and-drop list with rename + reorder + delete
+  per row); the chip bar only shows the first nine that have keyboard
+  slots. Backend: `saved_searches.rs` rewritten so the JSON array
+  order is canonical and slots are derived from position; new
+  `rename_saved_search` and `reorder_saved_search` IPCs.
 
 ## 0.2.5 — 2026-05-28
 
