@@ -13,6 +13,7 @@
     getLastSeen,
     shouldSkipOnStartup,
     setSkipOnStartup,
+    renderKeysForOS,
   } from "$lib/tips";
 
   type Note = {
@@ -611,6 +612,16 @@
     //   4. Focus in editor → let editor handle (ghost-decline / vim normal)
     //   5. Otherwise → clear search query + focus search field
     if (e.key === "Escape" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      // Tips splash takes priority over every other Esc target — it's
+      // the topmost dialog while open. Without this, handleGlobalKey
+      // (capture phase) would fall through to "clear search" and our
+      // handleTipsKey would never see the event.
+      if (tipsOpen) {
+        e.preventDefault();
+        e.stopPropagation();
+        dismissTips();
+        return;
+      }
       if (updateModalOpen) {
         e.preventDefault();
         e.stopPropagation();
@@ -2388,14 +2399,16 @@
     role="presentation"
     onclick={tipsOpen ? dismissTips : undefined}
   >
-    <div class="boot-card" onclick={(e) => e.stopPropagation()} role="presentation">
+    <div class="boot-card" role="presentation">
       <img class="boot-logo-img" src="/malt-icon.png" alt="malt" />
       <div class="boot-label">malt</div>
+      <div class="boot-tagline">Plain markdown. AI when you want it.</div>
 
       {#if tipsOpen && tipCurrent}
         <div class="tip-card">
           <div class="tip-category">{tipCurrent.category}</div>
-          <div class="tip-story">{tipCurrent.story}</div>
+          <div class="tip-headline">{tipCurrent.headline}</div>
+          <div class="tip-story">{renderKeysForOS(tipCurrent.story)}</div>
         </div>
         <div class="tip-controls">
           <button
@@ -2413,7 +2426,7 @@
           >›</button>
         </div>
         {#if !tipsLaunchedFromSettings}
-          <div class="tip-dismiss-hint">tap any key to dismiss</div>
+          <div class="tip-dismiss-hint">click or tap any key to dismiss</div>
           <label class="tip-skip-label" onclick={(e) => e.stopPropagation()}>
             <input
               type="checkbox"
@@ -2423,7 +2436,7 @@
             don't show tips on startup
           </label>
         {:else}
-          <button class="tip-close" onclick={dismissTips}>close (Esc)</button>
+          <div class="tip-dismiss-hint">click or press Esc to close</div>
         {/if}
       {/if}
     </div>
@@ -2945,6 +2958,13 @@
     text-transform: uppercase;
     letter-spacing: 0.3em;
   }
+  .boot-tagline {
+    color: #888;
+    font-size: 12px;
+    font-style: italic;
+    margin-top: 6px;
+    letter-spacing: 0.02em;
+  }
   .tip-card {
     background: #222;
     border: 1px solid #333;
@@ -2960,7 +2980,14 @@
     font-size: 9px;
     text-transform: uppercase;
     letter-spacing: 0.15em;
-    margin-bottom: 6px;
+    margin-bottom: 4px;
+  }
+  .tip-headline {
+    color: #d6b06a;
+    font-size: 13px;
+    font-style: italic;
+    margin-bottom: 8px;
+    line-height: 1.35;
   }
   .tip-story {
     color: #cfcfcf;

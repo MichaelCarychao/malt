@@ -128,11 +128,20 @@
   let tagVocabularyError = $state<string | null>(null);
   let tagVocabularySaved = $state(false);
   let appVersion = $state("");
-  type SettingsTab = "general" | "shortcuts" | "searches" | "tags" | "ai" | "security" | "about";
+  type SettingsTab = "general" | "shortcuts" | "searches" | "tags" | "ai" | "security" | "tips" | "about";
   function readInitialTab(): SettingsTab {
     if (typeof localStorage !== "undefined") {
       const t = localStorage.getItem("malt.settings.tab");
-      if (t === "general" || t === "shortcuts" || t === "searches" || t === "tags" || t === "ai" || t === "security" || t === "about") {
+      if (
+        t === "general" ||
+        t === "shortcuts" ||
+        t === "searches" ||
+        t === "tags" ||
+        t === "ai" ||
+        t === "security" ||
+        t === "tips" ||
+        t === "about"
+      ) {
         return t;
       }
     }
@@ -505,6 +514,7 @@
           <button class="panel-tab" class:active={activeTab === "tags"} onclick={() => (activeTab = "tags")}>Tags &amp; queries</button>
           <button class="panel-tab" class:active={activeTab === "ai"} onclick={() => (activeTab = "ai")}>AI</button>
           <button class="panel-tab" class:active={activeTab === "security"} onclick={() => (activeTab = "security")}>Security</button>
+          <button class="panel-tab" class:active={activeTab === "tips"} onclick={() => (activeTab = "tips")}>Tips</button>
           <button class="panel-tab" class:active={activeTab === "about"} onclick={() => (activeTab = "about")}>About</button>
         </nav>
 
@@ -523,51 +533,6 @@
         {:else}
           <p class="hint-text">Off. Standard editor bindings apply.</p>
         {/if}
-      </section>
-      <section>
-        <h3>tips</h3>
-        <table>
-          <tbody>
-            <tr>
-              <td class="keys">launch</td>
-              <td class="action ai-row">
-                <button class="ai-btn" onclick={() => onLaunchTips?.()}>browse tips…</button>
-                <span class="hint-text" style="margin: 0;">{tipsSeen} / {tipsTotal} seen</span>
-              </td>
-              <td class="status"></td>
-            </tr>
-            <tr>
-              <td class="keys">on startup</td>
-              <td class="action">
-                <label class="toggle-label">
-                  <input
-                    type="checkbox"
-                    checked={!tipsSkip}
-                    onchange={(e) => {
-                      const t = e.target as HTMLInputElement;
-                      // Inverted: checkbox reads "show on startup" but
-                      // the underlying setting is "skip on startup".
-                      setSkipOnStartup(!t.checked);
-                      tipsSkip = !t.checked;
-                    }}
-                  />
-                  {tipsSkip ? "off" : "on"} — show a tip when malt opens
-                </label>
-              </td>
-              <td class="status"></td>
-            </tr>
-            {#if tipsSeen > 0}
-              <tr>
-                <td class="keys">history</td>
-                <td class="action ai-row">
-                  <button class="ai-btn" onclick={resetTipsHistory}>reset seen list</button>
-                  <span class="hint-text" style="margin: 0;">re-shuffle the deck from the top</span>
-                </td>
-                <td class="status"></td>
-              </tr>
-            {/if}
-          </tbody>
-        </table>
       </section>
       <section>
         <h3>notes folder</h3>
@@ -925,6 +890,60 @@
               <td class="action">Encrypted notes skip the search index, AI tagger, and embeddings worker. They're findable by filename only.</td>
               <td class="status"></td>
             </tr>
+          </tbody>
+        </table>
+      </section>
+      {/if}
+
+      {#if activeTab === "tips"}
+      <section>
+        <h3>tips</h3>
+        <p class="hint-text">
+          A rotating bank of short user-story tips, surfaced on the boot
+          splash. Each tip is tagged with a Settings category so you can
+          see at a glance which area it covers. The deck shuffles
+          random-without-repeats until you've seen them all.
+        </p>
+        <table>
+          <tbody>
+            <tr>
+              <td class="keys">launch</td>
+              <td class="action ai-row">
+                <button class="ai-btn" onclick={() => onLaunchTips?.()}>browse tips…</button>
+                <span class="hint-text" style="margin: 0;">{tipsSeen} of {tipsTotal} seen · arrows navigate · Esc closes</span>
+              </td>
+              <td class="status"></td>
+            </tr>
+            <tr>
+              <td class="keys">on startup</td>
+              <td class="action">
+                <label class="toggle-label">
+                  <input
+                    type="checkbox"
+                    checked={!tipsSkip}
+                    onchange={(e) => {
+                      const t = e.target as HTMLInputElement;
+                      // Inverted: checkbox reads "show on startup" but the
+                      // underlying preference is "skip on startup".
+                      setSkipOnStartup(!t.checked);
+                      tipsSkip = !t.checked;
+                    }}
+                  />
+                  {tipsSkip ? "off" : "on"} — show a tip when malt opens
+                </label>
+              </td>
+              <td class="status"></td>
+            </tr>
+            {#if tipsSeen > 0}
+              <tr>
+                <td class="keys">history</td>
+                <td class="action ai-row">
+                  <button class="ai-btn" onclick={resetTipsHistory}>reset seen list</button>
+                  <span class="hint-text" style="margin: 0;">re-shuffle the deck from the top</span>
+                </td>
+                <td class="status"></td>
+              </tr>
+            {/if}
           </tbody>
         </table>
       </section>

@@ -1,6 +1,6 @@
 [package]
 name = "malt"
-version = "0.2.8"
+version = "0.2.9"
 description = "A cross-platform AI-augmented nvalt successor"
 authors = ["Michael Carychao"]
 edition = "2021"

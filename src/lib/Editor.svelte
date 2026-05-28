@@ -847,15 +847,35 @@
             //   - broken: no matching note → cm-wikilink-broken (dashed amber)
             //   - empty:  matching note but the body is empty → cm-wikilink-empty (muted)
             //   - filled: matching note with content → cm-wikilink (live blue)
-            const cls = !resolved
-              ? "cm-wikilink-broken"
-              : resolved.is_empty
-                ? "cm-wikilink cm-wikilink-empty"
-                : "cm-wikilink";
+            // CSS-classes lose the specificity battle with oneDark +
+            // lang-markdown's reference-link highlighter (they decorate
+            // the same range with their own tok-link class at equal
+            // specificity, and theme styles register at view-mount which
+            // means they cascade later, winning ties). Inline `style`
+            // attributes beat any selector, so we pin the color there
+            // and use the class only for hover state + decoration shape.
+            let cls: string;
+            let inlineStyle: string;
+            if (!resolved) {
+              cls = "cm-wikilink-broken";
+              inlineStyle =
+                "color:#c97a7a;text-decoration:underline dashed;text-decoration-color:rgba(201,122,122,0.7);text-underline-offset:2px;cursor:pointer";
+            } else if (resolved.is_empty) {
+              cls = "cm-wikilink cm-wikilink-empty";
+              inlineStyle =
+                "color:#d6b06a;text-decoration:underline;text-decoration-color:rgba(214,176,106,0.6);font-style:italic;cursor:pointer";
+            } else {
+              cls = "cm-wikilink";
+              inlineStyle =
+                "color:#6cb6ff;text-decoration:underline;text-decoration-color:rgba(108,182,255,0.55);text-underline-offset:2px;cursor:pointer";
+            }
             adds.push({
               from: start,
               to: end,
-              dec: Decoration.mark({ class: cls }),
+              dec: Decoration.mark({
+                class: cls,
+                attributes: { style: inlineStyle },
+              }),
             });
             // Hide `[[` and `]]` unless the cursor / selection is anywhere
             // inside [start, end] (inclusive at both ends — so the cursor

@@ -4,6 +4,35 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.2.9 — 2026-05-28
+
+- **Wikilink colors actually render now** — `!important` lost the
+  cascade fight against `oneDark`'s HighlightStyle (which registers
+  later in the document at equal specificity). Fix: paint the color
+  via an inline `style` attribute on the decoration mark, which beats
+  every external selector. Live = sky blue, empty = amber italic,
+  broken = red dashed — all visibly distinct in the editor again.
+- **Splash tagline.** "Plain markdown. AI when you want it." sits in
+  italic grey below the wordmark.
+- **Tip headlines.** Each tip now carries a max-8-word user-story
+  headline (italic amber) above the body. Tip bank rewritten end to
+  end so the headlines feel consistent — "Spin up today's note in
+  one keystroke," "Rename a note without breaking links," etc.
+- **OS-aware key combos in tips.** Tips author with the canonical
+  ⌘ / ⇧ macOS symbols; a new `renderKeysForOS()` helper rewrites
+  them to `Ctrl+` / `Shift+` on non-Mac platforms at render time.
+  Windows users no longer see ⌘ glyphs on the splash.
+- **Click anywhere on the splash dismisses.** Only the prev/next
+  arrows and the skip checkbox stop propagation; everything else
+  (logo, tagline, tip card, dismiss hint) closes the splash on
+  click. Matches the "tap any key" affordance.
+- **Esc closes the tips browser when launched from Settings.**
+  `handleGlobalKey` was intercepting Esc before the tip handler
+  ever ran. Tips now take priority in the Esc routing chain.
+- **Tips get their own Settings tab.** Promoted from a sub-section
+  under General to a dedicated "Tips" tab with launch button, seen
+  count, on-startup toggle, and reset-seen-list action.
+
 ## 0.2.8 — 2026-05-28
 
 - **Tips system.** Replaced the boot splash content with a rotating

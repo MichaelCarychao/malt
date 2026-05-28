@@ -1,8 +1,14 @@
 // Tips system.
 //
 // A small bank of user-story-style tips, surfaced one at a time on the
-// boot splash (and from Settings → "Launch tips") so people discover
-// malt's full keyboard surface without sitting through a tutorial.
+// boot splash (and from Settings → Tips → "browse tips…") so people
+// discover malt's full keyboard surface without sitting through a
+// tutorial.
+//
+// Each tip has three parts:
+//   - category  → maps to a Settings tab; drives the small tag color
+//   - headline  → 8-word max user story (italic amber, above the body)
+//   - story     → the actual instruction / narration (1-2 short sentences)
 //
 // Persistence (all in localStorage, no backend round-trip):
 //   malt.tips.seen     — JSON array of tip ids the user has already seen
@@ -10,13 +16,9 @@
 //                        "previous" navigation across sessions)
 //   malt.tips.skip     — "1" if the user opted out of startup tips
 //
-// Selection algorithm:
-//   - "next" tries to pick a random tip from the unseen pool. If every
-//     tip has been seen, it picks a truly random tip from the full bank
-//     (excluding the one currently displayed so the same tip never
-//     shows twice in a row).
-//   - "previous" walks back through an in-memory history stack so the
-//     user can re-read whatever they just clicked past.
+// Key combos in tip text use the canonical macOS symbols (⌘, ⇧). The
+// `renderKeysForOS()` helper rewrites them to "Ctrl+" / "Shift+" on
+// non-Mac platforms so a Windows user doesn't see ⌘ characters.
 
 export type TipCategory =
   | "general"
@@ -30,8 +32,13 @@ export type TipCategory =
 export type Tip = {
   id: string;
   category: TipCategory;
-  /** Phrased as a user story / "you can …" sentence. Short — under 200
-   * chars so a phone-style narrow splash still fits without scrolling. */
+  /** One-line user story, max 8 words. Renders italic + amber above
+   * the body. Phrase as "I want to ..." or "[verb] [noun]" not as
+   * "you can ..." — the headline is the user speaking. */
+  headline: string;
+  /** The instruction body. Short — under 200 chars so a narrow splash
+   * still fits without scrolling. Can reference ⌘ and ⇧; renderer
+   * substitutes per-OS. */
   story: string;
 };
 
@@ -43,151 +50,230 @@ export const TIPS: Tip[] = [
   {
     id: "g-search-to-create",
     category: "general",
-    story: "Type a name into the search bar and press Enter — if no note matches, malt creates one with that title. Your daily note becomes one keystroke.",
+    headline: "Spin up today's note in one keystroke",
+    story:
+      "Type a name into the search bar and press Enter — if no note matches, malt creates one with that title. Daily note? Done.",
   },
   {
     id: "g-cmd-comma",
     category: "general",
-    story: "Hit ⌘, (or Ctrl+, on Windows) anywhere to open Settings. Press it again to close. Same trick works for ⌘F (find in note) and ⌘L (focus search).",
+    headline: "Open and close settings without leaving home row",
+    story:
+      "⌘, toggles Settings open and shut. Same trick: ⌘F toggles find in note, ⌘L focuses the search bar.",
   },
   {
     id: "g-split-pane",
     category: "general",
-    story: "⌘-click any note row or wikilink to open it in a second pane next to the current one. Great for diffing, transcluding by eye, or pulling notes side-by-side.",
+    headline: "Pull two notes side by side",
+    story:
+      "⌘-click any note row or wikilink to open it in a second pane next to the current one. Great for diffing or cross-referencing.",
   },
   {
     id: "g-last-open",
     category: "general",
-    story: "Quit malt with a note open and the next launch lands you right back on it. Restart-tolerant by design — nothing about your session lives in RAM only.",
+    headline: "Pick up exactly where I left off",
+    story:
+      "Quit malt with a note open and the next launch lands you right back on it. Nothing about your session lives in RAM only.",
   },
   {
     id: "g-rename-backlinks",
     category: "general",
-    story: "Double-click a note row to open the actions menu; pick Rename. All [[wikilinks]] pointing at the old name get rewritten atomically. No broken links.",
+    headline: "Rename a note without breaking links",
+    story:
+      "Double-click a note row to open the actions menu; pick Rename. All [[wikilinks]] pointing at the old name get rewritten atomically.",
   },
 
   // ── shortcuts ───────────────────────────────────────────────────
   {
     id: "s-back-forward",
     category: "shortcuts",
-    story: "⌘[ and ⌘] navigate back and forward through the notes you've opened in the current pane — same model as a browser. Per-pane history.",
+    headline: "Browser-style back and forward through notes",
+    story:
+      "⌘[ and ⌘] walk backward and forward through the notes you've opened in the current pane. Per-pane history.",
   },
   {
     id: "s-arrows-from-anywhere",
     category: "shortcuts",
-    story: "From anywhere — editor, sidebar, search bar — ⌘↑/⌘↓ (or ⌘J/⌘K) move between notes. Hands stay on the keyboard.",
+    headline: "Move between notes without touching the mouse",
+    story:
+      "⌘↑ / ⌘↓ (or ⌘J / ⌘K) move between notes from anywhere — editor, sidebar, search bar. Hands stay on the keyboard.",
   },
   {
     id: "s-cmd-w-close-secondary",
     category: "shortcuts",
-    story: "When you're done with the split pane, ⌘W from either editor closes the secondary and gives you back the full editor width.",
+    headline: "Close the split pane and reclaim the width",
+    story:
+      "When you're done with the second pane, ⌘W from either editor closes it and gives you back full-width editing.",
   },
   {
     id: "s-cmd-i-everywhere",
     category: "shortcuts",
-    story: "⌘I in the editor asks Claude to continue from your cursor. Select text first and ⌘I rewrites that selection instead. Re-press to re-roll.",
+    headline: "Have Claude finish my thought",
+    story:
+      "⌘I in the editor asks Claude to continue from your cursor. Select text first and ⌘I rewrites that selection. Re-press to re-roll.",
   },
   {
     id: "s-esc-clear",
     category: "shortcuts",
-    story: "Esc almost always means \"clear the query and put me back in the search bar\". The one exception is inside the editor, where it declines a ghost completion.",
+    headline: "Get back to a clean search field",
+    story:
+      "Esc almost always means \"clear the query and put me back in the search bar.\" Exception: in the editor it declines a ghost completion.",
   },
 
   // ── saved searches ──────────────────────────────────────────────
   {
     id: "ss-quick-bar",
     category: "searches",
-    story: "Type any query, press ⌘S, give it a name — now you have a chip on the saved-search bar and a one-keystroke recall via ⌘1 through ⌘9.",
+    headline: "Bind a search to one keystroke",
+    story:
+      "Type any query, press ⌘S, give it a name — now you have a chip on the saved-search bar and a one-keystroke recall via ⌘1 through ⌘9.",
   },
   {
     id: "ss-drag-reorder",
     category: "searches",
-    story: "Drag a saved-search chip onto another to move it into that position. Other chips slide over to accommodate. Slots are tied to list order.",
+    headline: "Reorder my saved searches by dragging",
+    story:
+      "Drag a saved-search chip onto another to drop it into that position. Other chips slide over. Slots track list order.",
   },
   {
     id: "ss-empty-builtin",
     category: "searches",
-    story: "The built-in \"Empty Notes\" saved search (⌘1 by default) surfaces every stub you started but didn't write. Tag it with #waiting and you've got a backlog view.",
+    headline: "See what I started but didn't finish",
+    story:
+      "The built-in \"Empty Notes\" search surfaces every stub you started but didn't write. Pair with #waiting and you have a backlog view.",
   },
   {
     id: "ss-right-click",
     category: "searches",
-    story: "Right-click any saved-search chip to rename, reorder, or remove it from the quick bar without deleting. Built-ins can be unbound but never deleted.",
+    headline: "Rename or unbind a saved search without losing it",
+    story:
+      "Right-click any saved-search chip to rename, reorder, or remove from the quick bar (without deleting). Built-ins can be unbound but never deleted.",
   },
   {
     id: "ss-operators",
     category: "searches",
-    story: "Queries compose: \"tag:meeting modified:<7d\" finds meetings from the last week. \"empty:true tag:draft\" finds drafts you haven't filled in yet.",
+    headline: "Stack query operators for power filters",
+    story:
+      "Queries compose: \"tag:meeting modified:<7d\" finds meetings from the last week. \"empty:true tag:draft\" finds drafts you haven't filled in.",
   },
 
   // ── tags ────────────────────────────────────────────────────────
   {
     id: "t-inline-pills",
     category: "tags",
-    story: "Type #anything inside a note. malt collects every hashtag, moves them to a hidden canonical line at the bottom, and renders them as clickable pills.",
+    headline: "Tag a note without leaving the prose",
+    story:
+      "Type #anything inside a note. malt collects every hashtag, moves them to a hidden canonical line at the bottom, and renders them as pills.",
   },
   {
     id: "t-vocabulary",
     category: "tags",
-    story: "Settings → Tags & queries lets you seed a starter tag vocabulary. Those tags rank first in #-autocomplete — so #draft is one keypress, not three.",
+    headline: "Make my favorite tags one keypress",
+    story:
+      "Settings → Tags & queries lets you seed a starter vocabulary. Those tags rank first in #-autocomplete — so #draft is one keypress, not three.",
   },
   {
     id: "t-click-pill",
     category: "tags",
-    story: "Click a tag pill in the editor to filter the sidebar to every note carrying that tag. Right-click a pill to add or remove it from your starter vocabulary.",
+    headline: "Filter the sidebar by clicking a tag",
+    story:
+      "Click a tag pill in the editor to filter the sidebar to every note carrying it. Right-click a pill to add or remove from your starter vocabulary.",
   },
 
   // ── ai ──────────────────────────────────────────────────────────
   {
     id: "ai-ghost",
     category: "ai",
-    story: "After ⌘I, accept the ghost suggestion with Tab, Enter, or an arrow key. Esc declines. The cursor lands at the end of the inserted text, ready to keep typing.",
+    headline: "Accept a ghost suggestion three different ways",
+    story:
+      "After ⌘I, accept the ghost with Tab, Enter, or an arrow key. Esc declines. The cursor lands at the end of the inserted text.",
   },
   {
     id: "ai-model-toggle",
     category: "ai",
-    story: "Settings → AI lets you switch between Haiku (fast/cheap), Sonnet (better at long context), and Opus (most literary attention). Same ⌘I trigger, different feel.",
+    headline: "Pick fast, smart, or most-literary Claude",
+    story:
+      "Settings → AI switches between Haiku (fast/cheap), Sonnet (better at long context), and Opus (most literary attention). Same ⌘I trigger.",
   },
   {
     id: "ai-suggest-wikilinks",
     category: "ai",
-    story: "⌘⇧L in the editor opens a modal of suggested [[wikilinks]] — both deterministic title matches and AI-proposed entity links. Accept the ones you want; tick the box to create stubs for any new names.",
+    headline: "Have Claude propose links for this note",
+    story:
+      "⌘⇧L in the editor opens a modal of suggested [[wikilinks]] — title matches plus AI-proposed entity links. Tick the box to materialize stubs.",
   },
   {
     id: "ai-auto-tag",
     category: "ai",
-    story: "Settings → AI → \"auto-tag\" runs a background tagger that quietly proposes inline #hashtags for your notes. Off by default. Skips encrypted notes.",
+    headline: "Let malt tag my notes in the background",
+    story:
+      "Settings → AI → \"auto-tag\" quietly proposes inline #hashtags for each note. Off by default. Skips encrypted notes for obvious reasons.",
   },
 
   // ── security ────────────────────────────────────────────────────
   {
     id: "sec-encrypt",
     category: "security",
-    story: "Right-click any note → Encrypt… to wrap its body in AES-256-GCM. The file stays a single line of text so Dropbox and Syncthing keep working. Filename remains visible.",
+    headline: "Lock a single note with a password",
+    story:
+      "Right-click any note → Encrypt… to wrap its body in AES-256-GCM. File stays a single line so Dropbox and Syncthing keep working; filename stays visible.",
   },
   {
     id: "sec-reprompt",
     category: "security",
-    story: "By default, every cached note password is dropped the moment malt loses focus. Toggle that off under Settings → Security if you trust your environment.",
+    headline: "Re-lock encrypted notes the moment I tab away",
+    story:
+      "By default, every cached note password is dropped when malt loses focus. Toggle off in Settings → Security if you trust your environment.",
   },
   {
     id: "sec-no-recovery",
     category: "security",
-    story: "Encrypted notes have no password recovery. Lose the password, lose the note. Keep a backup of important passwords somewhere safe.",
+    headline: "Treat the password like the only key",
+    story:
+      "Encrypted notes have no password recovery — lose the password, lose the note. Keep important passwords backed up somewhere safe.",
   },
 
   // ── about ───────────────────────────────────────────────────────
   {
     id: "a-plain-files",
     category: "about",
-    story: "Your notes are plain .md files in a real folder you chose. malt's index, embeddings, and config are sidecar — delete malt tomorrow and your notes are still notes.",
+    headline: "Keep my notes when I quit the app",
+    story:
+      "Your notes are plain .md files in a real folder. malt's index, embeddings, and config are sidecar — delete malt tomorrow and your notes are still notes.",
   },
   {
     id: "a-sync-aware",
     category: "about",
-    story: "Sync conflict files (Dropbox/Syncthing) get a ⚠ badge in the sidebar. Click one and the original opens beside it for side-by-side merge.",
+    headline: "Spot sync conflicts at a glance",
+    story:
+      "Sync conflict files (Dropbox/Syncthing) get a ⚠ badge in the sidebar. Click one and the original opens beside it for side-by-side merge.",
   },
 ];
+
+// ─── OS-aware key rendering ──────────────────────────────────────────
+
+// Detect OS lazily so this module works in SSR / test environments
+// where `navigator` may not exist.
+function detectIsMac(): boolean {
+  if (typeof navigator === "undefined") return true;
+  return /Mac/i.test(navigator.platform);
+}
+
+/** Rewrite ⌘ → "Ctrl+" and ⇧ → "Shift+" on non-Mac platforms.
+ *
+ * The hyphenated form (e.g. "⌘-click") is preserved as "Ctrl-click"
+ * rather than the awkward "Ctrl+-click". Tip authors should use ⌘ and
+ * ⇧ everywhere — this helper handles the OS-specific substitution at
+ * render time so the source stays compact. */
+export function renderKeysForOS(text: string): string {
+  if (detectIsMac()) return text;
+  return text
+    .replace(/⌘-/g, "Ctrl-")
+    .replace(/⌘/g, "Ctrl+")
+    .replace(/⇧/g, "Shift+");
+}
+
+// ─── Persistence + selection ─────────────────────────────────────────
 
 const SEEN_KEY = "malt.tips.seen";
 const LAST_KEY = "malt.tips.last";
