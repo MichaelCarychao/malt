@@ -88,6 +88,8 @@
     onTagPromote,
     onSaved,
     onFinderReady,
+    password = null,
+    isEncrypted = false,
   }: {
     path: string | null;
     query?: string;
@@ -115,6 +117,16 @@
     // CodeMirror's search panel. Used by the global Cmd+F forwarder so
     // pressing Cmd+F from the sidebar / search bar still lands in find.
     onFinderReady?: (openFind: () => void) => void;
+    /** Plaintext password for an encrypted note. When non-null, the
+     * editor reads via `read_encrypted_note` and saves via
+     * `save_encrypted_note`. When null on an encrypted note, the editor
+     * stays empty/locked (parent should pop a password modal before
+     * navigating). */
+    password?: string | null;
+    /** Whether this note's file is wrapped in the malt encryption
+     * envelope. Distinguishes "no password supplied because the note
+     * is plaintext" from "password is required but not yet known". */
+    isEncrypted?: boolean;
   } = $props();
 
   // Right-click pill menu: floating div anchored at cursor.
@@ -1134,7 +1146,11 @@
   async function flushSave(p: string, content: string) {
     if (content === lastSavedContent) return;
     try {
-      await invoke("save_note", { path: p, content });
+      if (isEncrypted && password) {
+        await invoke("save_encrypted_note", { path: p, content, password });
+      } else {
+        await invoke("save_note", { path: p, content });
+      }
       lastSavedContent = content;
       onSaved?.();
     } catch (e) {
@@ -1183,7 +1199,17 @@
 
     let body = "";
     try {
-      body = await invoke<string>("read_note", { path: p });
+      if (isEncrypted) {
+        if (!password) {
+          // Locked: render an empty editor so the user sees nothing
+          // sensitive. Parent will pop the password modal.
+          body = "";
+        } else {
+          body = await invoke<string>("read_encrypted_note", { path: p, password });
+        }
+      } else {
+        body = await invoke<string>("read_note", { path: p });
+      }
     } catch (e) {
       console.error("read_note failed", e);
       body = "";
@@ -1308,7 +1334,17 @@
     if (saveTimer !== null) return;
     let fresh = "";
     try {
-      fresh = await invoke<string>("read_note", { path: currentPath });
+      if (isEncrypted && password) {
+        fresh = await invoke<string>("read_encrypted_note", {
+          path: currentPath,
+          password,
+        });
+      } else if (isEncrypted) {
+        // Locked: don't try to read. Save would clobber anyway.
+        return;
+      } else {
+        fresh = await invoke<string>("read_note", { path: currentPath });
+      }
     } catch {
       return;
     }
@@ -1325,6 +1361,11 @@
   }
 
   $effect(() => {
+    // Re-load whenever either the path OR the password changes. The
+    // password change case happens after the user unlocks an encrypted
+    // note: parent flips `password` from null to the actual string,
+    // and we need to re-decrypt and rebuild the view.
+    const _ = password;
     void loadPath(path);
   });
 
@@ -1956,17 +1997,20 @@
     text-decoration-color: rgba(108, 182, 255, 0.9);
   }
   :global(.editor .cm-wikilink-empty) {
-    /* Resolves to an existing note that has no real content — render
-       dimmer than a filled wikilink but still solid (not dashed) so the
-       distinction from a fully broken link is clear. */
-    color: #97a3b0 !important;
+    /* Resolves to an existing note that has no real content. We use the
+       same amber accent the app uses elsewhere for "needs your attention"
+       (version badge, save-search slot, drop indicator) so an empty note
+       reads as "draft, fill me in" — clearly distinct from the live blue
+       and the broken red. Solid underline keeps it distinct from broken
+       (which is dashed). */
+    color: #d6b06a !important;
     text-decoration: underline;
-    text-decoration-color: rgba(151, 163, 176, 0.45);
+    text-decoration-color: rgba(214, 176, 106, 0.55);
     font-style: italic;
   }
   :global(.editor .cm-wikilink-empty:hover) {
-    color: #b8c5d0 !important;
-    text-decoration-color: rgba(151, 163, 176, 1);
+    color: #e6c685 !important;
+    text-decoration-color: rgba(214, 176, 106, 1);
   }
   :global(.editor .cm-wikilink-broken) {
     color: #c97a7a;

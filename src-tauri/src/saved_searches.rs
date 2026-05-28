@@ -15,6 +15,12 @@ use std::path::PathBuf;
 
 const MAX_SLOTS: usize = 9;
 
+/// Stable id for the built-in "Empty Notes" saved search. We seed this on
+/// every load() so the user always has at least one example present;
+/// they can rename it, reorder it, or unbind its slot, but they can't
+/// delete it.
+const EMPTY_NOTES_ID: &str = "_builtin_empty_notes";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedSearch {
     pub id: String,
@@ -23,6 +29,21 @@ pub struct SavedSearch {
     /// Slot 1-9 bound to ⌘N; None = no shortcut binding. Derived from
     /// position in the list, not user-controlled directly.
     pub slot: Option<u8>,
+    /// True for built-in searches that the app seeds and protects from
+    /// deletion. Renaming, reordering, and slot-unbinding still work.
+    /// Defaults to false for backwards compatibility with older files.
+    #[serde(default)]
+    pub is_builtin: bool,
+}
+
+fn builtin_empty_notes() -> SavedSearch {
+    SavedSearch {
+        id: EMPTY_NOTES_ID.to_string(),
+        name: "Empty Notes".to_string(),
+        query: "empty:true".to_string(),
+        slot: None, // filled in by assign_slots
+        is_builtin: true,
+    }
 }
 
 fn path() -> PathBuf {
@@ -36,7 +57,8 @@ fn path() -> PathBuf {
 /// Read items from disk, then sort + reassign slots from position so the
 /// returned list is canonical. Handles legacy files where `slot` was
 /// user-edited (we trust slot for ordering on first load, then array
-/// order takes over).
+/// order takes over). Seeds the built-in Empty Notes search at the
+/// front on first load.
 pub fn load() -> Vec<SavedSearch> {
     let mut items: Vec<SavedSearch> = std::fs::read_to_string(path())
         .ok()
@@ -46,6 +68,19 @@ pub fn load() -> Vec<SavedSearch> {
     // their existing array order. Stable sort means ties (e.g. two unbound)
     // preserve insertion order.
     items.sort_by_key(|x| x.slot.unwrap_or(u8::MAX));
+    // Seed the Empty Notes builtin if missing. New users land with it at
+    // position 1 (slot ⌘1). Existing users get it appended; they can
+    // reorder to taste.
+    if !items.iter().any(|x| x.id == EMPTY_NOTES_ID) {
+        if items.is_empty() {
+            items.push(builtin_empty_notes());
+        } else {
+            // Insert at the front but only for first-time seeding. Use
+            // append-style placement so we don't bump someone's hard-won
+            // slot 1 binding on upgrade.
+            items.push(builtin_empty_notes());
+        }
+    }
     assign_slots(&mut items);
     items
 }
@@ -108,10 +143,27 @@ pub fn upsert(item: SavedSearch) -> std::io::Result<Vec<SavedSearch>> {
 
 pub fn delete(id: &str) -> std::io::Result<Vec<SavedSearch>> {
     let mut items = load();
+    // Reject deletion of built-in searches (they get re-seeded on next
+    // load anyway, but the user shouldn't see the operation succeed and
+    // then have the item reappear).
+    if items.iter().any(|x| x.id == id && x.is_builtin) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Built-in saved searches can't be deleted. Use 'Remove from quick bar' instead.",
+        ));
+    }
     items.retain(|x| x.id != id);
     assign_slots(&mut items);
     save(&items)?;
     Ok(items)
+}
+
+/// Move a saved search past the slot range so it loses its keyboard
+/// binding and disappears from the chip bar — but stays in the Settings
+/// list. Equivalent to reorder(id, MAX_SLOTS + 1) but clearer at call
+/// sites and more discoverable.
+pub fn unbind_slot(id: &str) -> std::io::Result<Vec<SavedSearch>> {
+    reorder(id, MAX_SLOTS + 1)
 }
 
 /// Rename the saved search with `id`. Position/slot unchanged.

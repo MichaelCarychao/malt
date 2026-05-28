@@ -98,11 +98,11 @@
   let tagVocabularyError = $state<string | null>(null);
   let tagVocabularySaved = $state(false);
   let appVersion = $state("");
-  type SettingsTab = "general" | "shortcuts" | "searches" | "tags" | "ai" | "about";
+  type SettingsTab = "general" | "shortcuts" | "searches" | "tags" | "ai" | "security" | "about";
   function readInitialTab(): SettingsTab {
     if (typeof localStorage !== "undefined") {
       const t = localStorage.getItem("malt.settings.tab");
-      if (t === "general" || t === "shortcuts" || t === "searches" || t === "tags" || t === "ai" || t === "about") {
+      if (t === "general" || t === "shortcuts" || t === "searches" || t === "tags" || t === "ai" || t === "security" || t === "about") {
         return t;
       }
     }
@@ -197,6 +197,9 @@
   let taggingEnabled = $state(false);
   let completionModel = $state("claude-haiku-4-5");
   let configLoaded = $state(false);
+  // Security tab state — same lazy-load pattern as the rest.
+  let repromptOnBlur = $state(true);
+  let securityLoaded = $state(false);
 
   const HAIKU = "claude-haiku-4-5";
   const SONNET = "claude-sonnet-4-6";
@@ -271,7 +274,37 @@
     if (open && !configLoaded) {
       void loadConfig();
     }
+    if (open && !securityLoaded) {
+      void loadSecurityConfig();
+    }
   });
+
+  async function loadSecurityConfig() {
+    try {
+      const cfg = await invoke<{ reprompt_on_blur: boolean }>("get_security_config");
+      repromptOnBlur = cfg.reprompt_on_blur;
+    } catch {
+      repromptOnBlur = true;
+    } finally {
+      securityLoaded = true;
+    }
+  }
+
+  async function toggleRepromptOnBlur(e: Event) {
+    const target = e.target as HTMLInputElement;
+    const enabled = target.checked;
+    try {
+      await invoke("set_security_reprompt_on_blur", { enabled });
+      repromptOnBlur = enabled;
+      // Tell the page to sync its in-memory mirror without a full refresh.
+      window.dispatchEvent(
+        new CustomEvent("malt:security-changed", { detail: { reprompt_on_blur: enabled } }),
+      );
+    } catch (err) {
+      target.checked = !enabled;
+      console.error("set_security_reprompt_on_blur failed", err);
+    }
+  }
 
   $effect(() => {
     if (open && !tagVocabularyLoaded) {
@@ -436,6 +469,7 @@
           <button class="panel-tab" class:active={activeTab === "searches"} onclick={() => (activeTab = "searches")}>Saved searches</button>
           <button class="panel-tab" class:active={activeTab === "tags"} onclick={() => (activeTab = "tags")}>Tags &amp; queries</button>
           <button class="panel-tab" class:active={activeTab === "ai"} onclick={() => (activeTab = "ai")}>AI</button>
+          <button class="panel-tab" class:active={activeTab === "security"} onclick={() => (activeTab = "security")}>Security</button>
           <button class="panel-tab" class:active={activeTab === "about"} onclick={() => (activeTab = "about")}>About</button>
         </nav>
 
@@ -762,6 +796,53 @@
                   Save the current query as a named smart-search with <span class="op">{mod}+S</span> · activate one with <span class="op">{mod}+1</span>–<span class="op">{mod}+9</span>.
                 </div>
               </td>
+              <td class="status"></td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+      {/if}
+
+      {#if activeTab === "security"}
+      <section>
+        <h3>per-note encryption</h3>
+        <p class="hint-text">
+          Encrypt any note with a password. Body is AES-256-GCM with an
+          Argon2id-derived key; the file stays a single line of
+          <span class="op">MALT-ENC-v1:…</span> so sync apps still treat it
+          as plain text. Filename remains visible — only the contents are
+          opaque.
+        </p>
+        <table>
+          <tbody>
+            <tr>
+              <td class="keys">how to encrypt</td>
+              <td class="action">Right-click any note in the sidebar → <em>Encrypt…</em></td>
+              <td class="status"></td>
+            </tr>
+            <tr>
+              <td class="keys">re-prompt on focus loss</td>
+              <td class="action">
+                <label class="toggle-label">
+                  <input
+                    type="checkbox"
+                    checked={repromptOnBlur}
+                    onchange={toggleRepromptOnBlur}
+                    disabled={!securityLoaded}
+                  />
+                  {repromptOnBlur ? "on" : "off"} — drop cached passwords when malt loses focus
+                </label>
+              </td>
+              <td class="status"></td>
+            </tr>
+            <tr>
+              <td class="keys">recovery</td>
+              <td class="action">None. Lose the password, lose the note. Keep a backup somewhere safe.</td>
+              <td class="status"></td>
+            </tr>
+            <tr>
+              <td class="keys">excluded</td>
+              <td class="action">Encrypted notes skip the search index, AI tagger, and embeddings worker. They're findable by filename only.</td>
               <td class="status"></td>
             </tr>
           </tbody>

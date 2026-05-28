@@ -31,6 +31,11 @@ pub struct NoteSummary {
     /// as empty.
     #[serde(default)]
     pub is_empty: bool,
+    /// True when the file starts with the `MALT-ENC-v1:` envelope. Body
+    /// is unreadable without the password; sidebar shows a lock icon and
+    /// the indexer skips body fields entirely (search by filename only).
+    #[serde(default)]
+    pub is_encrypted: bool,
     #[serde(default)]
     pub title_matches: Vec<(usize, usize)>,
     #[serde(default)]
@@ -331,9 +336,23 @@ pub fn list_notes() -> Vec<NoteSummary> {
             .unwrap_or("untitled")
             .to_string();
         let content = std::fs::read_to_string(&path).unwrap_or_default();
-        let (_fm, body) = crate::frontmatter::split(&content);
-        let snippet = snippet_from(body);
-        let tags = crate::tags::extract_tags_full(&content);
+        let is_encrypted = crate::encryption::is_encrypted(&content);
+        // Encrypted notes contribute only filename to the listing. No
+        // snippet, no tags, no emptiness signal — none of that is
+        // meaningful (or knowable) without the password.
+        let (snippet, tags, is_empty) = if is_encrypted {
+            (String::from("(encrypted)"), Vec::new(), false)
+        } else {
+            let (_fm, body) = crate::frontmatter::split(&content);
+            let snip = snippet_from(body);
+            let t = crate::tags::extract_tags_full(&content);
+            // Strip private markup before checking emptiness so a note
+            // that's *only* tags / wikilinks still counts as empty
+            // content-wise.
+            let stripped = crate::tags::strip_tags_for_ai(body);
+            let empty = stripped.trim().is_empty();
+            (snip, t, empty)
+        };
         let modified = entry
             .metadata()
             .and_then(|m| m.modified())
@@ -342,10 +361,6 @@ pub fn list_notes() -> Vec<NoteSummary> {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let is_conflict = is_conflict_filename(&title);
-        // Strip private markup before checking emptiness so a note that's
-        // *only* tags / wikilinks still counts as empty content-wise.
-        let stripped = crate::tags::strip_tags_for_ai(body);
-        let is_empty = stripped.trim().is_empty();
         notes.push(NoteSummary {
             path: path.to_string_lossy().to_string(),
             title,
@@ -354,6 +369,7 @@ pub fn list_notes() -> Vec<NoteSummary> {
             tags,
             is_conflict,
             is_empty,
+            is_encrypted,
             title_matches: Vec::new(),
             snippet_matches: Vec::new(),
         });

@@ -4,6 +4,47 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.2.7 — 2026-05-28
+
+- **Per-note encryption.** Right-click any note → Encrypt… → set a
+  password. Body is wrapped in a `MALT-ENC-v1:` envelope (AES-256-GCM
+  with an Argon2id-derived key) so the file stays a single line of
+  text — Dropbox / Syncthing / git all keep treating it as plain
+  markdown. Filename is still visible; only contents are opaque. New
+  context-menu items: Encrypt… / Change password… / Decrypt (remove
+  password)…. Encrypted notes get a 🔒 in the sidebar, skip the search
+  index + AI tagger + embedding worker, and are findable by filename
+  only.
+- **Settings → Security tab.** "Re-prompt for password on focus loss"
+  toggle (default ON) — drops every cached password the moment malt
+  loses focus, so encrypted notes re-lock when you tab away. Turn it
+  off to keep unlocks for the whole session. Explains the recovery
+  story: there isn't one. Lose the password, lose the note.
+- **Empty-link color is now amber.** The "this note exists but is
+  blank" wikilink state was a too-subtle grey-blue against the live
+  blue. It's now the same `#d6b06a` accent malt uses elsewhere for
+  "needs your attention" — clearly distinct from both the live blue
+  ("ready") and the broken red ("missing").
+- **Built-in "Empty Notes" saved search** (`empty:true`). Always
+  present in the list — undeletable but renameable, reorderable, and
+  removable from the quick bar. New users land with it at ⌘1.
+- **"Remove from quick bar" right-click action.** Any saved search
+  (built-in or user) can be unbound from its keyboard slot without
+  deleting — it stays in Settings → Saved searches, just falls off the
+  chip bar. Built-in saved searches show this *instead of* Delete.
+- **Black-bg bezeled app icon.** The macOS dock / Windows taskbar
+  needed the icon to read on light backgrounds. New `source.png` has
+  a solid black canvas with rounded corners; all platform variants
+  (icns / ico / Android / iOS) regenerated. Original transparent
+  artwork preserved as `source-transparent.png` for future regenerations.
+- **Updater note for v0.2.5 testers:** if "Check for updates" reports
+  "could not fetch a valid release JSON," it's because the v0.2.5
+  GitHub release is still a *draft*. The endpoint uses
+  `/releases/latest/download/latest.json`, which only resolves to
+  published non-draft releases. Publish the draft on GitHub and the
+  updater will work for v0.2.5 testers; v0.2.6 onward will follow the
+  same path once published.
+
 ## 0.2.6 — 2026-05-28
 
 - **Cmd/Ctrl+F now toggles the find panel** instead of always opening

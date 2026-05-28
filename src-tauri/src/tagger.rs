@@ -64,6 +64,11 @@ impl Tagger {
         }
 
         let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        // Never tag encrypted notes: we don't have the password and the
+        // ciphertext line wouldn't yield meaningful tags anyway.
+        if crate::encryption::is_encrypted(&content) {
+            return Ok(false);
+        }
         let (_fm, body) = frontmatter::split(&content);
         let body_trimmed = body.trim();
         if body_trimmed.is_empty() {

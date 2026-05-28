@@ -1,6 +1,6 @@
 [package]
 name = "malt"
-version = "0.2.6"
+version = "0.2.7"
 description = "A cross-platform AI-augmented nvalt successor"
 authors = ["Michael Carychao"]
 edition = "2021"
@@ -38,4 +38,13 @@ pulldown-cmark = "0.13.4"
 epub-builder = "0.8.3"
 tauri-plugin-updater = "2.10.1"
 tauri-plugin-process = "2.3.1"
+
+# Per-note encryption: AES-256-GCM authenticated encryption + Argon2id
+# password KDF. base64 for the single-line ciphertext envelope. rand for
+# fresh nonces and salts. These are deliberately RustCrypto crates so we
+# don't ship OpenSSL.
+aes-gcm = "0.10"
+argon2 = "0.5"
+base64 = "0.22"
+rand = "0.8"
 

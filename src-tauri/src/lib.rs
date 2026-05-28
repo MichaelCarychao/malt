@@ -2,6 +2,7 @@ mod ai;
 mod backlinks;
 mod config;
 mod embeddings;
+mod encryption;
 mod export;
 mod frontmatter;
 mod index;
@@ -92,6 +93,94 @@ fn save_note(
 ) -> Result<(), String> {
     std::fs::write(&path, content).map_err(|e| e.to_string())?;
     // Re-embed the changed file. Hash check inside the worker skips no-ops.
+    state
+        .embeddings
+        .enqueue_path(std::path::PathBuf::from(&path));
+    Ok(())
+}
+
+// ──────────────────────────── encryption ────────────────────────────
+//
+// Encrypted-note IPCs. The frontend keeps a per-path password cache in
+// memory and re-prompts on focus loss when the security toggle is on;
+// the backend is stateless here. Each save round-trips through
+// `save_encrypted_note`, which re-derives a key and writes a fresh
+// envelope. The KDF is intentionally slow (Argon2id default) so each
+// save takes a few hundred ms — acceptable for a manual save flow.
+
+#[tauri::command]
+fn is_note_encrypted(path: String) -> bool {
+    std::fs::read_to_string(&path)
+        .map(|c| encryption::is_encrypted(&c))
+        .unwrap_or(false)
+}
+
+/// Decrypt + return plaintext for an already-encrypted note.
+#[tauri::command]
+fn read_encrypted_note(path: String, password: String) -> Result<String, String> {
+    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    encryption::decrypt(&content, &password)
+}
+
+/// Encrypt `content` and write the envelope to `path`. Used for both
+/// the initial encrypt-this-note action and subsequent saves while the
+/// note remains encrypted.
+#[tauri::command]
+fn save_encrypted_note(
+    path: String,
+    content: String,
+    password: String,
+    state: tauri::State<AppState>,
+) -> Result<(), String> {
+    let envelope = encryption::encrypt(&content, &password)?;
+    std::fs::write(&path, envelope).map_err(|e| e.to_string())?;
+    // Re-enqueue for embedding so the index drops the prior body
+    // representation (embedding worker will see encrypted content + skip
+    // it via the per-path is-encrypted check it inherits from the
+    // updated list_notes result).
+    state
+        .embeddings
+        .enqueue_path(std::path::PathBuf::from(&path));
+    Ok(())
+}
+
+/// Permanently remove encryption from a note. Requires the current
+/// password; on success the file is rewritten as plaintext.
+#[tauri::command]
+fn decrypt_existing_note(
+    path: String,
+    password: String,
+    state: tauri::State<AppState>,
+) -> Result<(), String> {
+    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let plaintext = encryption::decrypt(&content, &password)?;
+    std::fs::write(&path, plaintext).map_err(|e| e.to_string())?;
+    state
+        .embeddings
+        .enqueue_path(std::path::PathBuf::from(&path));
+    Ok(())
+}
+
+/// Re-encrypt a note with a new password (or set a password on a
+/// previously-plain note when `old_password` is empty).
+#[tauri::command]
+fn change_note_password(
+    path: String,
+    old_password: String,
+    new_password: String,
+    state: tauri::State<AppState>,
+) -> Result<(), String> {
+    if new_password.is_empty() {
+        return Err("new password is empty".into());
+    }
+    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let plaintext = if encryption::is_encrypted(&content) {
+        encryption::decrypt(&content, &old_password)?
+    } else {
+        content
+    };
+    let envelope = encryption::encrypt(&plaintext, &new_password)?;
+    std::fs::write(&path, envelope).map_err(|e| e.to_string())?;
     state
         .embeddings
         .enqueue_path(std::path::PathBuf::from(&path));
@@ -390,6 +479,26 @@ fn set_tagging_enabled(enabled: bool) -> Result<(), String> {
     config::save(&cfg).map_err(|e| e.to_string())
 }
 
+#[derive(serde::Serialize)]
+struct SecurityConfig {
+    reprompt_on_blur: bool,
+}
+
+#[tauri::command]
+fn get_security_config() -> SecurityConfig {
+    let cfg = config::load();
+    SecurityConfig {
+        reprompt_on_blur: cfg.reprompt_on_blur,
+    }
+}
+
+#[tauri::command]
+fn set_security_reprompt_on_blur(enabled: bool) -> Result<(), String> {
+    let mut cfg = config::load();
+    cfg.reprompt_on_blur = enabled;
+    config::save(&cfg).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn complete_text(before: String, after: String) -> Result<String, String> {
     if before.trim().is_empty() && after.trim().is_empty() {
@@ -675,6 +784,11 @@ fn reorder_saved_search(
 }
 
 #[tauri::command]
+fn unbind_saved_search_slot(id: String) -> Result<Vec<saved_searches::SavedSearch>, String> {
+    saved_searches::unbind_slot(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn next_free_search_slot() -> Option<u8> {
     saved_searches::next_free_slot()
 }
@@ -800,6 +914,7 @@ pub fn run() {
             delete_saved_search,
             rename_saved_search,
             reorder_saved_search,
+            unbind_saved_search_slot,
             next_free_search_slot,
             get_tag_vocabulary,
             set_tag_vocabulary,
@@ -807,6 +922,13 @@ pub fn run() {
             complete_text,
             complete_text_streaming,
             rewrite_text_streaming,
+            is_note_encrypted,
+            read_encrypted_note,
+            save_encrypted_note,
+            decrypt_existing_note,
+            change_note_password,
+            get_security_config,
+            set_security_reprompt_on_blur,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

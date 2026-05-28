@@ -225,6 +225,14 @@ impl EmbedIndex {
         }
 
         let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        // Encrypted notes can't be embedded — ciphertext has no semantic
+        // signal. Drop any prior row for this path so stale embeddings
+        // don't leak into related-notes results, then bail.
+        if crate::encryption::is_encrypted(&content) {
+            let path_str = path.to_string_lossy().to_string();
+            self.forget_path(&path_str);
+            return Ok(false);
+        }
         let (_fm, body) = crate::frontmatter::split(&content);
         let title = path
             .file_stem()

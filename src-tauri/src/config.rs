@@ -15,6 +15,16 @@ pub struct Config {
     /// in the editor's pill row. Object/status tags by design.
     #[serde(default = "default_tag_vocabulary")]
     pub tag_vocabulary: Vec<String>,
+    /// When true (default), drop every cached encrypted-note password on
+    /// window blur so encrypted notes re-lock as soon as the user
+    /// switches away. Turn off if you trust your local environment and
+    /// don't want to re-enter passwords constantly.
+    #[serde(default = "default_true")]
+    pub reprompt_on_blur: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -24,6 +34,7 @@ impl Default for Config {
             completion_model: default_completion_model(),
             notes_dir: None,
             tag_vocabulary: default_tag_vocabulary(),
+            reprompt_on_blur: true,
         }
     }
 }

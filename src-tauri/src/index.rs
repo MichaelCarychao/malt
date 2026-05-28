@@ -58,19 +58,28 @@ impl NoteIndex {
         let mut writer = self.index.writer(15_000_000)?;
         writer.delete_all_documents()?;
         for note in crate::notes::list_notes() {
-            let content = std::fs::read_to_string(&note.path).unwrap_or_default();
-            let (_fm, body) = crate::frontmatter::split(&content);
-            let tags = crate::tags::extract_tags_full(&content);
-            let expanded = crate::tags::expand_with_slash_parents(&tags);
             let mut doc = TantivyDocument::default();
             doc.add_text(self.path_field, &note.path);
             doc.add_text(self.title_field, &note.title);
-            doc.add_text(self.body_field, body);
-            for tag in &expanded {
-                doc.add_text(self.tags_field, tag);
+            if note.is_encrypted {
+                // Encrypted notes index by title only — the body is
+                // ciphertext, indexing it would leak no information but
+                // would also produce nonsense matches. Skip body + tag
+                // fields entirely. They're still findable by filename.
+                doc.add_u64(self.modified_field, note.modified);
+                doc.add_u64(self.empty_field, 0);
+            } else {
+                let content = std::fs::read_to_string(&note.path).unwrap_or_default();
+                let (_fm, body) = crate::frontmatter::split(&content);
+                let tags = crate::tags::extract_tags_full(&content);
+                let expanded = crate::tags::expand_with_slash_parents(&tags);
+                doc.add_text(self.body_field, body);
+                for tag in &expanded {
+                    doc.add_text(self.tags_field, tag);
+                }
+                doc.add_u64(self.modified_field, note.modified);
+                doc.add_u64(self.empty_field, if note.is_empty { 1 } else { 0 });
             }
-            doc.add_u64(self.modified_field, note.modified);
-            doc.add_u64(self.empty_field, if note.is_empty { 1 } else { 0 });
             writer.add_document(doc)?;
         }
         writer.commit()?;

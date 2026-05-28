@@ -15,6 +15,9 @@
     tags?: string[];
     is_conflict?: boolean;
     is_empty?: boolean;
+    /** True when the file is wrapped in a `MALT-ENC-v1:` envelope.
+     * Body can't be read without the password. */
+    is_encrypted?: boolean;
     title_matches?: [number, number][];
     snippet_matches?: [number, number][];
   };
@@ -235,6 +238,42 @@
   let tagVocabulary = $state<string[]>([]);
   let allTagCounts = $state<TagCount[]>([]);
   let allTagNames = $derived(allTagCounts.map((t) => t.name));
+
+  // ─── Per-note encryption ──────────────────────────────────────────
+  //
+  // Password cache keyed by note path. Lives only in memory — never
+  // persisted to disk. When the user opens an encrypted note we either
+  // hit this cache (silent unlock) or pop the password modal.
+  //
+  // The cache is cleared on window blur when
+  // securityRepromptOnBlur is true, so walking away from your laptop
+  // re-locks everything.
+  let unlockedPasswords = $state<Map<string, string>>(new Map());
+  let securityRepromptOnBlur = $state(true);
+
+  // Password prompt modal. Same modal serves four use cases —
+  // distinguished by `kind` — so the user gets one consistent surface:
+  //   unlock:  open an encrypted note (single password field)
+  //   encrypt: set initial password on a plaintext note (confirm field)
+  //   change:  rotate password on an encrypted note (current + new + confirm)
+  //   decrypt: confirm current password to drop encryption
+  type PasswordKind = "unlock" | "encrypt" | "change" | "decrypt";
+  let pwOpen = $state(false);
+  let pwKind = $state<PasswordKind>("unlock");
+  let pwPath = $state<string | null>(null);
+  let pwTitle = $state(""); // display name, for the modal header
+  let pwCurrent = $state("");
+  let pwNew = $state("");
+  let pwConfirm = $state("");
+  let pwError = $state<string | null>(null);
+  let pwBusy = $state(false);
+  let pwInputEl: HTMLInputElement | null = $state(null);
+  // Separate ref for the "new password" field in encrypt mode — Svelte
+  // doesn't allow conditional bind:this, so we keep distinct refs and
+  // pick which to focus based on `pwKind`.
+  let pwNewInputEl: HTMLInputElement | null = $state(null);
+  // After unlock, where to land. "primary" or "secondary" pane.
+  let pwTargetPane = $state<"primary" | "secondary">("primary");
 
   // Rename modal state.
   let renameOpen = $state(false);
@@ -728,6 +767,12 @@
   }
 
   function openNote(path: string) {
+    // Encrypted-note guard: if locked, pop the password modal first.
+    const note = allNotes.find((n) => n.path === path);
+    if (note?.is_encrypted && !unlockedPasswords.has(path)) {
+      openPasswordModal("unlock", path, note.title, "primary");
+      return;
+    }
     pushToHistory("primary", path);
     selectedPath = path;
     focusedPane = "primary";
@@ -1009,6 +1054,12 @@
   // Open in secondary pane (split). Pushes to secondary history; sidebar
   // highlight stays on primary's note (with green inset on the secondary).
   function openInSecondary(targetPath: string) {
+    // Encrypted-note guard for secondary pane.
+    const note = allNotes.find((n) => n.path === targetPath);
+    if (note?.is_encrypted && !unlockedPasswords.has(targetPath)) {
+      openPasswordModal("unlock", targetPath, note.title, "secondary");
+      return;
+    }
     pushToHistory("secondary", targetPath);
     secondaryPath = targetPath;
     focusedPane = "secondary";
@@ -1355,6 +1406,136 @@
     savedDragOverId = null;
   }
 
+  // ─── Password modal helpers ────────────────────────────────────────
+
+  function openPasswordModal(
+    kind: PasswordKind,
+    path: string,
+    title: string,
+    targetPane: "primary" | "secondary" = "primary",
+  ) {
+    pwKind = kind;
+    pwPath = path;
+    pwTitle = title;
+    pwTargetPane = targetPane;
+    pwCurrent = "";
+    pwNew = "";
+    pwConfirm = "";
+    pwError = null;
+    pwBusy = false;
+    pwOpen = true;
+    void tick().then(() => {
+      if (kind === "encrypt") pwNewInputEl?.focus();
+      else pwInputEl?.focus();
+    });
+  }
+  function cancelPasswordModal() {
+    pwOpen = false;
+    pwPath = null;
+    pwCurrent = "";
+    pwNew = "";
+    pwConfirm = "";
+    pwError = null;
+  }
+  async function confirmPasswordModal() {
+    const path = pwPath;
+    if (!path) return;
+    pwError = null;
+    pwBusy = true;
+    try {
+      if (pwKind === "unlock") {
+        // Verify by attempting decryption.
+        await invoke<string>("read_encrypted_note", { path, password: pwCurrent });
+        unlockedPasswords = new Map(unlockedPasswords).set(path, pwCurrent);
+        pwOpen = false;
+        // Finally route to the originally-requested pane.
+        if (pwTargetPane === "secondary") {
+          openInSecondary(path);
+        } else {
+          openNote(path);
+        }
+      } else if (pwKind === "encrypt") {
+        if (pwNew.length < 4) {
+          pwError = "password must be at least 4 characters";
+          return;
+        }
+        if (pwNew !== pwConfirm) {
+          pwError = "passwords don't match";
+          return;
+        }
+        // Read current plaintext, then encrypt with the new password.
+        const plaintext = await invoke<string>("read_note", { path });
+        await invoke("change_note_password", {
+          path,
+          oldPassword: "",
+          newPassword: pwNew,
+        });
+        // Cache password so the note can be saved without re-prompting.
+        unlockedPasswords = new Map(unlockedPasswords).set(path, pwNew);
+        pwOpen = false;
+        // notes_changed event will refresh the list; nothing else to do.
+        // Avoid unused-variable lint:
+        void plaintext;
+      } else if (pwKind === "change") {
+        if (pwNew.length < 4) {
+          pwError = "new password must be at least 4 characters";
+          return;
+        }
+        if (pwNew !== pwConfirm) {
+          pwError = "new passwords don't match";
+          return;
+        }
+        await invoke("change_note_password", {
+          path,
+          oldPassword: pwCurrent,
+          newPassword: pwNew,
+        });
+        unlockedPasswords = new Map(unlockedPasswords).set(path, pwNew);
+        pwOpen = false;
+      } else if (pwKind === "decrypt") {
+        await invoke("decrypt_existing_note", { path, password: pwCurrent });
+        const next = new Map(unlockedPasswords);
+        next.delete(path);
+        unlockedPasswords = next;
+        pwOpen = false;
+      }
+    } catch (e) {
+      pwError = String(e);
+    } finally {
+      pwBusy = false;
+    }
+  }
+
+  // Row context-menu entry points.
+  function rowMenuEncrypt(path: string) {
+    rowMenu = null;
+    const note = allNotes.find((n) => n.path === path);
+    if (!note) return;
+    openPasswordModal("encrypt", path, note.title);
+  }
+  function rowMenuChangePassword(path: string) {
+    rowMenu = null;
+    const note = allNotes.find((n) => n.path === path);
+    if (!note) return;
+    openPasswordModal("change", path, note.title);
+  }
+  function rowMenuDecrypt(path: string) {
+    rowMenu = null;
+    const note = allNotes.find((n) => n.path === path);
+    if (!note) return;
+    openPasswordModal("decrypt", path, note.title);
+  }
+
+  // Window blur: when the focus-reprompt toggle is on, drop the entire
+  // password cache so encrypted notes re-lock when the user walks away.
+  // We re-render after clearing so editors of encrypted notes display
+  // their "(locked)" state immediately.
+  function handleWindowBlur() {
+    if (!securityRepromptOnBlur) return;
+    if (unlockedPasswords.size === 0) return;
+    unlockedPasswords = new Map();
+  }
+
   function handleEditorTagClick(tag: string) {
     // Click a pill in the editor → filter the note list by that tag.
     query = `tag:${tag}`;
@@ -1467,6 +1648,15 @@
     }
   }
 
+  async function refreshSecurityConfig() {
+    try {
+      const cfg = await invoke<{ reprompt_on_blur: boolean }>("get_security_config");
+      securityRepromptOnBlur = cfg.reprompt_on_blur;
+    } catch {
+      // Default already true; nothing to do on failure.
+    }
+  }
+
   // Persist the last open primary note across restarts so users land where
   // they left off instead of always at "most recent".
   const LAST_OPEN_KEY = "malt.lastOpenPath";
@@ -1509,11 +1699,19 @@
       if (p === "loading" || p === "ready" || p === "error") embedStatus = p;
     });
     window.addEventListener("keydown", handleGlobalKey, true);
+    window.addEventListener("blur", handleWindowBlur);
+    // Settings → Security tab broadcasts when the toggle changes so we
+    // sync the in-memory mirror without re-querying.
+    window.addEventListener("malt:security-changed", ((e: Event) => {
+      const detail = (e as CustomEvent<{ reprompt_on_blur: boolean }>).detail;
+      if (detail) securityRepromptOnBlur = detail.reprompt_on_blur;
+    }) as EventListener);
     await Promise.all([
       refreshAllNotes(),
       refreshSavedSearches(),
       refreshTagMeta(),
       refreshApiKeyStatus(),
+      refreshSecurityConfig(),
     ]);
     // After list loads, try to restore the last-open note. The auto-select
     // effect would otherwise jump to whatever's first.
@@ -1660,6 +1858,7 @@
           class:secondary={note.path === secondaryPath && note.path !== selectedPath}
           class:conflict={note.is_conflict}
           class:empty-note={note.is_empty}
+          class:encrypted={note.is_encrypted}
           onclick={(e) => handleNoteClick(e, note.path)}
           ondblclick={(e) => {
             e.preventDefault();
@@ -1670,6 +1869,7 @@
         >
           <span class="note-title">
             {#if note.is_conflict}<span class="conflict-badge" title="Sync conflict — manually merge with the original">⚠</span>{/if}
+            {#if note.is_encrypted}<span class="encrypted-badge" title={unlockedPasswords.has(note.path) ? "Unlocked this session" : "Encrypted — click to unlock"}>{unlockedPasswords.has(note.path) ? "🔓" : "🔒"}</span>{/if}
             {@html highlight(note.title, note.title_matches)}
           </span>
           <span class="snippet">{@html highlight(note.snippet, note.snippet_matches)}</span>
@@ -1734,6 +1934,8 @@
               onTagPromote={handleEditorTagPromote}
               onSaved={flashSaved}
               onFinderReady={setPrimaryFinder}
+              isEncrypted={selectedPath ? !!allNotes.find((n) => n.path === selectedPath)?.is_encrypted : false}
+              password={selectedPath ? unlockedPasswords.get(selectedPath) ?? null : null}
             />
           </div>
           {#if secondaryPath}
@@ -1780,6 +1982,8 @@
                 onTagClick={handleEditorTagClick}
                 onTagPromote={handleEditorTagPromote}
                 onFinderReady={setSecondaryFinder}
+                isEncrypted={secondaryPath ? !!allNotes.find((n) => n.path === secondaryPath)?.is_encrypted : false}
+                password={secondaryPath ? unlockedPasswords.get(secondaryPath) ?? null : null}
               />
             </div>
           {/if}
@@ -1855,6 +2059,13 @@
     <button class="row-menu-item" onclick={() => void rowMenuDuplicate(rowMenu!.path)}>Duplicate</button>
     <button class="row-menu-item" onclick={() => void rowMenuReveal(rowMenu!.path)}>Reveal in file manager</button>
     <div class="row-menu-sep"></div>
+    {#if allNotes.find((n) => n.path === rowMenu!.path)?.is_encrypted}
+      <button class="row-menu-item" onclick={() => rowMenuChangePassword(rowMenu!.path)}>Change password…</button>
+      <button class="row-menu-item" onclick={() => rowMenuDecrypt(rowMenu!.path)}>Decrypt (remove password)…</button>
+    {:else}
+      <button class="row-menu-item" onclick={() => rowMenuEncrypt(rowMenu!.path)}>Encrypt…</button>
+    {/if}
+    <div class="row-menu-sep"></div>
     <button class="row-menu-item danger" onclick={() => rowMenuDelete(rowMenu!.path)}>Delete…</button>
   </div>
 {/if}
@@ -1916,6 +2127,98 @@
           onclick={() => void confirmRenameSavedSearch()}
           disabled={!renameSearchName.trim()}
         >rename</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if pwOpen}
+  <div
+    class="rename-backdrop"
+    role="presentation"
+    onclick={cancelPasswordModal}
+  >
+    <div
+      class="rename-panel pw-panel"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Note password"
+      onclick={(e) => e.stopPropagation()}
+      onkeydown={(e) => {
+        if (e.key === "Escape") { e.preventDefault(); cancelPasswordModal(); }
+      }}
+    >
+      <div class="rename-label">
+        {#if pwKind === "unlock"}🔓 unlock — {pwTitle}
+        {:else if pwKind === "encrypt"}🔒 encrypt — {pwTitle}
+        {:else if pwKind === "change"}🔁 change password — {pwTitle}
+        {:else}🔓 decrypt — {pwTitle}
+        {/if}
+      </div>
+      {#if pwKind === "unlock" || pwKind === "decrypt" || pwKind === "change"}
+        <input
+          class="rename-input"
+          type="password"
+          placeholder={pwKind === "change" ? "current password" : "password"}
+          bind:this={pwInputEl}
+          bind:value={pwCurrent}
+          onkeydown={(e) => {
+            if (e.key === "Enter" && pwKind !== "change") {
+              e.preventDefault();
+              void confirmPasswordModal();
+            }
+          }}
+        />
+      {/if}
+      {#if pwKind === "encrypt" || pwKind === "change"}
+        <input
+          class="rename-input"
+          type="password"
+          placeholder={pwKind === "change" ? "new password" : "password"}
+          bind:value={pwNew}
+          bind:this={pwNewInputEl}
+        />
+        <input
+          class="rename-input"
+          type="password"
+          placeholder="confirm"
+          bind:value={pwConfirm}
+          onkeydown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              void confirmPasswordModal();
+            }
+          }}
+        />
+      {/if}
+      {#if pwError}
+        <div class="pw-error">{pwError}</div>
+      {/if}
+      <div class="pw-hint">
+        {#if pwKind === "unlock"}Locked notes use AES-256-GCM with an Argon2id-derived key. Each save round-trips through the password.
+        {:else if pwKind === "encrypt"}Once set, the note's body is unreadable without this password. There's no recovery — losing it loses the note. {securityRepromptOnBlur ? "" : "(Re-prompt on focus loss is OFF.)"}
+        {:else if pwKind === "change"}Re-encrypts the note with a new key. The old password is required to decrypt; both encrypted-on-disk and in-memory cache update.
+        {:else}Removes encryption. The note will be written back to disk as plaintext markdown.
+        {/if}
+      </div>
+      <div class="rename-actions">
+        <button class="rename-btn cancel" onclick={cancelPasswordModal} disabled={pwBusy}>cancel</button>
+        <button
+          class="rename-btn confirm"
+          onclick={() => void confirmPasswordModal()}
+          disabled={pwBusy ||
+            (pwKind === "unlock" && !pwCurrent) ||
+            (pwKind === "decrypt" && !pwCurrent) ||
+            (pwKind === "encrypt" && (!pwNew || !pwConfirm)) ||
+            (pwKind === "change" && (!pwCurrent || !pwNew || !pwConfirm))}
+        >
+          {#if pwBusy}working…
+          {:else if pwKind === "unlock"}unlock
+          {:else if pwKind === "encrypt"}encrypt
+          {:else if pwKind === "change"}change
+          {:else}decrypt
+          {/if}
+        </button>
       </div>
     </div>
   </div>
@@ -2762,6 +3065,31 @@
     color: #555;
     font-style: italic;
     font-size: 10px;
+  }
+  /* Encrypted notes get a small lock glyph and a desaturated snippet so
+     they read as opaque-by-design rather than missing data. */
+  .encrypted-badge {
+    margin-right: 4px;
+    font-size: 11px;
+    cursor: help;
+  }
+  .note.encrypted .snippet {
+    color: #555;
+    font-style: italic;
+  }
+  .pw-panel .rename-input + .rename-input {
+    margin-top: 6px;
+  }
+  .pw-hint {
+    color: #777;
+    font-size: 11px;
+    line-height: 1.4;
+    margin-top: 6px;
+  }
+  .pw-error {
+    color: #c66;
+    font-size: 11px;
+    margin-top: 6px;
   }
   .conflict-pill {
     background: rgba(232, 163, 61, 0.1);
