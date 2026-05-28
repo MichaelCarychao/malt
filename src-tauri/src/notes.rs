@@ -64,21 +64,15 @@ pub fn is_conflict_filename(stem: &str) -> bool {
 }
 
 pub fn notes_dir() -> PathBuf {
-    // Honor the config override if set and the path exists / can be created.
-    if let Some(custom) = crate::config::load().notes_dir.as_deref() {
-        let p = PathBuf::from(custom);
-        if p.exists() || std::fs::create_dir_all(&p).is_ok() {
-            return p;
-        }
-        // If the configured path is unusable, fall through to the default
-        // rather than blocking the app entirely.
+    // v0.3.1+: route through the vaults registry. The active vault's
+    // path wins; the registry seeds itself from the legacy
+    // config.notes_dir on first load so existing installs migrate
+    // transparently.
+    let p = crate::vaults::active_path();
+    if !p.exists() {
+        let _ = std::fs::create_dir_all(&p);
     }
-    let mut dir = dirs::home_dir().unwrap_or_else(std::env::temp_dir);
-    dir.push("malt");
-    if !dir.exists() {
-        let _ = std::fs::create_dir_all(&dir);
-    }
-    dir
+    p
 }
 
 fn should_ignore(filename: &str) -> bool {
@@ -378,13 +372,31 @@ pub fn list_notes() -> Vec<NoteSummary> {
     notes
 }
 
+/// Handle for the live file watcher. Wrapped in a Mutex so vault
+/// switching can call `repoint(new_dir)` from another thread to
+/// un-watch the old path and watch the new one. Drops naturally on
+/// app exit when the last Arc goes out of scope.
+pub type WatcherHandle = Arc<std::sync::Mutex<Option<RecommendedWatcher>>>;
+
+/// Swap the directory the watcher is observing. Used on vault
+/// switch. Safe to call before `start_watcher` has run (no-op).
+pub fn repoint_watcher(handle: &WatcherHandle, old: &PathBuf, new: &PathBuf) {
+    let mut guard = handle.lock().expect("watcher handle lock");
+    if let Some(w) = guard.as_mut() {
+        // unwatch ignores errors — the old path may already be gone if
+        // the user moved or deleted it before switching.
+        let _ = w.unwatch(old);
+        let _ = w.watch(new, RecursiveMode::NonRecursive);
+    }
+}
+
 pub fn start_watcher(
     app_handle: AppHandle,
     index: Arc<NoteIndex>,
     tagger: Arc<Tagger>,
     backlinks: Arc<BacklinkIndex>,
     embeddings: Arc<EmbedIndex>,
-) -> notify::Result<()> {
+) -> notify::Result<WatcherHandle> {
     let dir = notes_dir();
     let (tx, rx) = channel::<Event>();
 
@@ -398,8 +410,14 @@ pub fn start_watcher(
     )?;
     watcher.watch(&dir, RecursiveMode::NonRecursive)?;
 
+    // Hand the watcher back to the caller via a Mutex<Option<...>> so
+    // it stays alive (it'd otherwise drop when start_watcher returns)
+    // AND so vault switching can swap the watched path.
+    let handle: WatcherHandle = Arc::new(std::sync::Mutex::new(Some(watcher)));
+
     std::thread::spawn(move || {
-        let _watcher = watcher; // keep alive for the lifetime of this thread
+        // No longer need to keep `watcher` alive here — the AppState
+        // holds the Arc.
         let debounce = Duration::from_millis(250);
         loop {
             let event = match rx.recv() {
@@ -448,5 +466,5 @@ pub fn start_watcher(
         }
     });
 
-    Ok(())
+    Ok(handle)
 }

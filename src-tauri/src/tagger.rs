@@ -87,8 +87,20 @@ impl Tagger {
         let key = secrets::get_api_key().map_err(|e| e.to_string())?;
         // Strip existing hashtags/canonical line before sending — don't want
         // the AI to anchor on tags we already have when proposing new ones.
+        // Prepend `# Title` (from filename stem) so the tagger sees what
+        // the note is about even when the body itself is fragmentary.
         let cleaned = crate::tags::strip_tags_for_ai(body_trimmed);
-        let body_for_api: String = cleaned.chars().take(MAX_BODY_CHARS).collect();
+        let truncated: String = cleaned.chars().take(MAX_BODY_CHARS).collect();
+        let title = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        let body_for_api = if title.is_empty() {
+            truncated
+        } else {
+            format!("# {}\n\n{}", title, truncated)
+        };
         let new_tags = ai::propose_tags(&key, &body_for_api).await?;
 
         // Pivot from YAML to inline: merge_tags_into_file unions the

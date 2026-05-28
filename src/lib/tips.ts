@@ -96,7 +96,7 @@ export const TIPS: Tip[] = [
     category: "shortcuts",
     headline: "Move between notes without touching the mouse",
     story:
-      "⌘↑ / ⌘↓ (or ⌘J / ⌘K) move between notes from anywhere — editor, sidebar, search bar. Hands stay on the keyboard.",
+      "⌘↑ / ⌘↓ (or ⌘; / ⌘K) move between notes from anywhere — editor, sidebar, search bar. Hands stay on the keyboard.",
   },
   {
     id: "s-cmd-w-close-secondary",
@@ -110,7 +110,7 @@ export const TIPS: Tip[] = [
     category: "shortcuts",
     headline: "Have Claude finish my thought",
     story:
-      "⌘J in the editor asks Claude to continue from your cursor. Select text first and ⌘J rewrites that selection. Re-press to re-roll.",
+      "⌘; in the editor asks Claude to continue from your cursor. Select text first and ⌘; rewrites that selection. Re-press to re-roll.",
   },
   {
     id: "s-esc-clear",
@@ -186,14 +186,14 @@ export const TIPS: Tip[] = [
     category: "ai",
     headline: "Accept a ghost suggestion three different ways",
     story:
-      "After ⌘J, accept the ghost with Tab, Enter, or an arrow key. Esc declines. The cursor lands at the end of the inserted text.",
+      "After ⌘;, accept the ghost with Tab, Enter, or an arrow key. Esc declines. The cursor lands at the end of the inserted text.",
   },
   {
     id: "ai-model-toggle",
     category: "ai",
     headline: "Pick fast, smart, or most-literary Claude",
     story:
-      "Settings → AI switches between Haiku (fast/cheap), Sonnet (better at long context), and Opus (most literary attention). Same ⌘J trigger.",
+      "Settings → AI switches between Haiku (fast/cheap), Sonnet (better at long context), and Opus (most literary attention). Same ⌘; trigger.",
   },
   {
     id: "ai-suggest-wikilinks",
@@ -222,6 +222,20 @@ export const TIPS: Tip[] = [
     headline: "Read and edit every prompt malt sends",
     story:
       "Settings → Prompts surfaces every system prompt Claude sees. Edit any of them; \"reset to default\" reverts. Overrides live in plain JSON.",
+  },
+  {
+    id: "g-vaults",
+    category: "general",
+    headline: "Keep work and play in separate vaults",
+    story:
+      "⌘⇧V opens the vault picker. Each vault is its own folder of notes — fully siloed, with its own index and embeddings. Click the vault chip at the bottom of the sidebar to switch.",
+  },
+  {
+    id: "g-brew-save",
+    category: "ai",
+    headline: "Save a brew session as its own note",
+    story:
+      "From the Brew pane, hit \"save as note\" to drop the brainstorm into a new note in the vault. The checkbox adds a [[link back]] to the source so it shows in linkbacks.",
   },
 
   // ── security ────────────────────────────────────────────────────

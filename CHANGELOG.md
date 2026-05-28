@@ -4,6 +4,44 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.3.1 — 2026-05-28
+
+- **Vault switching (Cmd/Ctrl+Shift+V).** New `vaults.rs` registry:
+  a list of named notes-folders, exactly one active at a time. Active
+  vault's name shows as a chip at the bottom of the sidebar; click it
+  for a dropdown of every vault. ⌘⇧V opens a filterable picker.
+  "Add vault" wizard lets you point at any folder (creates it if
+  missing). Switching repoints the file watcher live + rebuilds the
+  search index, backlinks, and embedding queue; no restart needed.
+  First-launch migration: pulls the legacy notes-dir into a single
+  "Default" vault so existing installs keep their notes.
+- **AI ghost moves from Cmd+J → Cmd+;.** Cmd+J turned out to be
+  swallowed by the Tauri webview on macOS (and is a download
+  shortcut in some browsers) — pressing it did nothing. Cmd+; is
+  safe across browsers, OSes, and Tauri's webview, and stays close
+  to the home row. Settings shortcut table + tip bank + on-screen
+  labels updated.
+- **Brew pane gains "save as note" + explicit close.** Inline form
+  with a "link back to <source>" checkbox (default on). Saving
+  creates a new note in the active vault titled "Brew of <source> —
+  <date>", optionally prepended with `From [[source]]`, and
+  navigates the primary pane to it.
+- **Title-as-H1 prepended to AI prompts.** The auto-tagger and the
+  brew prompt now both see the note as `# {title}\n\n{body}` instead
+  of body-only. Crucial context for short / fragmentary notes —
+  without it the model is guessing what the document is *about*.
+- **Markdown rendering supports `*italic*`, `__bold__`, and nested
+  bold/italic.** Old regex only handled `**bold**` and `_italic_`.
+  New regexes capture either pair and run as two independent
+  passes, which lets `**a *b* c**` decorate cleanly (italic inside
+  bold via CodeMirror's nested mark spans). Boundary checks prevent
+  `**foo**` from mis-matching as italic-of-"foo".
+- **Updater note (still operational).** Both v0.2.5 and v0.2.10 on
+  GitHub are still drafts; `/releases/latest` therefore 404s. Click
+  **Publish release** on the v0.2.10 draft (and v0.2.5 if you want
+  it discoverable) to make the updater see them. v0.3.1+ follows the
+  same path once published.
+
 ## 0.3.0 — 2026-05-28
 
 The "brew" half of the tagline arrives.

@@ -344,6 +344,27 @@
   // Brief boot splash that hides once the initial note list has loaded.
   let booting = $state(true);
 
+  // ── Vaults ────────────────────────────────────────────────────────
+  // Mirror of the backend vault registry. Refreshed on boot + after
+  // any mutating IPC. The active vault's name shows in the sidebar
+  // header next to the note count, and clicking it opens a dropdown
+  // of every vault for one-click switching.
+  type Vault = { name: string; path: string };
+  type VaultsState = { vaults: Vault[]; active_index: number };
+  let vaultsState = $state<VaultsState>({ vaults: [], active_index: 0 });
+  let activeVaultName = $derived(
+    vaultsState.vaults[vaultsState.active_index]?.name ?? "vault",
+  );
+  let vaultMenuOpen = $state(false);
+  let vaultPickerOpen = $state(false); // Cmd+Shift+V switcher modal
+  let vaultPickerInputEl: HTMLInputElement | null = $state(null);
+  let vaultPickerQuery = $state("");
+  // "Add vault" modal
+  let addVaultOpen = $state(false);
+  let addVaultName = $state("");
+  let addVaultPath = $state("");
+  let addVaultError = $state<string | null>(null);
+
   // Tips system — shown on the boot splash unless the user has opted out
   // via the "don't show on startup" checkbox. Also accessible on demand
   // from Settings → general via "Launch tips". When `tipsOpen` is true
@@ -691,6 +712,14 @@
         e.preventDefault();
         e.stopPropagation();
         void openExport();
+      }
+      if (sKey === "v") {
+        // Cmd/Ctrl+Shift+V opens the vault picker. Doesn't collide
+        // with paste-without-formatting (which is Cmd/Ctrl+Shift+V
+        // on Mac browsers too, but that only matters inside an input).
+        e.preventDefault();
+        e.stopPropagation();
+        void openVaultPicker();
       }
       return;
     }
@@ -1155,6 +1184,36 @@
       await invoke("save_note", { path: selectedPath, content: augmented });
     } catch (e) {
       console.error("appendBrewToSource failed", e);
+    }
+  }
+
+  // Save the brew as a brand-new note in the vault. Title is
+  // "Brew of <source title> — <date>" so the user can find them
+  // chronologically; if `linkBack` is on, prepend a wikilink to the
+  // source so the new note shows up in the source's linkbacks panel.
+  async function saveBrewAsNote(args: {
+    brew: string;
+    sourceTitle: string;
+    linkBack: boolean;
+  }) {
+    const stamp = new Date().toLocaleDateString();
+    const title = `Brew of ${args.sourceTitle || "untitled"} — ${stamp}`;
+    try {
+      const newPath = await invoke<string>("create_note", { title });
+      const linkLine = args.linkBack && args.sourceTitle
+        ? `From [[${args.sourceTitle}]]\n\n`
+        : "";
+      const body = `${linkLine}${args.brew.trim()}\n`;
+      await invoke("save_note", { path: newPath, content: body });
+      // Navigate to the new note in the primary pane; close the brew
+      // pane (the user just saved what was in it).
+      closeSecondary();
+      pushToHistory("primary", newPath);
+      selectedPath = newPath;
+      focusedPane = "primary";
+      void scrollSelectedIntoView("nearest");
+    } catch (e) {
+      console.error("saveBrewAsNote failed", e);
     }
   }
 
@@ -1802,6 +1861,97 @@
     }
   }
 
+  // ─── Vault management ────────────────────────────────────────────
+
+  async function refreshVaults() {
+    try {
+      vaultsState = await invoke<VaultsState>("list_vaults");
+    } catch {
+      vaultsState = { vaults: [], active_index: 0 };
+    }
+  }
+  async function switchVault(index: number) {
+    vaultMenuOpen = false;
+    vaultPickerOpen = false;
+    if (index === vaultsState.active_index) return;
+    try {
+      // Flush any pending edits before swapping out from under the editor.
+      await flushAllEditors();
+      vaultsState = await invoke<VaultsState>("switch_vault", { index });
+      // notes_changed fires from the backend; the existing listener
+      // refreshes allNotes + search. Reset selection so we don't try
+      // to render a note from the old vault.
+      selectedPath = null;
+      secondaryPath = null;
+      primaryHistory = { stack: [], idx: -1 };
+      secondaryHistory = { stack: [], idx: -1 };
+    } catch (e) {
+      console.error("switch_vault failed", e);
+    }
+  }
+  async function openVaultPicker() {
+    await refreshVaults();
+    vaultPickerOpen = true;
+    vaultPickerQuery = "";
+    await tick();
+    vaultPickerInputEl?.focus();
+  }
+  function closeVaultPicker() {
+    vaultPickerOpen = false;
+  }
+  let vaultPickerFiltered = $derived.by(() => {
+    const q = vaultPickerQuery.trim().toLowerCase();
+    if (!q) return [...vaultsState.vaults].sort((a, b) => a.name.localeCompare(b.name));
+    return vaultsState.vaults
+      .filter((v) => v.name.toLowerCase().includes(q) || v.path.toLowerCase().includes(q))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  });
+  function openAddVault() {
+    vaultPickerOpen = false;
+    addVaultName = "";
+    addVaultPath = "";
+    addVaultError = null;
+    addVaultOpen = true;
+  }
+  async function pickAddVaultPath() {
+    addVaultError = null;
+    try {
+      const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
+      const picked = await openDialog({
+        directory: true,
+        multiple: false,
+        title: "Choose a folder for this vault",
+      });
+      if (typeof picked === "string") addVaultPath = picked;
+    } catch (e) {
+      addVaultError = String(e);
+    }
+  }
+  async function confirmAddVault() {
+    addVaultError = null;
+    if (!addVaultPath.trim()) {
+      addVaultError = "pick a folder first";
+      return;
+    }
+    try {
+      await flushAllEditors();
+      vaultsState = await invoke<VaultsState>("add_vault", {
+        name: addVaultName.trim(),
+        path: addVaultPath.trim(),
+      });
+      addVaultOpen = false;
+      // add() auto-switches to the new vault. Reset selection state
+      // and force a refresh; the backend will rebuild indices.
+      await invoke("switch_vault", { index: vaultsState.active_index });
+      selectedPath = null;
+      secondaryPath = null;
+      primaryHistory = { stack: [], idx: -1 };
+      secondaryHistory = { stack: [], idx: -1 };
+    } catch (e) {
+      addVaultError = String(e);
+    }
+  }
+
   async function refreshSecurityConfig() {
     try {
       const cfg = await invoke<{ reprompt_on_blur: boolean }>("get_security_config");
@@ -1878,6 +2028,7 @@
       refreshTagMeta(),
       refreshApiKeyStatus(),
       refreshSecurityConfig(),
+      refreshVaults(),
     ]);
     // After list loads, try to restore the last-open note. The auto-select
     // effect would otherwise jump to whatever's first.
@@ -1962,6 +2113,13 @@
   {/if}
   <div class="status">
     <span class="count">
+      <button
+        class="vault-chip"
+        onclick={() => (vaultMenuOpen = !vaultMenuOpen)}
+        title={`Vault: ${activeVaultName} — click to switch · ${(typeof navigator !== "undefined" && /Mac/i.test(navigator.platform)) ? "⌘" : "Ctrl+"}⇧V opens picker`}
+        tabindex="-1"
+      >{activeVaultName}</button>
+      <span class="sep">·</span>
       {#if query}
         {notes.length} match{notes.length === 1 ? "" : "es"}
       {:else}
@@ -2155,6 +2313,7 @@
                   noteBody={brewSourceBody}
                   onClose={closeSecondary}
                   onAppendToSource={(brew) => void appendBrewToSource(brew)}
+                  onSaveAsNote={(args) => void saveBrewAsNote(args)}
                 />
               {:else}
                 <Editor
@@ -2451,6 +2610,117 @@
       <div class="rename-actions">
         <button class="rename-btn cancel" onclick={cancelReorderSavedSearch}>cancel</button>
         <button class="rename-btn confirm" onclick={() => void confirmReorderSavedSearch()}>move</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if vaultMenuOpen}
+  <div class="pill-menu-backdrop" role="presentation" onclick={() => (vaultMenuOpen = false)}></div>
+  <div class="vault-menu" role="menu">
+    <div class="vault-menu-head">Vaults</div>
+    {#each [...vaultsState.vaults].map((v, i) => ({ v, i })).sort((a, b) => a.v.name.localeCompare(b.v.name)) as item (item.v.path)}
+      <button
+        class="vault-menu-item"
+        class:active={item.i === vaultsState.active_index}
+        onclick={() => void switchVault(item.i)}
+        title={item.v.path}
+      >
+        <span class="vault-menu-name">{item.v.name}</span>
+        {#if item.i === vaultsState.active_index}<span class="vault-menu-current">active</span>{/if}
+      </button>
+    {/each}
+    <div class="row-menu-sep"></div>
+    <button class="vault-menu-item" onclick={() => { vaultMenuOpen = false; void openVaultPicker(); }}>
+      Open picker… <span class="vault-menu-hint">⇧+(⌘/Ctrl)+V</span>
+    </button>
+    <button class="vault-menu-item" onclick={openAddVault}>Add vault…</button>
+  </div>
+{/if}
+
+{#if vaultPickerOpen}
+  <div class="rename-backdrop" role="presentation" onclick={closeVaultPicker}>
+    <div class="rename-panel vault-picker" role="dialog" aria-modal="true" onclick={(e) => e.stopPropagation()}>
+      <div class="rename-label">switch vault</div>
+      <input
+        class="rename-input"
+        type="text"
+        placeholder="filter by name or path…"
+        bind:this={vaultPickerInputEl}
+        bind:value={vaultPickerQuery}
+        onkeydown={(e) => {
+          if (e.key === "Escape") { e.preventDefault(); closeVaultPicker(); }
+          if (e.key === "Enter" && vaultPickerFiltered.length > 0) {
+            e.preventDefault();
+            const first = vaultPickerFiltered[0];
+            const idx = vaultsState.vaults.findIndex((v) => v.path === first.path);
+            if (idx >= 0) void switchVault(idx);
+          }
+        }}
+      />
+      <ul class="vault-picker-list" aria-label="vaults">
+        {#each vaultPickerFiltered as v (v.path)}
+          {@const realIdx = vaultsState.vaults.findIndex((x) => x.path === v.path)}
+          <li>
+            <button
+              class="vault-picker-item"
+              class:active={realIdx === vaultsState.active_index}
+              onclick={() => void switchVault(realIdx)}
+            >
+              <span class="vault-picker-name">{v.name}</span>
+              <span class="vault-picker-path">{v.path}</span>
+            </button>
+          </li>
+        {/each}
+        {#if vaultPickerFiltered.length === 0}
+          <li class="vault-picker-empty">No vaults match.</li>
+        {/if}
+      </ul>
+      <div class="rename-actions">
+        <button class="rename-btn cancel" onclick={closeVaultPicker}>close</button>
+        <button class="rename-btn confirm" onclick={openAddVault}>add vault…</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if addVaultOpen}
+  <div class="rename-backdrop" role="presentation" onclick={() => (addVaultOpen = false)}>
+    <div class="rename-panel" role="dialog" aria-modal="true" onclick={(e) => e.stopPropagation()}>
+      <div class="rename-label">add vault</div>
+      <input
+        class="rename-input"
+        type="text"
+        placeholder="vault name (e.g. Work, Personal, Recipes)"
+        bind:value={addVaultName}
+        onkeydown={(e) => {
+          if (e.key === "Escape") { e.preventDefault(); addVaultOpen = false; }
+        }}
+      />
+      <div class="add-vault-path-row">
+        <input
+          class="rename-input"
+          type="text"
+          placeholder="folder path"
+          bind:value={addVaultPath}
+        />
+        <button class="rename-btn" onclick={() => void pickAddVaultPath()}>browse…</button>
+      </div>
+      <div class="reorder-hint">
+        Each vault is a folder of .md files — fully siloed from the others.
+        Each has its own index, embeddings, and saved searches… well,
+        eventually. For now, saved searches are shared globally.
+      </div>
+      {#if addVaultError}
+        <div class="pw-error">{addVaultError}</div>
+      {/if}
+      <div class="rename-actions">
+        <button class="rename-btn cancel" onclick={() => (addVaultOpen = false)}>cancel</button>
+        <button
+          class="rename-btn confirm"
+          onclick={() => void confirmAddVault()}
+          disabled={!addVaultPath.trim()}
+        >add</button>
       </div>
     </div>
   </div>
@@ -2838,6 +3108,136 @@
     border-color: #6cb6ff;
     color: #e0e0e0;
     background: rgba(108, 182, 255, 0.08);
+  }
+  .vault-chip {
+    background: transparent;
+    border: 0;
+    color: #d6b06a;
+    font: inherit;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 0;
+    cursor: pointer;
+  }
+  .vault-chip:hover {
+    text-decoration: underline;
+  }
+  .vault-menu {
+    position: fixed;
+    bottom: 28px;
+    left: 12px;
+    background: #1a1a1a;
+    border: 1px solid #333;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+    z-index: 201;
+    min-width: 220px;
+    padding: 4px 0;
+    font-size: 12px;
+  }
+  .vault-menu-head {
+    color: #555;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    padding: 4px 12px 6px;
+  }
+  .vault-menu-item {
+    display: flex;
+    width: 100%;
+    background: transparent;
+    border: 0;
+    color: #cfcfcf;
+    font: inherit;
+    font-size: 12px;
+    padding: 5px 12px;
+    cursor: pointer;
+    text-align: left;
+    align-items: center;
+    gap: 8px;
+  }
+  .vault-menu-item:hover {
+    background: #222;
+    color: #e0e0e0;
+  }
+  .vault-menu-item.active .vault-menu-name {
+    color: #d6b06a;
+  }
+  .vault-menu-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .vault-menu-current {
+    color: #d6b06a;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+  .vault-menu-hint {
+    margin-left: auto;
+    color: #555;
+    font-size: 10px;
+  }
+  .vault-picker {
+    min-width: 480px;
+  }
+  .vault-picker-list {
+    list-style: none;
+    margin: 8px 0;
+    padding: 0;
+    max-height: 320px;
+    overflow-y: auto;
+    border-top: 1px solid #2a2a2a;
+    border-bottom: 1px solid #2a2a2a;
+  }
+  .vault-picker-item {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid #1f1f1f;
+    color: #cfcfcf;
+    font: inherit;
+    padding: 6px 8px;
+    cursor: pointer;
+    text-align: left;
+    gap: 2px;
+  }
+  .vault-picker-item:hover {
+    background: #222;
+  }
+  .vault-picker-item.active {
+    background: rgba(214, 176, 106, 0.06);
+  }
+  .vault-picker-name {
+    color: #e0e0e0;
+    font-size: 12px;
+  }
+  .vault-picker-path {
+    color: #777;
+    font-size: 10px;
+    font-family: "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .vault-picker-empty {
+    color: #666;
+    font-size: 11px;
+    padding: 12px 8px;
+    font-style: italic;
+    list-style: none;
+  }
+  .add-vault-path-row {
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
+  }
+  .add-vault-path-row .rename-input {
+    flex: 1;
   }
   .saved-chip.dragging {
     opacity: 0.4;

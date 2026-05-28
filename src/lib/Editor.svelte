@@ -726,11 +726,13 @@
   const completionKeymap = Prec.highest(
     keymap.of([
       {
-        // Mod-j = AI/Insert. Previously Mod-i, but i was reclaimed for
-        // markdown italics (the markdown-editor convention) — see
-        // boldItalicKeymap below. The j alias for "next note" used to
-        // also live here; that's now Mod-↓ only.
-        key: "Mod-j",
+        // Mod-; = AI/Insert. Previously Mod-i (collided with the
+        // universal italics convention), then Mod-j (turned out to
+        // be webview/OS-grabbed on Tauri — silently swallowed before
+        // CodeMirror ever saw it). Mod-; is safe across browsers,
+        // OSes, and Tauri's webview, and stays close to the home
+        // row on QWERTY.
+        key: "Mod-;",
         run: (v) => {
           void fetchCompletion(v);
           return true;
@@ -1019,8 +1021,17 @@
   // skipped because it collides with bullet list markers, and `__bold__`
   // gets the same shape as **bold** but is rarely typed by hand.
 
-  const BOLD_RE = /\*\*([^\s*][^*\n]*?[^\s*]|\S)\*\*/g;
-  const ITALIC_RE = /(?<![A-Za-z0-9_])_([^\s_][^_\n]*?[^\s_]|\S)_(?![A-Za-z0-9_])/g;
+  // **bold** OR __bold__. Capture group 1 = the marker pair so we can
+  // backreference for the closing token. The inner text must start
+  // and end with a non-whitespace/non-marker char (rules out `** **`
+  // and avoids gobbling list-item asterisks).
+  const BOLD_RE = /(\*\*|__)(?=\S)([^\n]*?\S)\1/g;
+  // *italic* OR _italic_. Must NOT be a bold marker (the negative
+  // lookahead `(?!\1)` after the opening marker prevents matching the
+  // first `*` of `**`). Surrounding chars (look-behind / look-ahead)
+  // must not be word chars or the same marker — so `snake_case` and
+  // `**bold**` aren't mis-matched, but `_italic_` standing alone is.
+  const ITALIC_RE = /(?<![*_\w])(\*|_)(?!\1)(?=\S)([^\n]*?\S)\1(?![*_\w])/g;
 
   function getAlwaysShowMarkdown(): boolean {
     return (
@@ -1056,10 +1067,13 @@
         const alwaysShow = getAlwaysShowMarkdown();
         for (const { from, to } of view.visibleRanges) {
           const text = view.state.doc.sliceString(from, to);
-          // Pass 1: **bold**
-          this.scan(adds, text, from, sel, BOLD_RE, "cm-md-bold", 2, alwaysShow);
-          // Pass 2: _italic_
-          this.scan(adds, text, from, sel, ITALIC_RE, "cm-md-italic", 1, alwaysShow);
+          // Bold first: **X** OR __X__ — marker is 2 chars either way.
+          this.scan(adds, text, from, sel, BOLD_RE, "cm-md-bold", alwaysShow);
+          // Italic second: *X* OR _X_ — marker is 1 char either way.
+          // Runs AFTER bold so the bold ranges already exist; italic
+          // patterns inside bold (e.g. **a *b* c**) match independently
+          // and produce a nested span via CodeMirror's RangeSet.
+          this.scan(adds, text, from, sel, ITALIC_RE, "cm-md-italic", alwaysShow);
         }
         adds.sort((a, b) => a.from - b.from || a.to - b.to);
         const builder = new RangeSetBuilder<Decoration>();
@@ -1073,7 +1087,6 @@
         sel: { from: number; to: number },
         re: RegExp,
         cls: string,
-        markerLen: number,
         alwaysShow: boolean,
       ): void {
         re.lastIndex = 0;
@@ -1081,6 +1094,10 @@
         while ((m = re.exec(text)) !== null) {
           const start = offset + m.index;
           const end = start + m[0].length;
+          // Marker length is captured in group 1 (either `**`/`__` for
+          // bold or `*`/`_` for italic), so we derive it instead of
+          // hard-coding.
+          const markerLen = m[1].length;
           // Style the inner text. We mark the WHOLE span (markers
           // included) so the visual bold/italic also colors the
           // markers when they're visible — and so we can hide markers

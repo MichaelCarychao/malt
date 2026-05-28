@@ -13,6 +13,7 @@ mod saved_searches;
 mod secrets;
 mod tagger;
 mod tags;
+mod vaults;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,6 +23,10 @@ struct AppState {
     index: Arc<index::NoteIndex>,
     backlinks: Arc<backlinks::BacklinkIndex>,
     embeddings: Arc<embeddings::EmbedIndex>,
+    /// File-watcher handle. Holding the Arc keeps the watcher alive
+    /// for app lifetime; `notes::repoint_watcher` mutates it during
+    /// vault switches to follow the new path.
+    watcher: notes::WatcherHandle,
 }
 
 #[tauri::command]
@@ -545,12 +550,31 @@ async fn rewrite_text_streaming(
     .await
 }
 
+/// Build the AI-facing version of a note: title as an H1 heading,
+/// blank line, then the tag-stripped body. The title is crucial
+/// context — without it the model is guessing what the note is about
+/// from prose alone, which is brittle on short or fragmentary notes.
+/// We use `# Title` (the canonical markdown heading form) rather than
+/// `Title: X` so the model immediately recognizes the document shape.
+fn ai_payload_with_title(title: &str, body: &str) -> String {
+    let cleaned = crate::tags::strip_tags_for_ai(body);
+    let title = title.trim();
+    if title.is_empty() {
+        cleaned.trim().to_string()
+    } else {
+        format!("# {}\n\n{}", title, cleaned.trim())
+    }
+}
+
 /// Brew (brainstorm) on a note body, streaming the AI's response. The
 /// note body is everything except malt-private markup — strip tags
-/// and frontmatter so the model sees prose, not tag detritus. If the
-/// body is too thin the prompt asks the model to say so explicitly.
+/// and frontmatter so the model sees prose, not tag detritus. The
+/// title is prepended as an H1 heading so the model knows what the
+/// note is *about* even when the body is fragmentary. If the body is
+/// too thin the prompt asks the model to say so explicitly.
 #[tauri::command]
 async fn brew_streaming(
+    title: String,
     body: String,
     on_chunk: tauri::ipc::Channel<String>,
 ) -> Result<(), String> {
@@ -559,12 +583,8 @@ async fn brew_streaming(
     }
     let key = secrets::get_api_key().map_err(|e| format!("no API key: {e:?}"))?;
     let model = config::load().completion_model;
-    // Strip tag line + inline #tags so the model isn't fishing meaning
-    // out of malt-private markup. Wikilinks stay intact (they're prose
-    // signal — they tell the model what entities the user is thinking
-    // about).
-    let cleaned = crate::tags::strip_tags_for_ai(&body);
-    ai::stream_brew(&key, &model, &cleaned, |text| {
+    let payload = ai_payload_with_title(&title, &body);
+    ai::stream_brew(&key, &model, &payload, |text| {
         let _ = on_chunk.send(text.to_string());
     })
     .await
@@ -665,6 +685,75 @@ fn reveal_note(path: String) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+}
+
+// ── Vaults ────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn list_vaults() -> vaults::VaultsState {
+    vaults::load()
+}
+
+#[tauri::command]
+fn active_vault_name() -> String {
+    vaults::active_name()
+}
+
+#[tauri::command]
+fn add_vault(name: String, path: String) -> Result<vaults::VaultsState, String> {
+    vaults::add(name, path)
+}
+
+#[tauri::command]
+async fn switch_vault(
+    index: u32,
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<vaults::VaultsState, String> {
+    // Capture the path the watcher is currently observing BEFORE we
+    // flip the active vault — `notes::notes_dir()` reads through the
+    // vaults registry, so it changes the instant `switch` returns.
+    let old_dir = notes::notes_dir();
+    let updated = vaults::switch(index as usize)?;
+    let new_dir = notes::notes_dir();
+    notes::repoint_watcher(&state.watcher, &old_dir, &new_dir);
+    // Reindex everything for the new vault. Backlinks + search index
+    // rebuild are cheap (in-memory); embeddings are queued by the
+    // background worker so the user doesn't block on them. The
+    // notes_changed event triggers a frontend refresh.
+    state.index.rebuild().map_err(|e| e.to_string())?;
+    state.backlinks.rebuild();
+    state.embeddings.enqueue_dir();
+    let _ = tauri::Emitter::emit(&app_handle, "notes_changed", ());
+    let _ = tauri::Emitter::emit(&app_handle, "vault_changed", &updated);
+    Ok(updated)
+}
+
+#[tauri::command]
+fn rename_vault(index: u32, name: String) -> Result<vaults::VaultsState, String> {
+    vaults::rename(index as usize, name)
+}
+
+#[tauri::command]
+fn remove_vault(
+    index: u32,
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<vaults::VaultsState, String> {
+    let old_dir = notes::notes_dir();
+    let updated = vaults::remove(index as usize)?;
+    let new_dir = notes::notes_dir();
+    if old_dir != new_dir {
+        notes::repoint_watcher(&state.watcher, &old_dir, &new_dir);
+    }
+    // Removing a vault may have shifted the active one. Reindex to
+    // match whatever the new active vault is.
+    state.index.rebuild().map_err(|e| e.to_string())?;
+    state.backlinks.rebuild();
+    state.embeddings.enqueue_dir();
+    let _ = tauri::Emitter::emit(&app_handle, "notes_changed", ());
+    let _ = tauri::Emitter::emit(&app_handle, "vault_changed", &updated);
+    Ok(updated)
 }
 
 #[tauri::command]
@@ -910,18 +999,19 @@ pub fn run() {
             let tag_worker = tagger::Tagger::new();
             tag_worker.enqueue_dir();
             tagger::start(tag_worker.clone(), app.handle().clone());
-            app.manage(AppState {
-                index: note_index.clone(),
-                backlinks: backlink_index.clone(),
-                embeddings: embed_index.clone(),
-            });
-            notes::start_watcher(
+            let watcher_handle = notes::start_watcher(
                 app.handle().clone(),
-                note_index,
+                note_index.clone(),
                 tag_worker,
-                backlink_index,
-                embed_index,
+                backlink_index.clone(),
+                embed_index.clone(),
             )?;
+            app.manage(AppState {
+                index: note_index,
+                backlinks: backlink_index,
+                embeddings: embed_index,
+                watcher: watcher_handle,
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -951,6 +1041,12 @@ pub fn run() {
             reveal_notes_dir,
             reveal_note,
             duplicate_note,
+            list_vaults,
+            active_vault_name,
+            add_vault,
+            switch_vault,
+            rename_vault,
+            remove_vault,
             app_version,
             list_saved_searches,
             upsert_saved_search,

@@ -21,11 +21,20 @@
     noteBody = "",
     onClose,
     onAppendToSource,
+    onSaveAsNote,
   }: {
     noteTitle?: string;
     noteBody?: string;
     onClose?: () => void;
     onAppendToSource?: (brew: string) => void;
+    /** Save the brew as a new note. The pane decides whether to add a
+     * back-link to the source (the user toggles the checkbox below).
+     * Parent handles `create_note` IPC + navigation to the new note. */
+    onSaveAsNote?: (args: {
+      brew: string;
+      sourceTitle: string;
+      linkBack: boolean;
+    }) => void;
   } = $props();
 
   let output = $state("");
@@ -36,6 +45,10 @@
   // Hash of (title + body) so we re-stream when the parent swaps in a
   // different source note without unmounting the pane.
   let lastSource = "";
+
+  // "Save as note" inline form state.
+  let saveLinked = $state(true);
+  let saveFormOpen = $state(false);
 
   async function runBrew(body: string) {
     if (!body.trim()) {
@@ -56,7 +69,10 @@
       if (scroller) scroller.scrollTop = scroller.scrollHeight;
     };
     try {
-      await invoke("brew_streaming", { body, onChunk: channel });
+      // Pass title alongside body — backend prepends it as a `# Title`
+      // heading so the model knows what the note is about even when
+      // the body is fragmentary.
+      await invoke("brew_streaming", { title: noteTitle, body, onChunk: channel });
     } catch (e) {
       if (activeChannel === channel) {
         error = String(e);
@@ -92,6 +108,11 @@
   function rerun() {
     void runBrew(noteBody);
   }
+  function commitSaveAsNote() {
+    if (!output.trim() || !onSaveAsNote) return;
+    onSaveAsNote({ brew: output, sourceTitle: noteTitle, linkBack: saveLinked });
+    saveFormOpen = false;
+  }
 
   onMount(() => {
     // No-op; the $effect above kicks off the initial run.
@@ -114,9 +135,28 @@
       <button class="brew-btn" onclick={rerun} disabled={busy} title="Re-run on the current note body">re-run</button>
       <button class="brew-btn" onclick={copyToClipboard} disabled={!output} title="Copy the brew to clipboard">copy</button>
       <button class="brew-btn" onclick={appendToSource} disabled={!output} title="Append the brew to the bottom of the source note">append</button>
-      <button class="brew-close" onclick={() => onClose?.()} aria-label="Close brew pane" title="Close (Ctrl+W)">×</button>
+      <button
+        class="brew-btn"
+        onclick={() => (saveFormOpen = !saveFormOpen)}
+        disabled={!output}
+        class:active={saveFormOpen}
+        title="Save the brew as a new note in the vault"
+      >save as note</button>
+      <button class="brew-btn close-btn" onclick={() => onClose?.()} title="Close brew pane (Ctrl+W)">close</button>
     </span>
   </div>
+  {#if saveFormOpen}
+    <div class="brew-save-form">
+      <label class="brew-save-link">
+        <input type="checkbox" bind:checked={saveLinked} />
+        link back to <strong>{noteTitle || "source"}</strong>
+      </label>
+      <span class="brew-save-actions">
+        <button class="brew-btn" onclick={() => (saveFormOpen = false)}>cancel</button>
+        <button class="brew-btn primary" onclick={commitSaveAsNote}>save</button>
+      </span>
+    </div>
+  {/if}
   <div class="brew-body" bind:this={scroller}>
     {#if error}
       <div class="brew-error">{error}</div>
@@ -193,18 +233,50 @@
     opacity: 0.35;
     cursor: not-allowed;
   }
-  .brew-close {
-    background: transparent;
-    border: 0;
-    color: #888;
-    font-size: 16px;
-    line-height: 1;
-    cursor: pointer;
-    padding: 0 6px;
+  .brew-btn.close-btn {
+    /* Slightly demoted styling so "close" doesn't fight with re-run /
+       copy / append / save-as-note for attention. */
+    border-color: #2a2a2a;
     margin-left: 4px;
   }
-  .brew-close:hover {
+  .brew-btn.active {
+    border-color: #d6b06a;
     color: #e0e0e0;
+    background: rgba(214, 176, 106, 0.08);
+  }
+  .brew-btn.primary {
+    border-color: #6c6;
+    color: #e0e0e0;
+    background: rgba(108, 198, 108, 0.08);
+  }
+  .brew-save-form {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    border-bottom: 1px solid #2a2a2a;
+    background: #161616;
+    font-size: 11px;
+  }
+  .brew-save-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: #cfcfcf;
+    cursor: pointer;
+    flex: 1;
+  }
+  .brew-save-link input {
+    margin: 0;
+  }
+  .brew-save-link strong {
+    color: #d6b06a;
+    font-weight: normal;
+    font-style: italic;
+  }
+  .brew-save-actions {
+    display: flex;
+    gap: 6px;
   }
   .brew-body {
     flex: 1;
