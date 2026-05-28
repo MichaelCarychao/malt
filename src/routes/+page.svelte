@@ -6,6 +6,14 @@
   import Editor from "$lib/Editor.svelte";
   import Linkbacks from "$lib/Linkbacks.svelte";
   import { flushAllEditors } from "$lib/editorRegistry";
+  import {
+    type Tip,
+    pickNextTip,
+    markSeen,
+    getLastSeen,
+    shouldSkipOnStartup,
+    setSkipOnStartup,
+  } from "$lib/tips";
 
   type Note = {
     path: string;
@@ -325,6 +333,22 @@
   let hasApiKey = $state(false);
   // Brief boot splash that hides once the initial note list has loaded.
   let booting = $state(true);
+
+  // Tips system — shown on the boot splash unless the user has opted out
+  // via the "don't show on startup" checkbox. Also accessible on demand
+  // from Settings → general via "Launch tips". When `tipsOpen` is true
+  // the boot splash stays mounted so the user can navigate; pressing
+  // any key dismisses (boot path) or Esc dismisses (settings-launch path).
+  let tipsOpen = $state(false);
+  let tipCurrent = $state<Tip | null>(null);
+  let tipHistory: Tip[] = []; // in-memory back-stack for ←
+  let tipSkipOnStartup = $state(false);
+  // Distinguish boot-time tips (auto-dismiss enabled) from on-demand
+  // tips launched from Settings (Esc-only dismiss, no skip checkbox).
+  let tipsLaunchedFromSettings = $state(false);
+  // Track when the splash mounted so we can enforce the 1s minimum
+  // duration even on fast boots — prevents a jarring flash.
+  let bootMountedAt = $state<number>(0);
   // Right-click context menu on sidebar note rows.
   let rowMenu = $state<{ path: string; x: number; y: number } | null>(null);
 
@@ -1248,7 +1272,11 @@
 
   async function openSaveSearchModal() {
     if (!query.trim()) return;
-    saveSearchName = "";
+    // Pre-fill name with the query itself so you can hit Enter to save
+    // without typing anything. Common case: you already type queries
+    // that read like names ("tag:draft", "modified:<7d", "meeting"),
+    // and a literal-name save is rarely worse than nothing.
+    saveSearchName = query.trim();
     try {
       saveSearchSlot = await invoke<number | null>("next_free_search_slot");
     } catch {
@@ -1257,6 +1285,7 @@
     saveSearchOpen = true;
     await tick();
     saveSearchInputEl?.focus();
+    saveSearchInputEl?.select();
   }
 
   function cancelSaveSearch() {
@@ -1536,6 +1565,68 @@
     unlockedPasswords = new Map();
   }
 
+  // ─── Tips system ─────────────────────────────────────────────────
+
+  function nextTip() {
+    if (tipCurrent) tipHistory.push(tipCurrent);
+    const t = pickNextTip(tipCurrent);
+    if (t) {
+      tipCurrent = t;
+      markSeen(t.id);
+    }
+  }
+  function prevTip() {
+    const t = tipHistory.pop();
+    if (t) {
+      tipCurrent = t;
+      // markSeen is intentional here — viewing again counts as a view.
+      markSeen(t.id);
+    }
+  }
+  function dismissTips() {
+    const wasLaunchedFromSettings = tipsLaunchedFromSettings;
+    tipsOpen = false;
+    tipsLaunchedFromSettings = false;
+    // When launched from Settings, the splash isn't really "booting" any
+    // more — just hide it immediately. The boot path has its own 1s
+    // minimum enforced elsewhere (and the user actively dismissed the
+    // tip anyway, signalling they've seen enough).
+    if (wasLaunchedFromSettings) return;
+    if (booting) booting = false;
+  }
+  function launchTipsFromSettings() {
+    tipsLaunchedFromSettings = true;
+    // Resume from the last-seen tip if we have one; otherwise start fresh.
+    const last = getLastSeen();
+    tipCurrent = last ?? pickNextTip(null);
+    if (tipCurrent) markSeen(tipCurrent.id);
+    tipHistory = [];
+    tipsOpen = true;
+  }
+  function toggleSkipTipsOnStartup(e: Event) {
+    const target = e.target as HTMLInputElement;
+    tipSkipOnStartup = target.checked;
+    setSkipOnStartup(tipSkipOnStartup);
+  }
+  function handleTipsKey(e: KeyboardEvent) {
+    if (!tipsOpen) return;
+    if (e.key === "ArrowRight") {
+      e.preventDefault();
+      nextTip();
+    } else if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      prevTip();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      dismissTips();
+    } else if (!tipsLaunchedFromSettings) {
+      // On the boot splash, any other key dismisses too — matches the
+      // "tap any key" prompt at the bottom of the splash.
+      e.preventDefault();
+      dismissTips();
+    }
+  }
+
   function handleEditorTagClick(tag: string) {
     // Click a pill in the editor → filter the note list by that tag.
     query = `tag:${tag}`;
@@ -1700,12 +1791,24 @@
     });
     window.addEventListener("keydown", handleGlobalKey, true);
     window.addEventListener("blur", handleWindowBlur);
+    window.addEventListener("keydown", handleTipsKey);
     // Settings → Security tab broadcasts when the toggle changes so we
     // sync the in-memory mirror without re-querying.
     window.addEventListener("malt:security-changed", ((e: Event) => {
       const detail = (e as CustomEvent<{ reprompt_on_blur: boolean }>).detail;
       if (detail) securityRepromptOnBlur = detail.reprompt_on_blur;
     }) as EventListener);
+    // Splash + tip prep. Record the mount time so we can enforce a
+    // minimum 1 second on-screen duration even on fast boots — without
+    // it, instant boots flash the splash for a frame or two before the
+    // app pops in, which reads as a glitch.
+    bootMountedAt = Date.now();
+    tipSkipOnStartup = shouldSkipOnStartup();
+    if (!tipSkipOnStartup) {
+      tipCurrent = pickNextTip(null);
+      if (tipCurrent) markSeen(tipCurrent.id);
+      tipsOpen = true;
+    }
     await Promise.all([
       refreshAllNotes(),
       refreshSavedSearches(),
@@ -1722,10 +1825,15 @@
     }
     await tick();
     searchInput?.focus();
-    // Splash animation handles its own visibility via @keyframes + visibility:
-    // hidden at the end. Unmount the element after the animation completes
-    // so we don't leave hidden DOM around.
-    setTimeout(() => { booting = false; }, 800);
+    // If the user opted out of tips, drop the splash after the 1 second
+    // minimum + 320ms fade-out animation. Otherwise the splash stays up
+    // until the user dismisses (any key tap or arrow nav, handled in
+    // handleTipsKey).
+    if (tipSkipOnStartup) {
+      const elapsed = Date.now() - bootMountedAt;
+      const remaining = Math.max(0, 1320 - elapsed);
+      setTimeout(() => { booting = false; }, remaining);
+    }
     // Silent background update check 5s after boot. Errors are swallowed
     // (offline, GitHub down, no published release yet → all fine to ignore).
     setTimeout(() => { void checkForUpdates({ silent: true }); }, 5000);
@@ -1735,6 +1843,8 @@
     unlisten?.();
     unlistenEmbedStatus?.();
     window.removeEventListener("keydown", handleGlobalKey, true);
+    window.removeEventListener("keydown", handleTipsKey);
+    window.removeEventListener("blur", handleWindowBlur);
   });
 </script>
 
@@ -1861,9 +1971,13 @@
           class:encrypted={note.is_encrypted}
           onclick={(e) => handleNoteClick(e, note.path)}
           ondblclick={(e) => {
+            // Double-click pops the full actions menu (Rename / Encrypt /
+            // Delete / etc.) at the cursor — same surface as right-click,
+            // so trackpad users without a right-click gesture still get
+            // every action including encryption.
             e.preventDefault();
             e.stopPropagation();
-            void openRename(note.path);
+            handleNoteContextMenu(e, note.path);
           }}
           oncontextmenu={(e) => handleNoteContextMenu(e, note.path)}
         >
@@ -2037,6 +2151,10 @@
   onRenameSavedSearch={(id, currentName) => startRenameSavedSearch(id, currentName)}
   onReorderSavedSearch={(id, currentSlot) => startReorderSavedSearch(id, currentSlot)}
   onSavedSearchesUpdated={(list) => (savedSearches = list)}
+  onLaunchTips={() => {
+    settingsOpen = false;
+    launchTipsFromSettings();
+  }}
 />
 
 {#if rowMenu}
@@ -2262,10 +2380,53 @@
   </div>
 {/if}
 
-{#if booting}
-  <div class="boot-splash">
-    <div class="boot-logo">m</div>
-    <div class="boot-label">malt</div>
+{#if booting || tipsOpen}
+  <div
+    class="boot-splash"
+    class:tips-open={tipsOpen}
+    class:settings-launch={tipsLaunchedFromSettings}
+    role="presentation"
+    onclick={tipsOpen ? dismissTips : undefined}
+  >
+    <div class="boot-card" onclick={(e) => e.stopPropagation()} role="presentation">
+      <img class="boot-logo-img" src="/malt-icon.png" alt="malt" />
+      <div class="boot-label">malt</div>
+
+      {#if tipsOpen && tipCurrent}
+        <div class="tip-card">
+          <div class="tip-category">{tipCurrent.category}</div>
+          <div class="tip-story">{tipCurrent.story}</div>
+        </div>
+        <div class="tip-controls">
+          <button
+            class="tip-arrow"
+            onclick={(e) => { e.stopPropagation(); prevTip(); }}
+            disabled={tipHistory.length === 0}
+            title="Previous tip (←)"
+            aria-label="Previous tip"
+          >‹</button>
+          <button
+            class="tip-arrow"
+            onclick={(e) => { e.stopPropagation(); nextTip(); }}
+            title="Next tip (→)"
+            aria-label="Next tip"
+          >›</button>
+        </div>
+        {#if !tipsLaunchedFromSettings}
+          <div class="tip-dismiss-hint">tap any key to dismiss</div>
+          <label class="tip-skip-label" onclick={(e) => e.stopPropagation()}>
+            <input
+              type="checkbox"
+              checked={tipSkipOnStartup}
+              onchange={toggleSkipTipsOnStartup}
+            />
+            don't show tips on startup
+          </label>
+        {:else}
+          <button class="tip-close" onclick={dismissTips}>close (Esc)</button>
+        {/if}
+      {/if}
+    </div>
   </div>
 {/if}
 
@@ -2753,23 +2914,117 @@
     align-items: center;
     justify-content: center;
     z-index: 300;
+    pointer-events: auto;
+  }
+  /* No-tip path: the splash fades out automatically after the 1s minimum
+     duration. With tips open, the splash stays put until dismissed. */
+  .boot-splash:not(.tips-open) {
     animation: boot-fade 320ms ease forwards;
-    animation-delay: 200ms;
+    animation-delay: 1000ms;
     pointer-events: none;
   }
-  .boot-logo {
-    font-family: "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
-    font-size: 80px;
-    font-weight: 700;
-    color: #d6b06a;
-    line-height: 1;
-    margin-bottom: 8px;
+  .boot-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    max-width: 560px;
+    padding: 24px;
+  }
+  .boot-logo-img {
+    /* Use the actual bezeled icon so we don't render a squished
+       monospace letter as a logo. width:height auto = native aspect. */
+    width: 96px;
+    height: 96px;
+    display: block;
+    image-rendering: -webkit-optimize-contrast;
   }
   .boot-label {
     color: #555;
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.3em;
+  }
+  .tip-card {
+    background: #222;
+    border: 1px solid #333;
+    border-left: 3px solid #d6b06a;
+    border-radius: 3px;
+    padding: 14px 18px;
+    margin-top: 20px;
+    max-width: 460px;
+    text-align: left;
+  }
+  .tip-category {
+    color: #d6b06a;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    margin-bottom: 6px;
+  }
+  .tip-story {
+    color: #cfcfcf;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  .tip-controls {
+    display: flex;
+    gap: 10px;
+    margin-top: 12px;
+  }
+  .tip-arrow {
+    background: transparent;
+    border: 1px solid #333;
+    color: #888;
+    font: inherit;
+    font-size: 16px;
+    line-height: 1;
+    padding: 4px 12px;
+    cursor: pointer;
+    border-radius: 2px;
+  }
+  .tip-arrow:hover:not(:disabled) {
+    color: #e0e0e0;
+    border-color: #555;
+  }
+  .tip-arrow:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+  .tip-dismiss-hint {
+    color: #666;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    margin-top: 14px;
+  }
+  .tip-skip-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+    color: #888;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .tip-skip-label input {
+    margin: 0;
+  }
+  .tip-close {
+    background: transparent;
+    border: 1px solid #333;
+    color: #aaa;
+    font: inherit;
+    font-size: 11px;
+    padding: 4px 14px;
+    margin-top: 14px;
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .tip-close:hover {
+    color: #e0e0e0;
+    border-color: #555;
   }
   @keyframes boot-fade {
     from { opacity: 1; }

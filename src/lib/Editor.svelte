@@ -1986,40 +1986,45 @@
     color: #f4c97c;
     border-radius: 2px;
   }
+  /*
+   * Wikilink color states — !important on every color line because the
+   * markdown grammar in @codemirror/lang-markdown treats [[Foo]] as a
+   * reference-style link [Foo], and the oneDark theme's HighlightStyle
+   * paints that token cyan-grey at a higher specificity. Without
+   * !important all three states render the same theme color.
+   *
+   *   live     — sky blue ......................... existing note with content
+   *   empty    — amber italic .................... existing note that's blank
+   *   broken   — red dashed ...................... no matching note (yet)
+   */
   :global(.editor .cm-wikilink) {
-    color: #6cb6ff;
-    text-decoration: underline;
-    text-decoration-color: rgba(108, 182, 255, 0.4);
+    color: #6cb6ff !important;
+    text-decoration: underline !important;
+    text-decoration-color: rgba(108, 182, 255, 0.55) !important;
     text-underline-offset: 2px;
     cursor: pointer;
   }
   :global(.editor .cm-wikilink:hover) {
-    text-decoration-color: rgba(108, 182, 255, 0.9);
+    text-decoration-color: rgba(108, 182, 255, 0.95) !important;
   }
   :global(.editor .cm-wikilink-empty) {
-    /* Resolves to an existing note that has no real content. We use the
-       same amber accent the app uses elsewhere for "needs your attention"
-       (version badge, save-search slot, drop indicator) so an empty note
-       reads as "draft, fill me in" — clearly distinct from the live blue
-       and the broken red. Solid underline keeps it distinct from broken
-       (which is dashed). */
     color: #d6b06a !important;
-    text-decoration: underline;
-    text-decoration-color: rgba(214, 176, 106, 0.55);
-    font-style: italic;
+    text-decoration: underline !important;
+    text-decoration-color: rgba(214, 176, 106, 0.6) !important;
+    font-style: italic !important;
   }
   :global(.editor .cm-wikilink-empty:hover) {
     color: #e6c685 !important;
-    text-decoration-color: rgba(214, 176, 106, 1);
+    text-decoration-color: rgba(214, 176, 106, 1) !important;
   }
   :global(.editor .cm-wikilink-broken) {
-    color: #c97a7a;
-    text-decoration: underline dashed;
-    text-decoration-color: rgba(201, 122, 122, 0.6);
+    color: #c97a7a !important;
+    text-decoration: underline dashed !important;
+    text-decoration-color: rgba(201, 122, 122, 0.7) !important;
     text-underline-offset: 2px;
     cursor: pointer;
   }
   :global(.editor .cm-wikilink-broken:hover) {
-    text-decoration-color: rgba(201, 122, 122, 1);
+    text-decoration-color: rgba(201, 122, 122, 1) !important;
   }
 </style>

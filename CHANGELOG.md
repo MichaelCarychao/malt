@@ -4,7 +4,38 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
-## 0.2.7 — 2026-05-28
+## 0.2.8 — 2026-05-28
+
+- **Tips system.** Replaced the boot splash content with a rotating
+  user-story-style tip carousel. Each tip is tagged with a Settings
+  category and stored in a typed bank (`src/lib/tips.ts`). Selection
+  algorithm: random from unseen pool until you've seen them all, then
+  truly random with no immediate repeats. Arrow keys (or ‹ / ›
+  buttons) navigate forward/back; back-stack works across sessions
+  via `localStorage`. Tap any other key dismisses. New "don't show
+  tips on startup" checkbox (default off) — reinstateable from
+  Settings → general, which also gets a "browse tips…" button and a
+  "reset seen list" action.
+- **Boot splash uses the real bezeled icon image** instead of a
+  squished monospace "m". Minimum on-screen duration is now 1 s
+  (plus 320 ms fade) so fast boots no longer flash a frame of splash
+  before the app pops in.
+- **Wikilink colors now actually differentiate.** The markdown
+  grammar in `@codemirror/lang-markdown` was treating `[[Foo]]` as a
+  reference-style link and the `oneDark` theme's HighlightStyle was
+  painting the inner text at higher specificity than our class.
+  Added `!important` to every wikilink color rule so live / empty /
+  broken are visibly distinct again: **blue** = ready,
+  **amber italic** = empty draft, **red dashed** = missing.
+- **Default save-search name = current query.** Open the save modal
+  and the name field is pre-filled with whatever you typed; hit
+  Enter to save without typing again. The text is pre-selected so
+  any keystroke replaces it.
+- **Double-click on a note row opens the full actions menu** instead
+  of jumping straight to rename. Rename is one of the options, plus
+  Open / Open in second pane / Duplicate / Reveal / Encrypt / Delete.
+  Trackpad users without a right-click gesture now reach every
+  action including encryption.
 
 - **Per-note encryption.** Right-click any note → Encrypt… → set a
   password. Body is wrapped in a `MALT-ENC-v1:` envelope (AES-256-GCM

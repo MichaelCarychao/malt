@@ -2,6 +2,13 @@
   import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
+  import {
+    shouldSkipOnStartup,
+    setSkipOnStartup,
+    tipsBankSize,
+    seenCount,
+    resetSeenTips,
+  } from "$lib/tips";
 
   // Saved searches: passed in from parent so we don't duplicate the list
   // fetching. Each entry has { id, name, query, slot }.
@@ -18,6 +25,7 @@
     onRenameSavedSearch,
     onReorderSavedSearch,
     onSavedSearchesUpdated,
+    onLaunchTips,
   }: {
     open: boolean;
     onCheckForUpdates?: () => void;
@@ -32,6 +40,9 @@
      * (e.g. drag-and-drop reorder). Parent should set its state from the
      * passed list rather than re-fetching. */
     onSavedSearchesUpdated?: (list: SavedSearchRef[]) => void;
+    /** Open the tips browser on demand (parent handles, including
+     * closing this settings panel first). */
+    onLaunchTips?: () => void;
   } = $props();
 
   const isMac = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
@@ -90,6 +101,25 @@
   ];
 
   let vimMode = $state(false);
+  // Tips state mirrors localStorage; refresh whenever the panel opens so
+  // toggling on the splash and re-opening Settings shows the new state.
+  let tipsSkip = $state(false);
+  let tipsSeen = $state(0);
+  let tipsTotal = $state(0);
+  function refreshTipsState() {
+    tipsSkip = shouldSkipOnStartup();
+    tipsSeen = seenCount();
+    tipsTotal = tipsBankSize();
+  }
+  function toggleTipsSkip(e: Event) {
+    const target = e.target as HTMLInputElement;
+    setSkipOnStartup(target.checked);
+    tipsSkip = target.checked;
+  }
+  function resetTipsHistory() {
+    resetSeenTips();
+    tipsSeen = 0;
+  }
   let notesDirPath = $state("");
   let notesDirDirty = $state(false);
   let notesDirError = $state<string | null>(null);
@@ -276,6 +306,11 @@
     }
     if (open && !securityLoaded) {
       void loadSecurityConfig();
+    }
+    if (open) {
+      // Tips state lives in localStorage; cheap to re-read every open
+      // so the count reflects any splash interactions since last view.
+      refreshTipsState();
     }
   });
 
@@ -488,6 +523,51 @@
         {:else}
           <p class="hint-text">Off. Standard editor bindings apply.</p>
         {/if}
+      </section>
+      <section>
+        <h3>tips</h3>
+        <table>
+          <tbody>
+            <tr>
+              <td class="keys">launch</td>
+              <td class="action ai-row">
+                <button class="ai-btn" onclick={() => onLaunchTips?.()}>browse tips…</button>
+                <span class="hint-text" style="margin: 0;">{tipsSeen} / {tipsTotal} seen</span>
+              </td>
+              <td class="status"></td>
+            </tr>
+            <tr>
+              <td class="keys">on startup</td>
+              <td class="action">
+                <label class="toggle-label">
+                  <input
+                    type="checkbox"
+                    checked={!tipsSkip}
+                    onchange={(e) => {
+                      const t = e.target as HTMLInputElement;
+                      // Inverted: checkbox reads "show on startup" but
+                      // the underlying setting is "skip on startup".
+                      setSkipOnStartup(!t.checked);
+                      tipsSkip = !t.checked;
+                    }}
+                  />
+                  {tipsSkip ? "off" : "on"} — show a tip when malt opens
+                </label>
+              </td>
+              <td class="status"></td>
+            </tr>
+            {#if tipsSeen > 0}
+              <tr>
+                <td class="keys">history</td>
+                <td class="action ai-row">
+                  <button class="ai-btn" onclick={resetTipsHistory}>reset seen list</button>
+                  <span class="hint-text" style="margin: 0;">re-shuffle the deck from the top</span>
+                </td>
+                <td class="status"></td>
+              </tr>
+            {/if}
+          </tbody>
+        </table>
       </section>
       <section>
         <h3>notes folder</h3>
