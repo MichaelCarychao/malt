@@ -8,7 +8,9 @@ mod frontmatter;
 mod index;
 mod link_suggestions;
 mod notes;
+mod openai_compat;
 mod prompts;
+mod providers;
 mod saved_searches;
 mod secrets;
 mod tagger;
@@ -271,8 +273,11 @@ async fn suggest_wikilinks_ai(
     // completion paths. We don't want the AI fixating on existing tags or
     // wikilinks instead of finding fresh entities.
     let clean = tags::strip_tags_for_ai(&content);
-    let key = secrets::get_api_key().map_err(|e| format!("no API key: {e:?}"))?;
-    let entities = ai::propose_entities(&key, &clean).await?;
+    let cfg = config::load();
+    let provider = cfg.active_provider;
+    let key = secrets::get_api_key_for(provider.id())
+        .map_err(|e| format!("no API key for {}: {e:?}", provider.label()))?;
+    let entities = ai::dispatch_propose_entities(provider, &key, &clean).await?;
     Ok(link_suggestions::build_entity_suggestions(&content, &entities))
 }
 
@@ -473,6 +478,98 @@ async fn test_api_key() -> Result<String, String> {
     ai::test_call(&key).await
 }
 
+// ── Provider-aware key + test commands ─────────────────────────────
+
+#[tauri::command]
+fn set_api_key_for(provider: providers::Provider, key: String) -> Result<(), String> {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return Err("empty key".into());
+    }
+    secrets::set_api_key_for(provider.id(), trimmed)
+        .map_err(|e| format!("set failed: {e:?}"))?;
+    let got = secrets::get_api_key_for(provider.id())
+        .map_err(|e| format!("verify failed: {e:?}"))?;
+    if got != trimmed {
+        return Err(format!(
+            "keyring round-trip mismatch for {} (stored {} chars, got back {})",
+            provider.label(),
+            trimmed.len(),
+            got.len()
+        ));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn has_api_key_for(provider: providers::Provider) -> bool {
+    secrets::has_api_key_for(provider.id())
+}
+
+#[tauri::command]
+fn clear_api_key_for(provider: providers::Provider) -> Result<(), String> {
+    secrets::clear_api_key_for(provider.id())
+        .map_err(|e| format!("clear failed: {e:?}"))
+}
+
+#[tauri::command]
+async fn test_api_key_for(provider: providers::Provider) -> Result<String, String> {
+    let key = secrets::get_api_key_for(provider.id())
+        .map_err(|e| format!("no key for {}: {e:?}", provider.label()))?;
+    if key.is_empty() {
+        return Err(format!("no key set for {}", provider.label()));
+    }
+    let model = config::load().model_for(provider);
+    ai::dispatch_test(provider, &key, &model).await
+}
+
+#[tauri::command]
+fn set_active_provider(provider: providers::Provider) -> Result<(), String> {
+    let mut cfg = config::load();
+    cfg.active_provider = provider;
+    config::save(&cfg).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_provider_model(provider: providers::Provider, model: String) -> Result<(), String> {
+    let mut cfg = config::load();
+    cfg.provider_models.insert(provider.id().to_string(), model.clone());
+    // Mirror onto completion_model for legacy code paths when the
+    // active provider is Anthropic; harmless otherwise.
+    if cfg.active_provider == provider && provider == providers::Provider::Anthropic {
+        cfg.completion_model = model;
+    }
+    config::save(&cfg).map_err(|e| e.to_string())
+}
+
+#[derive(serde::Serialize)]
+struct ProviderInfo {
+    id: &'static str,
+    label: &'static str,
+    default_model: &'static str,
+    suggested_models: Vec<&'static str>,
+    note: &'static str,
+    has_key: bool,
+    model: String,
+}
+
+#[tauri::command]
+fn list_providers() -> Vec<ProviderInfo> {
+    let cfg = config::load();
+    providers::ALL
+        .iter()
+        .map(|&p| ProviderInfo {
+            id: p.id(),
+            label: p.label(),
+            default_model: p.default_model(),
+            suggested_models: p.suggested_models().to_vec(),
+            note: p.note(),
+            has_key: secrets::has_api_key_for(p.id()),
+            model: cfg.model_for(p),
+        })
+        .collect()
+}
+
 #[tauri::command]
 fn get_config() -> config::Config {
     config::load()
@@ -524,9 +621,12 @@ async fn complete_text_streaming(
     if before.trim().is_empty() && after.trim().is_empty() {
         return Ok(());
     }
-    let key = secrets::get_api_key().map_err(|e| format!("no API key: {e:?}"))?;
-    let model = config::load().completion_model;
-    ai::stream_completion(&key, &model, &before, &after, |text| {
+    let cfg = config::load();
+    let provider = cfg.active_provider;
+    let key = secrets::get_api_key_for(provider.id())
+        .map_err(|e| format!("no API key for {}: {e:?}", provider.label()))?;
+    let model = cfg.model_for(provider);
+    ai::dispatch_stream_completion(provider, &key, &model, &before, &after, |text| {
         let _ = on_chunk.send(text.to_string());
     })
     .await
@@ -542,9 +642,12 @@ async fn rewrite_text_streaming(
     if selected.trim().is_empty() {
         return Ok(());
     }
-    let key = secrets::get_api_key().map_err(|e| format!("no API key: {e:?}"))?;
-    let model = config::load().completion_model;
-    ai::stream_rewrite(&key, &model, &before, &selected, &after, |text| {
+    let cfg = config::load();
+    let provider = cfg.active_provider;
+    let key = secrets::get_api_key_for(provider.id())
+        .map_err(|e| format!("no API key for {}: {e:?}", provider.label()))?;
+    let model = cfg.model_for(provider);
+    ai::dispatch_stream_rewrite(provider, &key, &model, &before, &selected, &after, |text| {
         let _ = on_chunk.send(text.to_string());
     })
     .await
@@ -581,10 +684,13 @@ async fn brew_streaming(
     if body.trim().is_empty() {
         return Err("nothing to brew — the note is empty.".into());
     }
-    let key = secrets::get_api_key().map_err(|e| format!("no API key: {e:?}"))?;
-    let model = config::load().completion_model;
+    let cfg = config::load();
+    let provider = cfg.active_provider;
+    let key = secrets::get_api_key_for(provider.id())
+        .map_err(|e| format!("no API key for {}: {e:?}", provider.label()))?;
+    let model = cfg.model_for(provider);
     let payload = ai_payload_with_title(&title, &body);
-    ai::stream_brew(&key, &model, &payload, |text| {
+    ai::dispatch_stream_brew(provider, &key, &model, &payload, |text| {
         let _ = on_chunk.send(text.to_string());
     })
     .await
@@ -1034,6 +1140,13 @@ pub fn run() {
             has_api_key,
             clear_api_key,
             test_api_key,
+            set_api_key_for,
+            has_api_key_for,
+            clear_api_key_for,
+            test_api_key_for,
+            set_active_provider,
+            set_provider_model,
+            list_providers,
             get_config,
             set_tagging_enabled,
             set_completion_model,

@@ -84,7 +84,9 @@ impl Tagger {
             }
         }
 
-        let key = secrets::get_api_key().map_err(|e| e.to_string())?;
+        let cfg = crate::config::load();
+        let provider = cfg.active_provider;
+        let key = crate::secrets::get_api_key_for(provider.id()).map_err(|e| e.to_string())?;
         // Strip existing hashtags/canonical line before sending — don't want
         // the AI to anchor on tags we already have when proposing new ones.
         // Prepend `# Title` (from filename stem) so the tagger sees what
@@ -101,7 +103,7 @@ impl Tagger {
         } else {
             format!("# {}\n\n{}", title, truncated)
         };
-        let new_tags = ai::propose_tags(&key, &body_for_api).await?;
+        let new_tags = ai::dispatch_propose_tags(provider, &key, &body_for_api).await?;
 
         // Pivot from YAML to inline: merge_tags_into_file unions the
         // proposed tags with any existing tags (inline + canonical line +

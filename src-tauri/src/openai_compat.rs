@@ -1,0 +1,209 @@
+// OpenAI-compatible Chat Completions client.
+//
+// Used for OpenAI, DeepSeek, xAI Grok, and Google Gemini's OpenAI-compat
+// endpoint. All four expose the same wire format — `POST <base>/chat/completions`
+// with an `Authorization: Bearer <key>` header, returning standard SSE
+// `data: {json}\n\n` lines terminated by `data: [DONE]`. The only
+// differences are base URL, model name, and minor capability deltas
+// (which we don't exercise here).
+//
+// Anthropic stays in `ai.rs` — its event stream uses different field
+// names and its messages API takes a top-level `system` parameter
+// instead of a "system" role message.
+
+use serde::{Deserialize, Serialize};
+
+const ANTHROPIC_TIMEOUT_SECS: u64 = 30;
+
+#[derive(Serialize)]
+struct ChatCompletionRequest<'a> {
+    model: &'a str,
+    messages: Vec<ChatMessage<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct ChatMessage<'a> {
+    role: &'a str,
+    content: &'a str,
+}
+
+// Non-streaming response shape — only need the content.
+#[derive(Deserialize)]
+struct ChatCompletionResponse {
+    choices: Vec<NonStreamChoice>,
+}
+#[derive(Deserialize)]
+struct NonStreamChoice {
+    message: NonStreamMessage,
+}
+#[derive(Deserialize)]
+struct NonStreamMessage {
+    #[serde(default)]
+    content: Option<String>,
+}
+
+// Streaming chunk shape — deltas land in `choices[].delta.content`.
+#[derive(Deserialize)]
+struct StreamChunk {
+    #[serde(default)]
+    choices: Vec<StreamChoice>,
+}
+#[derive(Deserialize)]
+struct StreamChoice {
+    #[serde(default)]
+    delta: Option<StreamDelta>,
+}
+#[derive(Deserialize)]
+struct StreamDelta {
+    #[serde(default)]
+    content: Option<String>,
+}
+
+// Error envelope. Both OpenAI and the compat-mode forks use this shape.
+#[derive(Deserialize)]
+struct ApiError {
+    error: ApiErrorBody,
+}
+#[derive(Deserialize)]
+struct ApiErrorBody {
+    message: String,
+}
+
+fn client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(ANTHROPIC_TIMEOUT_SECS))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// One-shot, non-streaming chat completion. Used for the connectivity
+/// test that fires when the user clicks "test" in Settings → AI.
+pub async fn send(
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    system: Option<&str>,
+    user: &str,
+    max_tokens: Option<u32>,
+) -> Result<String, String> {
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let mut messages = Vec::with_capacity(2);
+    if let Some(s) = system {
+        messages.push(ChatMessage { role: "system", content: s });
+    }
+    messages.push(ChatMessage { role: "user", content: user });
+    let req = ChatCompletionRequest {
+        model,
+        messages,
+        max_tokens,
+        stream: None,
+    };
+    let resp = client()
+        .post(&url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Content-Type", "application/json")
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| format!("network error: {e}"))?;
+    let status = resp.status();
+    let body = resp.text().await.map_err(|e| format!("read error: {e}"))?;
+    if !status.is_success() {
+        if let Ok(api_err) = serde_json::from_str::<ApiError>(&body) {
+            return Err(format!("{} ({})", api_err.error.message, status));
+        }
+        return Err(format!("HTTP {}: {}", status, body));
+    }
+    let parsed: ChatCompletionResponse =
+        serde_json::from_str(&body).map_err(|e| format!("parse error: {e}: {body}"))?;
+    Ok(parsed
+        .choices
+        .into_iter()
+        .filter_map(|c| c.message.content)
+        .collect::<Vec<_>>()
+        .join(""))
+}
+
+/// Streaming chat completion. Invokes `on_text` with each delta as it
+/// arrives. Returns when the stream completes or errors.
+pub async fn stream<F>(
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    system: Option<&str>,
+    user: &str,
+    max_tokens: Option<u32>,
+    mut on_text: F,
+) -> Result<(), String>
+where
+    F: FnMut(&str),
+{
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let mut messages = Vec::with_capacity(2);
+    if let Some(s) = system {
+        messages.push(ChatMessage { role: "system", content: s });
+    }
+    messages.push(ChatMessage { role: "user", content: user });
+    let req = ChatCompletionRequest {
+        model,
+        messages,
+        max_tokens,
+        stream: Some(true),
+    };
+
+    let mut resp = client()
+        .post(&url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Content-Type", "application/json")
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| format!("network error: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if let Ok(api_err) = serde_json::from_str::<ApiError>(&body) {
+            return Err(format!("{} ({})", api_err.error.message, status));
+        }
+        return Err(format!("HTTP {}: {}", status, body));
+    }
+
+    let mut buffer = String::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("chunk error: {e}"))?
+    {
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        // SSE events separated by blank lines.
+        while let Some(end) = buffer.find("\n\n") {
+            let event = buffer[..end].to_string();
+            buffer.drain(..end + 2);
+            for line in event.lines() {
+                let Some(data) = line.strip_prefix("data: ") else {
+                    continue;
+                };
+                if data.trim() == "[DONE]" {
+                    return Ok(());
+                }
+                let Ok(parsed) = serde_json::from_str::<StreamChunk>(data) else {
+                    continue;
+                };
+                for choice in parsed.choices {
+                    if let Some(delta) = choice.delta {
+                        if let Some(text) = delta.content {
+                            on_text(&text);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}

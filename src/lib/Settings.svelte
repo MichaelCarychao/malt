@@ -26,6 +26,11 @@
     onReorderSavedSearch,
     onSavedSearchesUpdated,
     onLaunchTips,
+    vaultsState = { vaults: [], active_index: 0 },
+    onSwitchVault,
+    onAddVault,
+    onRenameVault,
+    onRemoveVault,
   }: {
     open: boolean;
     onCheckForUpdates?: () => void;
@@ -43,6 +48,15 @@
     /** Open the tips browser on demand (parent handles, including
      * closing this settings panel first). */
     onLaunchTips?: () => void;
+    /** Parent's vault state, so the Vaults tab can render the active
+     * vault badge and offer add/switch/rename/remove without a
+     * separate IPC round-trip on every open. Parent owns the
+     * authoritative list; we delegate mutations through callbacks. */
+    vaultsState?: { vaults: { name: string; path: string }[]; active_index: number };
+    onSwitchVault?: (index: number) => void;
+    onAddVault?: () => void;
+    onRenameVault?: (index: number, name: string) => void;
+    onRemoveVault?: (index: number) => void;
   } = $props();
 
   const isMac = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
@@ -135,6 +149,7 @@
   type SettingsTab =
     | "general"
     | "shortcuts"
+    | "vaults"
     | "searches"
     | "tags"
     | "ai"
@@ -148,6 +163,7 @@
       if (
         t === "general" ||
         t === "shortcuts" ||
+        t === "vaults" ||
         t === "searches" ||
         t === "tags" ||
         t === "ai" ||
@@ -241,15 +257,110 @@
       /* no-op */
     }
   }
-  let hasAiKey = $state(false);
-  let aiKeyLoaded = $state(false);
-  let apiKeyInput = $state("");
-  let testing = $state(false);
-  let testResult = $state("");
-  let testError = $state(false);
   let taggingEnabled = $state(false);
-  let completionModel = $state("claude-haiku-4-5");
   let configLoaded = $state(false);
+
+  // ── Multi-provider AI state ───────────────────────────────────────
+  type ProviderId = "anthropic" | "openai" | "deepseek" | "grok" | "gemini";
+  type ProviderInfo = {
+    id: ProviderId;
+    label: string;
+    default_model: string;
+    suggested_models: string[];
+    note: string;
+    has_key: boolean;
+    model: string;
+  };
+  let providersList = $state<ProviderInfo[]>([]);
+  let activeProviderId = $state<ProviderId>("anthropic");
+  let providersLoaded = $state(false);
+  let providerKeyInputs = $state<Record<string, string>>({});
+  let providerModelInputs = $state<Record<string, string>>({});
+  let providerTestResults = $state<Record<string, string>>({});
+  let providerTestErrors = $state<Record<string, boolean>>({});
+  let providerTesting = $state<Record<string, boolean>>({});
+
+  async function loadProviders() {
+    try {
+      const list = await invoke<ProviderInfo[]>("list_providers");
+      providersList = list;
+      // Mirror model values into editable inputs so the user can
+      // type-in a custom model name without immediately blowing away
+      // the default in the suggested-pick row.
+      const models: Record<string, string> = {};
+      for (const p of list) models[p.id] = p.model;
+      providerModelInputs = models;
+      // Discover active provider from config.
+      const cfg = await invoke<{ active_provider: ProviderId }>("get_config");
+      activeProviderId = cfg.active_provider;
+    } catch (e) {
+      console.error("loadProviders failed", e);
+    } finally {
+      providersLoaded = true;
+    }
+  }
+
+  async function setActiveProvider(id: ProviderId) {
+    try {
+      await invoke("set_active_provider", { provider: id });
+      activeProviderId = id;
+    } catch (e) {
+      console.error("set_active_provider failed", e);
+    }
+  }
+
+  async function saveProviderKey(id: ProviderId) {
+    const key = providerKeyInputs[id]?.trim();
+    if (!key) return;
+    try {
+      await invoke("set_api_key_for", { provider: id, key });
+      providerKeyInputs = { ...providerKeyInputs, [id]: "" };
+      await loadProviders();
+    } catch (e) {
+      providerTestResults = { ...providerTestResults, [id]: String(e) };
+      providerTestErrors = { ...providerTestErrors, [id]: true };
+    }
+  }
+  async function clearProviderKey(id: ProviderId) {
+    try {
+      await invoke("clear_api_key_for", { provider: id });
+      providerTestResults = { ...providerTestResults, [id]: "cleared" };
+      providerTestErrors = { ...providerTestErrors, [id]: false };
+      await loadProviders();
+    } catch (e) {
+      providerTestResults = { ...providerTestResults, [id]: String(e) };
+      providerTestErrors = { ...providerTestErrors, [id]: true };
+    }
+  }
+  async function testProviderKey(id: ProviderId) {
+    providerTesting = { ...providerTesting, [id]: true };
+    providerTestResults = { ...providerTestResults, [id]: "" };
+    try {
+      const reply = await invoke<string>("test_api_key_for", { provider: id });
+      providerTestResults = { ...providerTestResults, [id]: `ok — replied: "${reply.trim()}"` };
+      providerTestErrors = { ...providerTestErrors, [id]: false };
+    } catch (e) {
+      providerTestResults = { ...providerTestResults, [id]: String(e) };
+      providerTestErrors = { ...providerTestErrors, [id]: true };
+    } finally {
+      providerTesting = { ...providerTesting, [id]: false };
+    }
+  }
+  async function saveProviderModel(id: ProviderId) {
+    const model = providerModelInputs[id]?.trim();
+    if (!model) return;
+    try {
+      await invoke("set_provider_model", { provider: id, model });
+      await loadProviders();
+    } catch (e) {
+      console.error("set_provider_model failed", e);
+    }
+  }
+  function pickSuggestedModel(id: ProviderId, model: string) {
+    providerModelInputs = { ...providerModelInputs, [id]: model };
+    void saveProviderModel(id);
+  }
+
   // Security tab state — same lazy-load pattern as the rest.
   let repromptOnBlur = $state(true);
   let securityLoaded = $state(false);
@@ -341,10 +452,6 @@
     }
   }
 
-  const HAIKU = "claude-haiku-4-5";
-  const SONNET = "claude-sonnet-4-6";
-  const OPUS = "claude-opus-4-7";
-
   onMount(() => {
     vimMode = localStorage.getItem("malt.vim") === "1";
   });
@@ -408,8 +515,8 @@
   }
 
   $effect(() => {
-    if (open && !aiKeyLoaded) {
-      void loadHasKey();
+    if (open && !providersLoaded) {
+      void loadProviders();
     }
     if (open && !configLoaded) {
       void loadConfig();
@@ -489,14 +596,10 @@
 
   async function loadConfig() {
     try {
-      const cfg = await invoke<{ tagging_enabled: boolean; completion_model: string }>(
-        "get_config"
-      );
+      const cfg = await invoke<{ tagging_enabled: boolean }>("get_config");
       taggingEnabled = cfg.tagging_enabled;
-      completionModel = cfg.completion_model || HAIKU;
     } catch {
       taggingEnabled = false;
-      completionModel = HAIKU;
     } finally {
       configLoaded = true;
     }
@@ -511,75 +614,6 @@
     } catch (err) {
       target.checked = !enabled;
       console.error("set_tagging_enabled failed", err);
-    }
-  }
-
-  async function setModel(model: string) {
-    const prev = completionModel;
-    completionModel = model;
-    try {
-      await invoke("set_completion_model", { model });
-    } catch (e) {
-      completionModel = prev;
-      console.error("set_completion_model failed", e);
-    }
-  }
-
-  $effect(() => {
-    if (!open) {
-      testResult = "";
-      apiKeyInput = "";
-    }
-  });
-
-  async function loadHasKey() {
-    try {
-      hasAiKey = await invoke<boolean>("has_api_key");
-    } catch {
-      hasAiKey = false;
-    } finally {
-      aiKeyLoaded = true;
-    }
-  }
-
-  async function saveKey() {
-    if (!apiKeyInput.trim()) return;
-    try {
-      await invoke("set_api_key", { key: apiKeyInput });
-      apiKeyInput = "";
-      hasAiKey = true;
-      testResult = "saved to OS keychain";
-      testError = false;
-    } catch (e) {
-      testResult = String(e);
-      testError = true;
-    }
-  }
-
-  async function clearKey() {
-    try {
-      await invoke("clear_api_key");
-      hasAiKey = false;
-      testResult = "cleared";
-      testError = false;
-    } catch (e) {
-      testResult = String(e);
-      testError = true;
-    }
-  }
-
-  async function testKey() {
-    testing = true;
-    testResult = "";
-    try {
-      const reply = await invoke<string>("test_api_key");
-      testResult = `ok — claude replied: "${reply.trim()}"`;
-      testError = false;
-    } catch (e) {
-      testResult = String(e);
-      testError = true;
-    } finally {
-      testing = false;
     }
   }
 
@@ -614,6 +648,7 @@
         <nav class="panel-tabs">
           <button class="panel-tab" class:active={activeTab === "general"} onclick={() => (activeTab = "general")}>General</button>
           <button class="panel-tab" class:active={activeTab === "shortcuts"} onclick={() => (activeTab = "shortcuts")}>Shortcuts</button>
+          <button class="panel-tab" class:active={activeTab === "vaults"} onclick={() => (activeTab = "vaults")}>Vaults</button>
           <button class="panel-tab" class:active={activeTab === "searches"} onclick={() => (activeTab = "searches")}>Saved searches</button>
           <button class="panel-tab" class:active={activeTab === "tags"} onclick={() => (activeTab = "tags")}>Tags &amp; queries</button>
           <button class="panel-tab" class:active={activeTab === "ai"} onclick={() => (activeTab = "ai")}>AI</button>
@@ -825,84 +860,162 @@
       </section>
       {/if}
 
+      {#if activeTab === "vaults"}
+      <section>
+        <h3>vaults</h3>
+        <p class="hint-text">
+          A vault is just a folder of .md files. Each is fully siloed —
+          its own index, embeddings, and watcher. Rename freely (the
+          name is just malt's label, it doesn't touch the folder).
+          Removing a vault here unlinks it from malt; the files on disk
+          stay put.
+        </p>
+        <ul class="vault-list" aria-label="vaults">
+          {#each vaultsState.vaults as v, i (v.path)}
+            <li class="vault-row" class:active={i === vaultsState.active_index}>
+              <span class="vault-row-status">
+                {#if i === vaultsState.active_index}
+                  <span class="vault-row-active">active</span>
+                {:else}
+                  <button
+                    class="ai-btn"
+                    onclick={() => onSwitchVault?.(i)}
+                    title="Switch to this vault"
+                  >switch</button>
+                {/if}
+              </span>
+              <span class="vault-row-meta">
+                <input
+                  class="vault-row-name"
+                  type="text"
+                  value={v.name}
+                  onblur={(e) => {
+                    const nv = (e.target as HTMLInputElement).value.trim();
+                    if (nv && nv !== v.name) onRenameVault?.(i, nv);
+                  }}
+                  onkeydown={(e) => {
+                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                  }}
+                />
+                <span class="vault-row-path" title={v.path}>{v.path}</span>
+              </span>
+              <span class="vault-row-actions">
+                <button
+                  class="ai-btn"
+                  onclick={() => {
+                    if (vaultsState.vaults.length <= 1) return;
+                    if (confirm(`Remove "${v.name}" from malt? Files on disk are NOT deleted.`)) {
+                      onRemoveVault?.(i);
+                    }
+                  }}
+                  disabled={vaultsState.vaults.length <= 1}
+                  title={vaultsState.vaults.length <= 1
+                    ? "Can't remove the last vault"
+                    : "Unlink this vault from malt (files on disk stay)"}
+                >remove</button>
+              </span>
+            </li>
+          {/each}
+        </ul>
+        <div class="vault-actions">
+          <button class="ai-btn" onclick={() => onAddVault?.()}>add vault…</button>
+        </div>
+      </section>
+      {/if}
+
       {#if activeTab === "ai"}
       <section>
-        <h3>ai (claude)</h3>
-        <table>
-          <tbody>
-            <tr>
-              <td class="keys">api key</td>
-              <td class="action ai-row">
-                {#if !aiKeyLoaded}
-                  <span class="muted">…</span>
-                {:else if hasAiKey}
+        <h3>ai providers</h3>
+        <p class="hint-text">
+          malt can drive its AI features (ghost completion, brew,
+          rewrite, auto-tag, link suggestions) through any of these.
+          Each provider has its own keychain slot — store as many keys
+          as you want and pick which one is active. The active provider
+          handles every AI call across the app.
+        </p>
+        {#if !providersLoaded}
+          <p class="hint-text">loading…</p>
+        {:else}
+          {#each providersList as p (p.id)}
+            <div class="provider-card" class:active={p.id === activeProviderId}>
+              <div class="provider-head">
+                <label class="provider-title">
+                  <input
+                    type="radio"
+                    name="active-provider"
+                    value={p.id}
+                    checked={p.id === activeProviderId}
+                    onchange={() => void setActiveProvider(p.id)}
+                  />
+                  <span class="provider-label">{p.label}</span>
+                  {#if p.id === activeProviderId}
+                    <span class="provider-badge">active</span>
+                  {/if}
+                  {#if p.has_key}
+                    <span class="provider-key-status">key set</span>
+                  {/if}
+                </label>
+              </div>
+              <div class="provider-note">{p.note}</div>
+              <div class="provider-row">
+                <span class="provider-row-label">key</span>
+                {#if p.has_key}
                   <span class="badge">set</span>
-                  <button class="ai-btn" onclick={testKey} disabled={testing}>
-                    {testing ? "testing…" : "test"}
-                  </button>
-                  <button class="ai-btn" onclick={clearKey}>clear</button>
+                  <button
+                    class="ai-btn"
+                    onclick={() => void testProviderKey(p.id)}
+                    disabled={providerTesting[p.id]}
+                  >{providerTesting[p.id] ? "testing…" : "test"}</button>
+                  <button class="ai-btn" onclick={() => void clearProviderKey(p.id)}>clear</button>
                 {:else}
                   <input
                     type="password"
                     class="ai-input"
-                    bind:value={apiKeyInput}
-                    placeholder="sk-ant-…"
-                    onkeydown={(e) => e.key === "Enter" && saveKey()}
+                    placeholder={p.id === "anthropic" ? "sk-ant-…" : p.id === "openai" ? "sk-…" : "key"}
+                    bind:value={providerKeyInputs[p.id]}
+                    onkeydown={(e) => { if (e.key === "Enter") void saveProviderKey(p.id); }}
                   />
-                  <button class="ai-btn" onclick={saveKey} disabled={!apiKeyInput.trim()}>
-                    save
-                  </button>
+                  <button
+                    class="ai-btn"
+                    onclick={() => void saveProviderKey(p.id)}
+                    disabled={!providerKeyInputs[p.id]?.trim()}
+                  >save</button>
                 {/if}
-              </td>
-              <td class="status"></td>
-            </tr>
-            {#if testResult}
-              <tr>
-                <td class="keys"></td>
-                <td class="action test-result" class:err={testError}>{testResult}</td>
-                <td class="status"></td>
-              </tr>
-            {/if}
+              </div>
+              {#if providerTestResults[p.id]}
+                <div class="provider-test-result" class:err={providerTestErrors[p.id]}>{providerTestResults[p.id]}</div>
+              {/if}
+              <div class="provider-row">
+                <span class="provider-row-label">model</span>
+                <input
+                  class="ai-input"
+                  type="text"
+                  bind:value={providerModelInputs[p.id]}
+                  placeholder={p.default_model}
+                  onblur={() => void saveProviderModel(p.id)}
+                  onkeydown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                />
+              </div>
+              <div class="provider-row provider-suggestions">
+                <span class="provider-row-label"></span>
+                {#each p.suggested_models as m (m)}
+                  <button
+                    class="ai-btn"
+                    class:active={providerModelInputs[p.id] === m}
+                    onclick={() => pickSuggestedModel(p.id, m)}
+                  >{m}</button>
+                {/each}
+              </div>
+            </div>
+          {/each}
+        {/if}
+      </section>
+      <section>
+        <h3>auto-tag</h3>
+        <table>
+          <tbody>
             <tr>
-              <td class="keys">model</td>
-              <td class="action ai-row">
-                <button
-                  class="ai-btn"
-                  class:active={completionModel === HAIKU}
-                  onclick={() => setModel(HAIKU)}
-                  disabled={!configLoaded}
-                  title="claude-haiku-4-5 — $1/M in · 200K ctx · fastest, cheapest"
-                >
-                  haiku — fast
-                </button>
-                <button
-                  class="ai-btn"
-                  class:active={completionModel === SONNET}
-                  onclick={() => setModel(SONNET)}
-                  disabled={!configLoaded}
-                  title="claude-sonnet-4-6 — $3/M in · 1M ctx · better loose-end detection"
-                >
-                  sonnet — smart
-                </button>
-                <button
-                  class="ai-btn"
-                  class:active={completionModel === OPUS}
-                  onclick={() => setModel(OPUS)}
-                  disabled={!configLoaded}
-                  title="claude-opus-4-7 — $5/M in · 1M ctx · most literary attention; slowest"
-                >
-                  opus — best
-                </button>
-              </td>
-              <td class="status"></td>
-            </tr>
-            <tr>
-              <td class="keys">storage</td>
-              <td class="action">OS keychain (Windows Credential Manager / macOS Keychain)</td>
-              <td class="status"></td>
-            </tr>
-            <tr>
-              <td class="keys">auto-tag</td>
+              <td class="keys">background</td>
               <td class="action">
                 <label class="toggle-label">
                   <input
@@ -911,9 +1024,14 @@
                     onchange={toggleTagging}
                     disabled={!configLoaded}
                   />
-                  {taggingEnabled ? "on" : "off"} — append inline #hashtags at the bottom of each note
+                  {taggingEnabled ? "on" : "off"} — append inline #hashtags at the bottom of each note (uses the active provider)
                 </label>
               </td>
+              <td class="status"></td>
+            </tr>
+            <tr>
+              <td class="keys">storage</td>
+              <td class="action">OS keychain — one slot per provider (Windows Credential Manager / macOS Keychain)</td>
               <td class="status"></td>
             </tr>
           </tbody>
@@ -1627,5 +1745,159 @@
   }
   .prompt-textarea:focus {
     border-color: #555;
+  }
+  .vault-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border-top: 1px solid #2a2a2a;
+  }
+  .vault-row {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 4px;
+    border-bottom: 1px solid #1f1f1f;
+  }
+  .vault-row.active {
+    background: rgba(214, 176, 106, 0.05);
+  }
+  .vault-row-status {
+    min-width: 56px;
+    text-align: center;
+  }
+  .vault-row-active {
+    color: #d6b06a;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    padding: 2px 6px;
+    border: 1px solid rgba(214, 176, 106, 0.3);
+    border-radius: 2px;
+  }
+  .vault-row-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .vault-row-name {
+    background: transparent;
+    border: 0;
+    border-bottom: 1px dashed transparent;
+    color: #e0e0e0;
+    font: inherit;
+    font-size: 12px;
+    padding: 1px 2px;
+    outline: 0;
+    width: 100%;
+  }
+  .vault-row-name:hover {
+    border-bottom-color: #333;
+  }
+  .vault-row-name:focus {
+    border-bottom-color: #555;
+  }
+  .vault-row-path {
+    color: #666;
+    font-size: 10px;
+    font-family: "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .vault-row-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  .vault-actions {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid #2a2a2a;
+  }
+  .provider-card {
+    margin-top: 10px;
+    padding: 10px 12px;
+    border: 1px solid #2a2a2a;
+    border-radius: 3px;
+    background: #161616;
+  }
+  .provider-card.active {
+    border-color: rgba(214, 176, 106, 0.4);
+    background: rgba(214, 176, 106, 0.03);
+  }
+  .provider-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 4px;
+  }
+  .provider-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    flex: 1;
+  }
+  .provider-title input[type="radio"] {
+    margin: 0;
+  }
+  .provider-label {
+    color: #e0e0e0;
+    font-size: 12px;
+  }
+  .provider-badge {
+    color: #d6b06a;
+    background: rgba(214, 176, 106, 0.1);
+    border: 1px solid rgba(214, 176, 106, 0.3);
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 1px 6px;
+    border-radius: 2px;
+  }
+  .provider-key-status {
+    color: #6c6;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .provider-note {
+    color: #777;
+    font-size: 11px;
+    margin-bottom: 8px;
+  }
+  .provider-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+    flex-wrap: wrap;
+  }
+  .provider-row-label {
+    color: #888;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    width: 6ch;
+    flex-shrink: 0;
+  }
+  .provider-row .ai-input {
+    flex: 1;
+    min-width: 200px;
+  }
+  .provider-suggestions {
+    gap: 4px;
+  }
+  .provider-test-result {
+    color: #6c6;
+    font-size: 11px;
+    margin-top: 6px;
+    margin-left: calc(6ch + 8px);
+  }
+  .provider-test-result.err {
+    color: #c66;
   }
 </style>

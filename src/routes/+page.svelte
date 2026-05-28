@@ -470,22 +470,65 @@
   let pendingFocusAfterLoad = false;
 
   // Navigation history — per pane. Explicit opens push; arrow nav doesn't.
-  // Each pane has its own stack so back/forward operate on the focused pane.
+  // Each pane has its own stack so back/forward operate on the focused
+  // pane. Each entry remembers which vault it belonged to — back/forward
+  // can therefore cross vaults: if the target entry's vault isn't the
+  // active one, we switch vaults first, then land on the path.
   const HISTORY_CAP = 50;
-  type PaneHistory = { stack: string[]; idx: number };
+  type HistoryEntry = { path: string; vaultPath: string };
+  type PaneHistory = { stack: HistoryEntry[]; idx: number };
   let primaryHistory: PaneHistory = { stack: [], idx: -1 };
   let secondaryHistory: PaneHistory = { stack: [], idx: -1 };
 
   function pushToHistory(pane: "primary" | "secondary", path: string) {
     const h = pane === "primary" ? primaryHistory : secondaryHistory;
-    if (h.idx >= 0 && h.stack[h.idx] === path) return;
-    h.stack = h.stack.slice(0, h.idx + 1).concat(path);
+    const vaultPath = vaultsState.vaults[vaultsState.active_index]?.path ?? "";
+    if (h.idx >= 0 && h.stack[h.idx].path === path && h.stack[h.idx].vaultPath === vaultPath) {
+      return;
+    }
+    h.stack = h.stack.slice(0, h.idx + 1).concat({ path, vaultPath });
     if (h.stack.length > HISTORY_CAP) h.stack.shift();
     h.idx = h.stack.length - 1;
   }
 
   function activePane(): "primary" | "secondary" {
-    return focusedPane === "secondary" && secondaryPath ? "secondary" : "primary";
+    return focusedPane === "secondary" && (secondaryPath || brewActive) ? "secondary" : "primary";
+  }
+
+  /** Navigate to a history entry, switching vaults if the entry
+   * belongs to a different vault than the current one. After a vault
+   * switch we replay the OTHER pane's most-recent entry that matches
+   * the new vault, if any, so you don't lose your reading position
+   * in the unrelated pane. */
+  async function navigateToHistoryEntry(
+    pane: "primary" | "secondary",
+    entry: HistoryEntry,
+  ) {
+    const currentVaultPath = vaultsState.vaults[vaultsState.active_index]?.path ?? "";
+    if (entry.vaultPath && entry.vaultPath !== currentVaultPath) {
+      // The history entry lives in a different vault — switch first.
+      const targetIdx = vaultsState.vaults.findIndex((v) => v.path === entry.vaultPath);
+      if (targetIdx < 0) {
+        // Vault was removed from the registry; can't cross. Skip silently.
+        return;
+      }
+      // switchVault clears selection state + lists; we need to set
+      // selection AFTER the refresh so the editor lands on the right
+      // path. Pass through directly without going through switchVault
+      // (which has its own clearing logic that would clobber what
+      // we're about to set).
+      await flushAllEditors();
+      vaultsState = await invoke<VaultsState>("switch_vault", { index: targetIdx });
+      rawResults = [];
+      allNotes = [];
+      await Promise.all([refreshAllNotes(), performSearch(query)]);
+    }
+    if (pane === "primary") {
+      selectedPath = entry.path;
+      void scrollSelectedIntoView("nearest");
+    } else {
+      secondaryPath = entry.path;
+    }
   }
 
   function goBack() {
@@ -493,12 +536,7 @@
     const h = pane === "primary" ? primaryHistory : secondaryHistory;
     if (h.idx <= 0) return;
     h.idx--;
-    if (pane === "primary") {
-      selectedPath = h.stack[h.idx];
-      void scrollSelectedIntoView("nearest");
-    } else {
-      secondaryPath = h.stack[h.idx];
-    }
+    void navigateToHistoryEntry(pane, h.stack[h.idx]);
   }
 
   function goForward() {
@@ -506,12 +544,7 @@
     const h = pane === "primary" ? primaryHistory : secondaryHistory;
     if (h.idx >= h.stack.length - 1) return;
     h.idx++;
-    if (pane === "primary") {
-      selectedPath = h.stack[h.idx];
-      void scrollSelectedIntoView("nearest");
-    } else {
-      secondaryPath = h.stack[h.idx];
-    }
+    void navigateToHistoryEntry(pane, h.stack[h.idx]);
   }
 
   function applySort(items: Note[], mode: SortMode): Note[] {
@@ -995,9 +1028,11 @@
       console.error("delete_note failed", e);
       return;
     }
-    // Prune history in both panes.
+    // Prune history in both panes. With cross-vault entries the
+    // filter compares by path only — if you delete a note, any history
+    // entries referencing it (in this vault or another) are stale.
     for (const h of [primaryHistory, secondaryHistory]) {
-      h.stack = h.stack.filter((p) => p !== path);
+      h.stack = h.stack.filter((e) => e.path !== path);
       if (h.idx >= h.stack.length) h.idx = h.stack.length - 1;
     }
     if (secondaryPath === path) secondaryPath = null;
@@ -1328,8 +1363,11 @@
         newTitle,
       });
       // Rewire history + selection in any pane that pointed at the old path.
+      // (Vault context stays the same — a rename never crosses vaults.)
       for (const h of [primaryHistory, secondaryHistory]) {
-        h.stack = h.stack.map((p) => (p === oldPath ? newPath : p));
+        h.stack = h.stack.map((e) =>
+          e.path === oldPath ? { path: newPath, vaultPath: e.vaultPath } : e,
+        );
       }
       if (selectedPath === oldPath) selectedPath = newPath;
       if (secondaryPath === oldPath) secondaryPath = newPath;
@@ -1861,6 +1899,26 @@
     }
   }
 
+  // Create an Untitled note and jump into the editor. Wired to the
+  // "Start writing →" CTA on the empty-vault state — previously that
+  // button just focused the search bar, which read as "did nothing"
+  // to anyone who already had the search bar focused (which is
+  // ~always, since malt boots there).
+  async function startFirstNote() {
+    try {
+      const newPath = await invoke<string>("create_note", { title: "Untitled" });
+      // Wait for the notes_changed event to refresh allNotes so the
+      // new note exists in the sidebar before we navigate to it.
+      await refreshAllNotes();
+      selectedPath = newPath;
+      pushToHistory("primary", newPath);
+      focusedPane = "primary";
+      void tick().then(() => focusEditor());
+    } catch (e) {
+      console.error("startFirstNote failed", e);
+    }
+  }
+
   // ─── Vault management ────────────────────────────────────────────
 
   async function refreshVaults() {
@@ -1877,14 +1935,23 @@
     try {
       // Flush any pending edits before swapping out from under the editor.
       await flushAllEditors();
-      vaultsState = await invoke<VaultsState>("switch_vault", { index });
-      // notes_changed fires from the backend; the existing listener
-      // refreshes allNotes + search. Reset selection so we don't try
-      // to render a note from the old vault.
+      // CRITICAL: clear selection state AND the sidebar lists BEFORE
+      // invoking the switch. Otherwise the auto-select effect (which
+      // fires on selectedPath = null) reads notes[0] from the stale
+      // old-vault list, hands the Editor a full path that still exists
+      // on disk in the old vault, and we end up showing the wrong
+      // note in the new vault. Clearing rawResults makes the derived
+      // `notes` empty so auto-select bails until the refresh lands.
       selectedPath = null;
       secondaryPath = null;
       primaryHistory = { stack: [], idx: -1 };
       secondaryHistory = { stack: [], idx: -1 };
+      rawResults = [];
+      allNotes = [];
+      vaultsState = await invoke<VaultsState>("switch_vault", { index });
+      // Pull the new vault's listing now so the auto-select effect
+      // has something to pick on the next reactive cycle.
+      await Promise.all([refreshAllNotes(), performSearch(query)]);
     } catch (e) {
       console.error("switch_vault failed", e);
     }
@@ -1935,20 +2002,52 @@
     }
     try {
       await flushAllEditors();
+      // Same staleness fix as switchVault: clear UI state BEFORE the
+      // backend swap. add_vault auto-makes the new vault active.
+      selectedPath = null;
+      secondaryPath = null;
+      primaryHistory = { stack: [], idx: -1 };
+      secondaryHistory = { stack: [], idx: -1 };
+      rawResults = [];
+      allNotes = [];
       vaultsState = await invoke<VaultsState>("add_vault", {
         name: addVaultName.trim(),
         path: addVaultPath.trim(),
       });
       addVaultOpen = false;
-      // add() auto-switches to the new vault. Reset selection state
-      // and force a refresh; the backend will rebuild indices.
+      // add_vault on the backend just registers — it doesn't reindex.
+      // Explicitly switch so the watcher + index + embeddings repoint.
       await invoke("switch_vault", { index: vaultsState.active_index });
+      await Promise.all([refreshAllNotes(), performSearch(query)]);
+    } catch (e) {
+      addVaultError = String(e);
+    }
+  }
+
+  async function renameVaultAt(index: number, name: string) {
+    try {
+      vaultsState = await invoke<VaultsState>("rename_vault", { index, name });
+    } catch (e) {
+      console.error("rename_vault failed", e);
+    }
+  }
+  async function removeVaultAt(index: number) {
+    // Removing the active vault triggers an index rebuild on the
+    // backend; the notes_changed event will refresh the sidebar.
+    // Clear UI state first so we don't briefly render the removed
+    // vault's last note in the editor.
+    try {
+      await flushAllEditors();
       selectedPath = null;
       secondaryPath = null;
       primaryHistory = { stack: [], idx: -1 };
       secondaryHistory = { stack: [], idx: -1 };
+      rawResults = [];
+      allNotes = [];
+      vaultsState = await invoke<VaultsState>("remove_vault", { index });
+      await Promise.all([refreshAllNotes(), performSearch(query)]);
     } catch (e) {
-      addVaultError = String(e);
+      console.error("remove_vault failed", e);
     }
   }
 
@@ -2218,16 +2317,12 @@
         <li class="empty empty-cta">
           <div class="empty-cta-title">No notes yet</div>
           <div class="empty-cta-desc">
-            Type a title in the search bar and press <kbd>Enter</kbd> to create your first note.
+            Type a title in the search bar and press <kbd>Enter</kbd> to create your first note —
+            or click below to start with an Untitled note you can rename later.
           </div>
           <button
             class="empty-cta-btn"
-            onclick={() => {
-              query = "";
-              void tick().then(() => {
-                searchInput?.focus();
-              });
-            }}
+            onclick={() => void startFirstNote()}
           >Start writing →</button>
         </li>
       {/if}
@@ -2390,6 +2485,17 @@
     settingsOpen = false;
     launchTipsFromSettings();
   }}
+  vaultsState={vaultsState}
+  onSwitchVault={(i) => {
+    settingsOpen = false;
+    void switchVault(i);
+  }}
+  onAddVault={() => {
+    settingsOpen = false;
+    openAddVault();
+  }}
+  onRenameVault={(i, name) => void renameVaultAt(i, name)}
+  onRemoveVault={(i) => void removeVaultAt(i)}
 />
 
 {#if rowMenu}

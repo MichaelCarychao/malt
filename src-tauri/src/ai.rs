@@ -446,3 +446,205 @@ where
 
     Ok(())
 }
+
+// ─── Multi-provider dispatch ────────────────────────────────────────
+//
+// All the functions above were originally hardwired to Anthropic.
+// v0.3.2 adds OpenAI, DeepSeek, Grok, and Gemini via the shared
+// OpenAI-compat client in `openai_compat.rs`. These dispatcher
+// functions pick the right backend based on the provider passed in
+// (which lib.rs reads from config). For Anthropic, we keep calling
+// the existing functions (so all the Anthropic-specific behavior
+// stays intact); for everything else, we synthesize a single user
+// message that bundles the mode-tagged wrapper and send via the
+// OpenAI-compat client.
+
+use crate::openai_compat;
+use crate::providers::Provider;
+
+pub async fn dispatch_stream_completion<F>(
+    provider: Provider,
+    api_key: &str,
+    model: &str,
+    before: &str,
+    after: &str,
+    mut on_text: F,
+) -> Result<(), String>
+where
+    F: FnMut(&str),
+{
+    let mode = if before.trim().is_empty() && !after.trim().is_empty() {
+        "begin"
+    } else if !before.trim().is_empty() && after.trim().is_empty() {
+        "continue"
+    } else {
+        "bridge"
+    };
+    let user_msg = format!("<{mode}>{before}{{INSERT HERE}}{after}</{mode}>");
+    let system_prompt = prompts::get(PromptKey::Completion);
+    if provider == Provider::Anthropic {
+        return stream_completion(api_key, model, before, after, on_text).await;
+    }
+    let base_url = provider.openai_base_url().ok_or("provider lacks base URL")?;
+    openai_compat::stream(
+        base_url,
+        api_key,
+        model,
+        Some(&system_prompt),
+        &user_msg,
+        Some(400),
+        |t| on_text(t),
+    )
+    .await
+}
+
+pub async fn dispatch_stream_rewrite<F>(
+    provider: Provider,
+    api_key: &str,
+    model: &str,
+    before: &str,
+    selected: &str,
+    after: &str,
+    mut on_text: F,
+) -> Result<(), String>
+where
+    F: FnMut(&str),
+{
+    if provider == Provider::Anthropic {
+        return stream_rewrite(api_key, model, before, selected, after, on_text).await;
+    }
+    let user_msg = format!("{before}<rewrite>{selected}</rewrite>{after}");
+    let system_prompt = prompts::get(PromptKey::Rewrite);
+    let base_url = provider.openai_base_url().ok_or("provider lacks base URL")?;
+    openai_compat::stream(
+        base_url,
+        api_key,
+        model,
+        Some(&system_prompt),
+        &user_msg,
+        Some(800),
+        |t| on_text(t),
+    )
+    .await
+}
+
+pub async fn dispatch_stream_brew<F>(
+    provider: Provider,
+    api_key: &str,
+    model: &str,
+    body: &str,
+    mut on_text: F,
+) -> Result<(), String>
+where
+    F: FnMut(&str),
+{
+    if provider == Provider::Anthropic {
+        return stream_brew(api_key, model, body, on_text).await;
+    }
+    let system_prompt = prompts::get(PromptKey::Brew);
+    let base_url = provider.openai_base_url().ok_or("provider lacks base URL")?;
+    openai_compat::stream(
+        base_url,
+        api_key,
+        model,
+        Some(&system_prompt),
+        body,
+        Some(1024),
+        |t| on_text(t),
+    )
+    .await
+}
+
+pub async fn dispatch_propose_tags(
+    provider: Provider,
+    api_key: &str,
+    body: &str,
+) -> Result<Vec<String>, String> {
+    if provider == Provider::Anthropic {
+        return propose_tags(api_key, body).await;
+    }
+    let system_prompt = prompts::get(PromptKey::Tag);
+    let base_url = provider.openai_base_url().ok_or("provider lacks base URL")?;
+    let model = provider.default_model();
+    let reply = openai_compat::send(
+        base_url,
+        api_key,
+        model,
+        Some(&system_prompt),
+        body,
+        Some(256),
+    )
+    .await?;
+    let json_start = reply.find('{').ok_or("no JSON in reply")?;
+    let json_end = reply.rfind('}').ok_or("no JSON in reply")? + 1;
+    let blob: TagsBlob = serde_json::from_str(&reply[json_start..json_end])
+        .map_err(|e| format!("tag parse error: {e}: {reply}"))?;
+    Ok(blob
+        .tags
+        .into_iter()
+        .map(|t| {
+            t.trim()
+                .to_lowercase()
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == '-')
+                .collect::<String>()
+        })
+        .filter(|t| !t.is_empty())
+        .take(5)
+        .collect())
+}
+
+pub async fn dispatch_propose_entities(
+    provider: Provider,
+    api_key: &str,
+    body: &str,
+) -> Result<Vec<String>, String> {
+    if provider == Provider::Anthropic {
+        return propose_entities(api_key, body).await;
+    }
+    let system_prompt = prompts::get(PromptKey::Entities);
+    let base_url = provider.openai_base_url().ok_or("provider lacks base URL")?;
+    let model = provider.default_model();
+    let reply = openai_compat::send(
+        base_url,
+        api_key,
+        model,
+        Some(&system_prompt),
+        body,
+        Some(512),
+    )
+    .await?;
+    let json_start = reply.find('{').ok_or("no JSON in reply")?;
+    let json_end = reply.rfind('}').ok_or("no JSON in reply")? + 1;
+    let blob: EntitiesBlob = serde_json::from_str(&reply[json_start..json_end])
+        .map_err(|e| format!("entities parse error: {e}: {reply}"))?;
+    Ok(blob
+        .entities
+        .into_iter()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .take(10)
+        .collect())
+}
+
+/// Connectivity test for any provider — used by the "test" button in
+/// Settings → AI. One-shot, returns "ok" payload trimmed.
+pub async fn dispatch_test(
+    provider: Provider,
+    api_key: &str,
+    model: &str,
+) -> Result<String, String> {
+    if provider == Provider::Anthropic {
+        return test_call(api_key).await;
+    }
+    let base_url = provider.openai_base_url().ok_or("provider lacks base URL")?;
+    openai_compat::send(
+        base_url,
+        api_key,
+        model,
+        None,
+        "Reply with the single word: malt",
+        Some(32),
+    )
+    .await
+}

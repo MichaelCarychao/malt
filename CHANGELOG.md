@@ -4,6 +4,51 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.3.2 — 2026-05-28
+
+- **Multi-provider AI.** New `openai_compat.rs` shared client covers
+  OpenAI, DeepSeek, xAI Grok, and Google Gemini's OpenAI-compat
+  endpoint with one code path (same `/chat/completions` shape, same
+  SSE deltas — only base URL + key + model differ). Anthropic stays
+  on its existing `/v1/messages` client. New `providers.rs` registry
+  with `Provider` enum + per-provider defaults (model + suggested
+  picks + base URL + one-line note). Per-provider key in keychain
+  (one slot per provider — keep them all configured and switch on
+  demand). Active provider lives in config; ghost completion,
+  rewrite, brew, auto-tag, and AI link-suggestions all dispatch
+  through it. Defaults seeded for May 2026: `gpt-5`,
+  `gemini-2.5-flash`, `deepseek-v4-flash`, `grok-4.3`.
+- **Settings → AI rebuilt as provider cards.** Each provider gets a
+  card with: active-radio, label + key-status badge, one-line
+  capability note, key field (with save / test / clear), model
+  text-input plus suggested-pick chips. Editing the model field
+  saves on blur. Auto-tag toggle moves to its own section since it
+  now uses whichever provider is active.
+- **Vault settings tab.** Rename in place, switch, or remove (files
+  on disk are untouched — only malt's awareness of the folder is
+  unlinked). The last vault can't be removed; the +page picker
+  modal stays for fast keyboard-driven switching.
+- **Vault switch no longer leaves the old note in the editor.** The
+  auto-select effect was reading `notes[0]` from the stale list
+  before the IPC came back and handing the editor a file that still
+  existed on disk. Fix: clear `selectedPath` / `secondaryPath` /
+  `rawResults` / `allNotes` / history BEFORE invoking the switch,
+  then await both `refreshAllNotes()` and `performSearch()` so
+  auto-select fires with the new vault's notes.
+- **Cross-vault back/forward.** Each per-pane history entry now
+  carries `{ path, vaultPath }`. `Cmd+[` / `Cmd+]` to an entry in a
+  different vault switches vaults first (re-pointing the watcher,
+  reindexing, refreshing the sidebar) before landing on the note.
+  Handy for tab-style navigation across siloed corpora.
+- **"Start writing →" actually creates a note now.** Used to clear
+  the query and re-focus the search bar, which read as "did nothing"
+  when the search bar was already focused. Now it creates an
+  Untitled note in the active vault and drops you straight into the
+  editor.
+- **Updater note.** Still operational, not a code bug — v0.2.10 (and
+  v0.2.5 if you want it discoverable) remain drafts on GitHub.
+  `/releases/latest` 404s until at least one release is published.
+
 ## 0.3.1 — 2026-05-28
 
 - **Vault switching (Cmd/Ctrl+Shift+V).** New `vaults.rs` registry:
