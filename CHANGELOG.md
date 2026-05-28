@@ -4,6 +4,24 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.2.10 — 2026-05-28
+
+- **Wikilink colors fixed at the root cause.** Three tries in, the
+  actual fix: CodeMirror 6 nests overlapping mark decorations and uses
+  facet precedence to decide which becomes the inner span. Higher
+  precedence = inner. The markdown link-token decoration from
+  `syntaxHighlighting(oneDark)` was outpriotizing our wikilink
+  decoration, so oneDark's `tok-link` span sat inside our wikilink
+  span and won the color cascade by being the innermost element with
+  an explicit `color` rule. Hoisting `wikilinkPlugin` to `Prec.highest`
+  flips the nesting — our span is now inner — and the class-based
+  color rule wins without `!important`, inline styles, or descendant
+  selectors. Live = sky blue, empty = amber italic, broken = red
+  dashed, finally rendering as intended. Removed the inline-style
+  workaround since the cause is gone.
+- **New tagline.** "Distill notes. Brew ideas." replaces the previous
+  line on the splash. Leans into the brewing metaphor in the name.
+
 ## 0.2.9 — 2026-05-28
 
 - **Wikilink colors actually render now** — `!important` lost the

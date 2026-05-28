@@ -2402,7 +2402,7 @@
     <div class="boot-card" role="presentation">
       <img class="boot-logo-img" src="/malt-icon.png" alt="malt" />
       <div class="boot-label">malt</div>
-      <div class="boot-tagline">Plain markdown. AI when you want it.</div>
+      <div class="boot-tagline">Distill notes. Brew ideas.</div>
 
       {#if tipsOpen && tipCurrent}
         <div class="tip-card">
