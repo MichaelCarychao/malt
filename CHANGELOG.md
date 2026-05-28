@@ -4,6 +4,19 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.2.1 — 2026-05-27
+
+Build fixes only — no app behavior changes from 0.2.0.
+
+- Drop Intel Mac (x86_64) from the release matrix. ONNX Runtime (which
+  fastembed pulls in) has no prebuilt Intel binaries on the current ort
+  release, so the universal build can't link. Apple Silicon only for now.
+  Intel Mac users can build from source.
+- Bundle identifier changed from `com.malt.app` to `com.carychao.malt`.
+  The previous one ended in `.app`, which collides with the macOS bundle
+  extension convention. Effectively a one-time reinstall on systems that
+  already installed 0.2.0 (Windows).
+
 ## 0.2.0 — 2026-05-27
 
 First feature-complete release after the initial scaffold. Roughly everything
