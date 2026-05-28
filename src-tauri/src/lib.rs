@@ -481,6 +481,167 @@ fn reveal_notes_dir() -> Result<(), String> {
 }
 
 #[tauri::command]
+fn reveal_note(path: String) -> Result<(), String> {
+    // On Windows, `explorer /select,<path>` highlights the file in its
+    // parent folder. On macOS, `open -R <path>` does the same ("reveal in
+    // Finder"). On Linux there's no portable equivalent; we fall back to
+    // opening the parent dir.
+    let p = std::path::PathBuf::from(&path);
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{}", p.display()))
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(&p)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let parent = p.parent().unwrap_or(&p);
+        std::process::Command::new("xdg-open")
+            .arg(parent)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
+#[tauri::command]
+fn duplicate_note(path: String) -> Result<String, String> {
+    let src = std::path::PathBuf::from(&path);
+    if !src.is_file() {
+        return Err(format!("file not found: {}", src.display()));
+    }
+    let dir = notes::notes_dir();
+    if !src.starts_with(&dir) {
+        return Err("refusing to duplicate outside notes dir".into());
+    }
+    let stem = src
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("untitled")
+        .to_string();
+    let base = format!("{stem} copy");
+    let mut candidate = dir.join(format!("{base}.md"));
+    let mut counter = 2;
+    while candidate.exists() {
+        candidate = dir.join(format!("{base} {counter}.md"));
+        counter += 1;
+        if counter > 1000 {
+            return Err("too many name collisions duplicating".into());
+        }
+    }
+    std::fs::copy(&src, &candidate).map_err(|e| e.to_string())?;
+    Ok(candidate.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// On the very first launch, drop a welcome note + quick-tour note into the
+/// notes folder so new users land on something useful. Guarded by a
+/// `welcomed` flag file in the config dir so deleting the welcome doesn't
+/// resurrect it on next launch.
+fn seed_welcome_notes_if_first_run() {
+    let cfg_dir = match dirs::config_dir() {
+        Some(p) => p.join("malt"),
+        None => return,
+    };
+    let _ = std::fs::create_dir_all(&cfg_dir);
+    let flag = cfg_dir.join("welcomed");
+    if flag.exists() {
+        return;
+    }
+    let notes_dir = notes::notes_dir();
+    // Only seed if the notes dir is currently empty of .md files.
+    let has_md = std::fs::read_dir(&notes_dir)
+        .map(|entries| {
+            entries.flatten().any(|e| {
+                e.path()
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    .map(|x| x.eq_ignore_ascii_case("md"))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+    if has_md {
+        // Don't disturb a user who already has notes. Just mark welcomed.
+        let _ = std::fs::write(&flag, "");
+        return;
+    }
+    let welcome = r#"# Welcome to malt
+
+You're looking at a plain `.md` file in your notes folder. Everything malt does is built on top of files like this — no proprietary database, no lock-in. If you ever want to walk away, your notes walk with you.
+
+## Quick orientation
+
+- **Type to filter.** The search bar at the top filters as you type. Hit Enter on a non-matching query to create a new note with that title.
+- **Wikilinks** like [[Quick Tour]] connect notes. Click one to jump. Type `[[` for autocomplete.
+- **Hashtags** like the ones at the bottom of this file are search shortcuts. The pill row above the editor shows current tags; click to filter.
+- **AI help** lives on `Ctrl+I` (`Cmd+I` on Mac). Bare press continues from the cursor. With a selection, it rewrites.
+- **Settings** is `Ctrl+,` — every keyboard shortcut is documented there.
+
+Open [[Quick Tour]] next for a feature walk-through. When you're done, delete both of these notes and start writing yours.
+
+#fleeting
+"#;
+    let tour = r#"# Quick Tour
+
+A working tour of malt's main moves. Tweak this file, delete it, or leave it — your call.
+
+## Search & navigation
+
+- `Ctrl+L` focuses the search bar.
+- `Ctrl+↑/↓` (or `Ctrl+J/K`) moves the selection up/down from anywhere.
+- `Ctrl+[ / Ctrl+]` is back/forward in the pane's history.
+- `Ctrl+W` closes the secondary editor pane (open one by Ctrl+clicking a wikilink or list row).
+
+## Tagging
+
+- Type `#anything` inline and it autoreloacates to a hidden line at the bottom of the file on save. You see pills above the editor instead.
+- Hover a pill, click the `×` to remove it. Right-click for the full menu (filter, remove, promote-to-vocab).
+- Edit your starter vocabulary in Settings → tags & queries.
+
+## Saved searches
+
+- Type a query like `tag:fleeting modified:<7d` and hit `Ctrl+S` to save it.
+- Activate any saved search via `Ctrl+1` through `Ctrl+9`.
+
+## AI moves (needs an Anthropic API key — set it in Settings → ai)
+
+- `Ctrl+I` at end of doc → continue the writing
+- `Ctrl+I` with text selected → rewrite that text, unpacking generalities
+- `Ctrl+I` in the middle of a doc → bridge the gap
+- `Ctrl+Shift+L` → review proposed wikilinks (existing notes + AI-suggested new ones)
+
+## Other useful bits
+
+- `Ctrl+R` while editing → rename the note (rewrites all backlinks atomically)
+- `Ctrl+Shift+E` → export the current note (.md / .html / .epub / .txt, with optional "append linked notes" for TOC-style sharing)
+- Double-click any note row → rename inline
+
+That's most of it. Have fun.
+
+#fleeting
+"#;
+    let _ = std::fs::write(notes_dir.join("Welcome to malt.md"), welcome);
+    let _ = std::fs::write(notes_dir.join("Quick Tour.md"), tour);
+    let _ = std::fs::write(&flag, "");
+}
+
+#[tauri::command]
 fn list_saved_searches() -> Vec<saved_searches::SavedSearch> {
     saved_searches::load()
 }
@@ -561,7 +722,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            seed_welcome_notes_if_first_run();
             let note_index = Arc::new(index::NoteIndex::new()?);
             note_index.rebuild()?;
             let backlink_index = Arc::new(backlinks::BacklinkIndex::new());
@@ -612,6 +776,9 @@ pub fn run() {
             set_completion_model,
             set_notes_dir,
             reveal_notes_dir,
+            reveal_note,
+            duplicate_note,
+            app_version,
             list_saved_searches,
             upsert_saved_search,
             delete_saved_search,

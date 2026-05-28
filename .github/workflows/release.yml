@@ -60,10 +60,19 @@ jobs:
           # Replace with a real APPLE_SIGNING_IDENTITY + APPLE_CERTIFICATE
           # when we set up proper signing for 1.0.
           APPLE_SIGNING_IDENTITY: "-"
+          # Tauri updater signing (separate from OS-level code signing).
+          # Private key + optional password live in GitHub secrets; signed
+          # .sig files are emitted next to each binary so the in-app
+          # updater can verify update integrity.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "malt ${{ github.ref_name }}"
           releaseBody: "See CHANGELOG.md for what's in this release. Unsigned builds — Windows users may see a SmartScreen warning, macOS users right-click + Open the first time."
           releaseDraft: true
           prerelease: true
+          # Emits latest.json next to the binaries — the manifest the in-app
+          # updater fetches to detect new versions.
+          includeUpdaterJson: true
           args: ${{ matrix.args }}

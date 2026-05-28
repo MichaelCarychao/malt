@@ -1,6 +1,6 @@
 {
   "name": "malt",
-  "version": "0.2.2",
+  "version": "0.2.4",
   "description": "A cross-platform AI-augmented nvalt successor. Plain .md files, instant search, AI-assisted tagging and linking.",
   "type": "module",
   "scripts": {
@@ -21,6 +21,8 @@
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.10.1",
     "codemirror": "^6.0.2"
   },
   "devDependencies": {

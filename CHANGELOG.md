@@ -4,6 +4,60 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.2.4 — 2026-05-27
+
+**In-app auto-updater** — going forward, malt checks GitHub Releases for
+new versions on startup and offers a one-click install + restart. The
+multi-step "download → run installer → re-find in Start menu" friction
+is gone for v0.2.4+.
+
+- `tauri-plugin-updater` + `tauri-plugin-process` integrated.
+- Endpoint: `https://github.com/MichaelCarychao/malt/releases/latest/download/latest.json`
+  (the `/latest` URL resolves to the most recent *published* release —
+  drafts are invisible to the updater, so internal testing builds don't
+  leak out).
+- Update integrity: each release bundle is signed with an ed25519 key
+  in CI (`TAURI_SIGNING_PRIVATE_KEY` GitHub secret). The app verifies
+  signatures locally with the embedded public key before installing.
+- Silent background check 5 seconds after boot. If a newer version
+  exists, a non-blocking amber toast appears bottom-right: "malt vX.Y.Z
+  is available — Show details." Dismissable. Click to see full release
+  notes + install/later choice.
+- Manual "check for updates" button in Settings → about. Status label
+  reflects current state (checking, up to date, downloading 47%, etc.).
+- Install flow: download with progress bar → signature verification →
+  in-place install → automatic restart into the new version. Typically
+  10-15 seconds.
+
+## 0.2.3 — 2026-05-27
+
+Cosmetic polish pass.
+
+- **Live version in Settings.** Pulled from Cargo.toml at compile time
+  (single source of truth). About section adds repo + changelog links.
+- **Window title shows the current note** — `malt — Note title` instead
+  of just `malt`. Updates whenever you switch notes.
+- **Smarter timestamps in the note list.** `3:14p` / `yest.` / `Tue` /
+  `Mar 5` / `Mar '25` depending on age, instead of raw `2h` / `1d` /
+  `3mo`. Reads at a glance.
+- **First-run welcome notes** — a `Welcome to malt.md` + `Quick Tour.md`
+  pair seeded into the notes folder on first launch (only if the dir is
+  empty). Quietly self-deletes any future appearance via a `welcomed`
+  flag file so trashing them isn't undone.
+- **Restore last-open note on startup.** `selectedPath` persisted to
+  localStorage; you land where you left off instead of always at the
+  top of the sort.
+- **Right-click any sidebar row** for a context menu: Open · Open in
+  second pane · Rename · Duplicate · Reveal in file manager · Delete.
+- **Save indicator** in the status bar — brief `saved` pulse after each
+  autosave fires. Subtle confirmation your work is committed.
+- **API key status dot** in the status bar — green when an Anthropic
+  key is configured, gray when not. Click to jump to Settings.
+- **Tooltip shortcuts** — hovering the gear shows the modifier+key for
+  Settings; saved-search chips already showed their slot binding.
+- **Boot splash** — a brief amber `m` on charcoal while content loads,
+  fades out after ~200ms.
+
 ## 0.2.2 — 2026-05-27
 
 macOS Gatekeeper fix + one keybinding change.

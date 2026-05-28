@@ -3,7 +3,17 @@
   import { invoke } from "@tauri-apps/api/core";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
-  let { open = $bindable() }: { open: boolean } = $props();
+  let {
+    open = $bindable(),
+    onCheckForUpdates,
+    updateStatusLabel = "",
+    canCheckForUpdates = true,
+  }: {
+    open: boolean;
+    onCheckForUpdates?: () => void;
+    updateStatusLabel?: string;
+    canCheckForUpdates?: boolean;
+  } = $props();
 
   const isMac = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
   const mod = isMac ? "⌘" : "Ctrl";
@@ -66,6 +76,34 @@
   let tagVocabularyLoaded = $state(false);
   let tagVocabularyError = $state<string | null>(null);
   let tagVocabularySaved = $state(false);
+  let appVersion = $state("");
+
+  // Pull the live version from the backend at mount — single source of truth
+  // is Cargo.toml (env! macro reads CARGO_PKG_VERSION at compile time).
+  $effect(() => {
+    if (open && !appVersion) {
+      invoke<string>("app_version")
+        .then((v) => (appVersion = v))
+        .catch(() => (appVersion = "(unknown)"));
+    }
+  });
+
+  async function openRepo() {
+    try {
+      const { openUrl } = await import("@tauri-apps/plugin-opener");
+      await openUrl("https://github.com/MichaelCarychao/malt");
+    } catch {
+      /* no-op */
+    }
+  }
+  async function openChangelog() {
+    try {
+      const { openUrl } = await import("@tauri-apps/plugin-opener");
+      await openUrl("https://github.com/MichaelCarychao/malt/blob/main/CHANGELOG.md");
+    } catch {
+      /* no-op */
+    }
+  }
   let hasAiKey = $state(false);
   let aiKeyLoaded = $state(false);
   let apiKeyInput = $state("");
@@ -522,7 +560,35 @@
             {/if}
             <tr>
               <td class="keys">version</td>
-              <td class="action">0.1.0 (M2)</td>
+              <td class="action ai-row">
+                <span class="badge version-badge">{appVersion || "…"}</span>
+                <button class="ai-btn" onclick={() => void openChangelog()}>changelog</button>
+                <button class="ai-btn" onclick={() => void openRepo()}>repo</button>
+              </td>
+              <td class="status"></td>
+            </tr>
+            <tr>
+              <td class="keys">updates</td>
+              <td class="action ai-row">
+                <button
+                  class="ai-btn"
+                  onclick={() => onCheckForUpdates?.()}
+                  disabled={!canCheckForUpdates}
+                >check for updates</button>
+                {#if updateStatusLabel}
+                  <span class="update-status-label">{updateStatusLabel}</span>
+                {/if}
+              </td>
+              <td class="status"></td>
+            </tr>
+            <tr>
+              <td class="keys">made by</td>
+              <td class="action">Michael Carychao · plain markdown forever</td>
+              <td class="status"></td>
+            </tr>
+            <tr>
+              <td class="keys">license</td>
+              <td class="action">MIT</td>
               <td class="status"></td>
             </tr>
           </tbody>
@@ -687,6 +753,20 @@
     font-size: 10px;
     text-transform: uppercase;
     letter-spacing: 0.05em;
+  }
+  .version-badge {
+    color: #d6b06a;
+    background: rgba(214, 176, 106, 0.1);
+    border: 1px solid rgba(214, 176, 106, 0.25);
+    padding: 1px 8px;
+    border-radius: 3px;
+    font-family: "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11px;
+  }
+  .update-status-label {
+    color: #888;
+    font-size: 11px;
+    font-style: italic;
   }
   .muted {
     color: #555;

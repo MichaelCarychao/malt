@@ -67,6 +67,7 @@
     allTags = [],
     onTagClick,
     onTagPromote,
+    onSaved,
   }: {
     path: string | null;
     query?: string;
@@ -87,6 +88,9 @@
     onTagClick?: (tag: string) => void;
     // User toggled vocab membership for a tag (from the pill right-click menu).
     onTagPromote?: (tag: string, inVocab: boolean) => void;
+    // Fires after an autosave completes successfully — parent uses this for
+    // the "saved" status-bar pulse.
+    onSaved?: () => void;
   } = $props();
 
   // Right-click pill menu: floating div anchored at cursor.
@@ -1070,6 +1074,7 @@
     try {
       await invoke("save_note", { path: p, content });
       lastSavedContent = content;
+      onSaved?.();
     } catch (e) {
       console.error("save_note failed", e);
     }

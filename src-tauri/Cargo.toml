@@ -1,6 +1,6 @@
 [package]
 name = "malt"
-version = "0.2.2"
+version = "0.2.4"
 description = "A cross-platform AI-augmented nvalt successor"
 authors = ["Michael Carychao"]
 edition = "2021"
@@ -36,4 +36,6 @@ sqlite-vec = "0.1.9"
 zerocopy = "0.8.48"
 pulldown-cmark = "0.13.4"
 epub-builder = "0.8.3"
+tauri-plugin-updater = "2.10.1"
+tauri-plugin-process = "2.3.1"
 

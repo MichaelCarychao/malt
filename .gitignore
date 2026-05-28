@@ -29,3 +29,12 @@ Thumbs.db
 .malt-dev
 # Local Claude Code tooling — permissions etc. are personal to the dev.
 .claude
+
+# --- Secrets / signing keys ---
+# Tauri updater signing keys. NEVER commit. ed25519 private keys.
+*.key
+malt-updater.key*
+# If someone accidentally runs `tauri signer generate -w ~/...` on a
+# Windows shell, ~ doesn't expand and a literal "~" folder appears in
+# the project root. Block it.
+/~/

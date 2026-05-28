@@ -254,6 +254,36 @@
   // Without this we'd never create a new note from search, because Tantivy's
   // fuzzy ranking always returns *some* result for any non-trivial query.
   let userNavigated = $state(false);
+  // Briefly true after an autosave fires — drives the saved-indicator pulse
+  // in the status bar.
+  let justSaved = $state(false);
+  let savedPulseTimer: number | null = null;
+  function flashSaved() {
+    justSaved = true;
+    if (savedPulseTimer) clearTimeout(savedPulseTimer);
+    savedPulseTimer = window.setTimeout(() => { justSaved = false; }, 1200) as unknown as number;
+  }
+  // Tracks whether an Anthropic API key is configured. Renders a status dot.
+  let hasApiKey = $state(false);
+  // Brief boot splash that hides once the initial note list has loaded.
+  let booting = $state(true);
+  // Right-click context menu on sidebar note rows.
+  let rowMenu = $state<{ path: string; x: number; y: number } | null>(null);
+
+  // Auto-updater state — see handleUpdateCheck for the flow.
+  type UpdateState =
+    | { kind: "idle" }
+    | { kind: "checking" }
+    | { kind: "up_to_date" }
+    | { kind: "available"; version: string; notes: string }
+    | { kind: "downloading"; progress: number }
+    | { kind: "installing" }
+    | { kind: "error"; message: string };
+  let updateState = $state<UpdateState>({ kind: "idle" });
+  let updateToastDismissed = $state(false);
+  let updateModalOpen = $state(false);
+  // Holds the Update object between "available" and the install click.
+  let pendingUpdate: { version: string; body?: string; downloadAndInstall: (cb: (e: unknown) => void) => Promise<void> } | null = null;
 
   // Linkbacks panel: collapsed flag + resizable height (persisted).
   let linkbacksCollapsed = $state(
@@ -421,12 +451,43 @@
 
   function formatModified(secs: number): string {
     if (!secs) return "";
-    const age = Math.floor(Date.now() / 1000) - secs;
-    if (age < 60) return `${age}s`;
-    if (age < 3600) return `${Math.floor(age / 60)}m`;
-    if (age < 86400) return `${Math.floor(age / 3600)}h`;
-    if (age < 86400 * 30) return `${Math.floor(age / 86400)}d`;
-    return `${Math.floor(age / (86400 * 30))}mo`;
+    const now = new Date();
+    const then = new Date(secs * 1000);
+    const sameDay =
+      now.getFullYear() === then.getFullYear() &&
+      now.getMonth() === then.getMonth() &&
+      now.getDate() === then.getDate();
+    if (sameDay) {
+      // "3:14p" / "11:02a" — short morning/afternoon marker, no zero-padded hour
+      const h = then.getHours();
+      const m = then.getMinutes().toString().padStart(2, "0");
+      const ampm = h >= 12 ? "p" : "a";
+      const h12 = h % 12 || 12;
+      return `${h12}:${m}${ampm}`;
+    }
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    if (
+      yesterday.getFullYear() === then.getFullYear() &&
+      yesterday.getMonth() === then.getMonth() &&
+      yesterday.getDate() === then.getDate()
+    ) {
+      return "yest.";
+    }
+    // Within the last week: weekday abbreviation
+    const ageMs = now.getTime() - then.getTime();
+    const dayMs = 86400 * 1000;
+    if (ageMs < 7 * dayMs) {
+      return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][then.getDay()];
+    }
+    // Within the same calendar year: "Mar 5"
+    if (now.getFullYear() === then.getFullYear()) {
+      const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+      return `${months[then.getMonth()]} ${then.getDate()}`;
+    }
+    // Older: "Mar '25"
+    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    return `${months[then.getMonth()]} '${(then.getFullYear() % 100).toString().padStart(2, "0")}`;
   }
 
   function navigate(delta: number) {
@@ -453,6 +514,18 @@
     //   4. Focus in editor → let editor handle (ghost-decline / vim normal)
     //   5. Otherwise → clear search query + focus search field
     if (e.key === "Escape" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      if (updateModalOpen) {
+        e.preventDefault();
+        e.stopPropagation();
+        closeUpdateModal();
+        return;
+      }
+      if (rowMenu) {
+        e.preventDefault();
+        e.stopPropagation();
+        dismissRowMenu();
+        return;
+      }
       if (exportOpen) {
         e.preventDefault();
         e.stopPropagation();
@@ -615,6 +688,50 @@
     } else {
       openNote(path);
     }
+  }
+
+  function handleNoteContextMenu(e: MouseEvent, path: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    rowMenu = { path, x: e.clientX, y: e.clientY };
+  }
+
+  function dismissRowMenu() {
+    rowMenu = null;
+  }
+
+  async function rowMenuReveal(path: string) {
+    rowMenu = null;
+    try {
+      await invoke("reveal_note", { path });
+    } catch (err) {
+      console.error("reveal_note failed", err);
+    }
+  }
+
+  async function rowMenuDuplicate(path: string) {
+    rowMenu = null;
+    try {
+      const newPath = await invoke<string>("duplicate_note", { path });
+      // notes_changed event will refresh the list; jump to the new note.
+      pushToHistory("primary", newPath);
+      selectedPath = newPath;
+      focusedPane = "primary";
+      void scrollSelectedIntoView("nearest");
+    } catch (err) {
+      console.error("duplicate_note failed", err);
+    }
+  }
+
+  function rowMenuRename(path: string) {
+    rowMenu = null;
+    void openRename(path);
+  }
+
+  function rowMenuDelete(path: string) {
+    rowMenu = null;
+    selectedPath = path;
+    deleteConfirmOpen = true;
   }
 
   // Persist split fraction whenever it changes.
@@ -1056,14 +1173,156 @@
     }
   }
 
+  // -------------------- auto-updater --------------------
+
+  async function checkForUpdates(opts: { silent: boolean }) {
+    if (updateState.kind === "checking" || updateState.kind === "downloading") return;
+    updateState = { kind: "checking" };
+    try {
+      const { check } = await import("@tauri-apps/plugin-updater");
+      const update = await check();
+      if (update) {
+        updateState = {
+          kind: "available",
+          version: update.version,
+          notes: update.body ?? "",
+        };
+        pendingUpdate = update as typeof pendingUpdate;
+        updateToastDismissed = false;
+      } else {
+        updateState = { kind: "up_to_date" };
+        // If this was a silent background check, fade back to idle so we
+        // don't leave a permanent "up to date" badge in the status bar.
+        if (opts.silent) {
+          setTimeout(() => {
+            if (updateState.kind === "up_to_date") updateState = { kind: "idle" };
+          }, 4000);
+        }
+      }
+    } catch (e) {
+      updateState = { kind: "error", message: String(e) };
+      // Don't pester on background failures (offline, GitHub down, etc.).
+      if (opts.silent) {
+        setTimeout(() => {
+          if (updateState.kind === "error") updateState = { kind: "idle" };
+        }, 1000);
+      }
+    }
+  }
+
+  async function installPendingUpdate() {
+    if (!pendingUpdate) return;
+    updateState = { kind: "downloading", progress: 0 };
+    let total = 0;
+    let downloaded = 0;
+    try {
+      await pendingUpdate.downloadAndInstall((event: unknown) => {
+        // Event shape: { event: "Started", data: { contentLength } } |
+        //              { event: "Progress", data: { chunkLength } }    |
+        //              { event: "Finished" }
+        const e = event as { event: string; data?: { contentLength?: number; chunkLength?: number } };
+        if (e.event === "Started") {
+          total = e.data?.contentLength ?? 0;
+          downloaded = 0;
+          updateState = { kind: "downloading", progress: 0 };
+        } else if (e.event === "Progress") {
+          downloaded += e.data?.chunkLength ?? 0;
+          const pct = total > 0 ? Math.min(99, Math.round((downloaded / total) * 100)) : 0;
+          updateState = { kind: "downloading", progress: pct };
+        } else if (e.event === "Finished") {
+          updateState = { kind: "installing" };
+        }
+      });
+      // Restart into the new version.
+      const { relaunch } = await import("@tauri-apps/plugin-process");
+      await relaunch();
+    } catch (e) {
+      updateState = { kind: "error", message: String(e) };
+      pendingUpdate = null;
+    }
+  }
+
+  function dismissUpdateToast() {
+    updateToastDismissed = true;
+  }
+
+  function openUpdateModal() {
+    if (updateState.kind === "available") {
+      updateModalOpen = true;
+      updateToastDismissed = true;
+    }
+  }
+
+  function closeUpdateModal() {
+    updateModalOpen = false;
+  }
+
+  async function refreshApiKeyStatus() {
+    try {
+      hasApiKey = await invoke<boolean>("has_api_key");
+    } catch {
+      hasApiKey = false;
+    }
+  }
+
+  // Persist the last open primary note across restarts so users land where
+  // they left off instead of always at "most recent".
+  const LAST_OPEN_KEY = "malt.lastOpenPath";
+  function persistLastOpen(path: string | null) {
+    if (typeof localStorage === "undefined") return;
+    if (path) localStorage.setItem(LAST_OPEN_KEY, path);
+    else localStorage.removeItem(LAST_OPEN_KEY);
+  }
+  function readLastOpen(): string | null {
+    if (typeof localStorage === "undefined") return null;
+    return localStorage.getItem(LAST_OPEN_KEY);
+  }
+
+  // Push the current note's title into the window title bar.
+  async function setWindowTitle(noteTitle: string | null) {
+    try {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      const w = getCurrentWindow();
+      const t = noteTitle ? `malt — ${noteTitle}` : "malt";
+      await w.setTitle(t);
+    } catch {
+      /* setTitle not critical; ignore */
+    }
+  }
+  // Watch selectedPath; update title + persist.
+  $effect(() => {
+    const p = selectedPath;
+    persistLastOpen(p);
+    void setWindowTitle(p ? getTitleForPath(p) : null);
+  });
+
   onMount(async () => {
     unlisten = await listen("notes_changed", async () => {
       await Promise.all([performSearch(query), refreshAllNotes(), refreshTagMeta()]);
     });
     window.addEventListener("keydown", handleGlobalKey, true);
-    await Promise.all([refreshAllNotes(), refreshSavedSearches(), refreshTagMeta()]);
+    await Promise.all([
+      refreshAllNotes(),
+      refreshSavedSearches(),
+      refreshTagMeta(),
+      refreshApiKeyStatus(),
+    ]);
+    // After list loads, try to restore the last-open note. The auto-select
+    // effect would otherwise jump to whatever's first.
+    const last = readLastOpen();
+    if (last && allNotes.some((n) => n.path === last)) {
+      selectedPath = last;
+      void scrollSelectedIntoView("nearest");
+    }
     await tick();
     searchInput?.focus();
+    // Splash animation handles its own visibility via @keyframes + visibility:
+    // hidden at the end. Unmount the element after the animation completes
+    // so we don't leave hidden DOM around.
+    setTimeout(() => { booting = false; }, 800);
+    // Silent background update check 5s after boot. Errors are swallowed
+    // (offline, GitHub down, no published release yet → all fine to ignore).
+    setTimeout(() => { void checkForUpdates({ silent: true }); }, 5000);
   });
 
   onDestroy(() => {
@@ -1090,7 +1349,7 @@
       class="gear"
       onclick={() => (settingsOpen = true)}
       aria-label="Open settings (Ctrl+,)"
-      title="Settings (Ctrl+,)"
+      title={`Settings (${(typeof navigator !== "undefined" && /Mac/i.test(navigator.platform)) ? "⌘" : "Ctrl+"},)`}
       tabindex="-1"
     >
       ⚙
@@ -1140,6 +1399,18 @@
           {/if}
         </button>
       {/if}
+      <span class="sep">·</span>
+      <span
+        class="status-dot api-dot"
+        class:on={hasApiKey}
+        title={hasApiKey ? "Anthropic API key configured" : "No Anthropic API key — click to set up"}
+        onclick={() => (settingsOpen = true)}
+        role="button"
+        tabindex="-1"
+      ></span>
+      {#if justSaved}
+        <span class="saved-flash" title="Note autosaved">saved</span>
+      {/if}
     </span>
     <span class="sort">
       {#each SORT_OPTIONS as opt, i (opt.id)}
@@ -1169,6 +1440,7 @@
             e.stopPropagation();
             void openRename(note.path);
           }}
+          oncontextmenu={(e) => handleNoteContextMenu(e, note.path)}
         >
           <span class="note-title">{@html highlight(note.title, note.title_matches)}</span>
           <span class="snippet">{@html highlight(note.snippet, note.snippet_matches)}</span>
@@ -1217,6 +1489,7 @@
               allTags={allTagNames}
               onTagClick={handleEditorTagClick}
               onTagPromote={handleEditorTagPromote}
+              onSaved={flashSaved}
             />
           </div>
           {#if secondaryPath}
@@ -1290,7 +1563,98 @@
   </div>
 </main>
 
-<Settings bind:open={settingsOpen} />
+<Settings
+  bind:open={settingsOpen}
+  onCheckForUpdates={() => void checkForUpdates({ silent: false })}
+  updateStatusLabel={
+    updateState.kind === "checking" ? "checking…" :
+    updateState.kind === "up_to_date" ? "you're on the latest version" :
+    updateState.kind === "available" ? `v${updateState.version} available — see toast` :
+    updateState.kind === "downloading" ? `downloading… ${updateState.progress}%` :
+    updateState.kind === "installing" ? "installing — restart imminent" :
+    updateState.kind === "error" ? `error: ${updateState.message}` : ""
+  }
+  canCheckForUpdates={updateState.kind !== "checking" && updateState.kind !== "downloading" && updateState.kind !== "installing"}
+/>
+
+{#if rowMenu}
+  <div
+    class="pill-menu-backdrop"
+    role="presentation"
+    onclick={dismissRowMenu}
+    oncontextmenu={(e) => { e.preventDefault(); dismissRowMenu(); }}
+  ></div>
+  <div
+    class="row-menu"
+    style:left={`${rowMenu.x}px`}
+    style:top={`${rowMenu.y}px`}
+    role="menu"
+  >
+    <button class="row-menu-item" onclick={() => openNote(rowMenu!.path)}>Open</button>
+    <button class="row-menu-item" onclick={() => openInSecondary(rowMenu!.path)}>Open in second pane</button>
+    <div class="row-menu-sep"></div>
+    <button class="row-menu-item" onclick={() => rowMenuRename(rowMenu!.path)}>Rename…</button>
+    <button class="row-menu-item" onclick={() => void rowMenuDuplicate(rowMenu!.path)}>Duplicate</button>
+    <button class="row-menu-item" onclick={() => void rowMenuReveal(rowMenu!.path)}>Reveal in file manager</button>
+    <div class="row-menu-sep"></div>
+    <button class="row-menu-item danger" onclick={() => rowMenuDelete(rowMenu!.path)}>Delete…</button>
+  </div>
+{/if}
+
+{#if booting}
+  <div class="boot-splash">
+    <div class="boot-logo">m</div>
+    <div class="boot-label">malt</div>
+  </div>
+{/if}
+
+{#if updateState.kind === "available" && !updateToastDismissed && !updateModalOpen}
+  <div class="update-toast" role="status">
+    <span class="update-toast-text">
+      <strong>malt {updateState.version}</strong> is available
+    </span>
+    <button class="update-toast-btn primary" onclick={openUpdateModal}>Show details</button>
+    <button class="update-toast-btn" onclick={dismissUpdateToast} title="Dismiss until next launch">×</button>
+  </div>
+{/if}
+
+{#if updateState.kind === "downloading" || updateState.kind === "installing"}
+  <div class="update-toast" role="status">
+    <span class="update-toast-text">
+      {#if updateState.kind === "downloading"}
+        Downloading update… {updateState.progress}%
+      {:else}
+        Installing… malt will restart in a moment.
+      {/if}
+    </span>
+  </div>
+{/if}
+
+{#if updateModalOpen && updateState.kind === "available"}
+  <div
+    class="rename-backdrop"
+    role="presentation"
+    onclick={closeUpdateModal}
+  >
+    <div
+      class="rename-panel update-panel"
+      role="dialog"
+      aria-modal="true"
+      onclick={(e) => e.stopPropagation()}
+    >
+      <div class="rename-label">update available</div>
+      <div class="update-version">malt {updateState.version}</div>
+      {#if updateState.notes}
+        <div class="update-notes-label">What's new</div>
+        <pre class="update-notes">{updateState.notes}</pre>
+      {/if}
+      <div class="rename-actions">
+        <button class="rename-btn cancel" onclick={closeUpdateModal}>later</button>
+        <button class="rename-btn confirm" onclick={() => void installPendingUpdate()}>install + restart</button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 {#if exportOpen && selectedPath}
   <div
@@ -1631,6 +1995,193 @@
   .wc-unit {
     color: #555;
     margin-left: 1px;
+  }
+  .status-dot {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #444;
+    cursor: pointer;
+    vertical-align: middle;
+    margin: 0 2px 1px;
+    transition: background 120ms ease;
+  }
+  .status-dot.api-dot.on {
+    background: #6c6;
+    box-shadow: 0 0 4px rgba(108, 198, 108, 0.5);
+  }
+  .status-dot:hover {
+    filter: brightness(1.3);
+  }
+  .saved-flash {
+    color: #6c6;
+    margin-left: 6px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    animation: saved-fade 1.2s ease-out;
+  }
+  @keyframes saved-fade {
+    0% { opacity: 0; transform: translateY(2px); }
+    20% { opacity: 1; transform: translateY(0); }
+    80% { opacity: 1; }
+    100% { opacity: 0; }
+  }
+  .pill-menu-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 199;
+  }
+  .row-menu {
+    position: fixed;
+    z-index: 200;
+    background: #1c1c1c;
+    border: 1px solid #333;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+    padding: 4px;
+    min-width: 200px;
+    display: flex;
+    flex-direction: column;
+  }
+  .row-menu-item {
+    background: transparent;
+    border: 0;
+    color: #ccc;
+    font: inherit;
+    font-size: 12px;
+    text-align: left;
+    padding: 5px 10px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .row-menu-item:hover {
+    background: #2a2a2a;
+    color: #fff;
+  }
+  .row-menu-item.danger:hover {
+    background: rgba(200, 100, 100, 0.12);
+    color: #f88;
+  }
+  .row-menu-sep {
+    height: 1px;
+    background: #2a2a2a;
+    margin: 4px 0;
+  }
+  .boot-splash {
+    position: fixed;
+    inset: 0;
+    background: #1a1a1a;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 300;
+    animation: boot-fade 320ms ease forwards;
+    animation-delay: 200ms;
+    pointer-events: none;
+  }
+  .boot-logo {
+    font-family: "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 80px;
+    font-weight: 700;
+    color: #d6b06a;
+    line-height: 1;
+    margin-bottom: 8px;
+  }
+  .boot-label {
+    color: #555;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.3em;
+  }
+  @keyframes boot-fade {
+    from { opacity: 1; }
+    to { opacity: 0; visibility: hidden; }
+  }
+  .update-toast {
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    z-index: 180;
+    background: #1c1c1c;
+    border: 1px solid #d6b06a;
+    border-radius: 6px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+    padding: 10px 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    color: #e0e0e0;
+    max-width: 360px;
+    animation: toast-slide 240ms ease;
+  }
+  @keyframes toast-slide {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .update-toast-text {
+    flex: 1;
+  }
+  .update-toast-text strong {
+    color: #d6b06a;
+    font-weight: 600;
+  }
+  .update-toast-btn {
+    background: transparent;
+    border: 1px solid #333;
+    color: #aaa;
+    font: inherit;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 3px 8px;
+    cursor: pointer;
+    border-radius: 3px;
+  }
+  .update-toast-btn:hover {
+    border-color: #555;
+    color: #e0e0e0;
+  }
+  .update-toast-btn.primary {
+    border-color: #d6b06a;
+    color: #f1d394;
+  }
+  .update-toast-btn.primary:hover {
+    background: rgba(214, 176, 106, 0.1);
+  }
+  .update-panel {
+    min-width: 460px;
+    max-width: 580px;
+  }
+  .update-version {
+    color: #d6b06a;
+    font-family: "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 18px;
+    margin-bottom: 12px;
+  }
+  .update-notes-label {
+    color: #888;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin: 8px 0 4px;
+  }
+  .update-notes {
+    background: #111;
+    border: 1px solid #2a2a2a;
+    border-radius: 3px;
+    padding: 10px 12px;
+    margin: 0 0 16px;
+    color: #ccc;
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 280px;
+    overflow-y: auto;
+    font-family: inherit;
   }
   .body {
     flex: 1;
