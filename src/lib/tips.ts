@@ -76,6 +76,13 @@ export const TIPS: Tip[] = [
       "Quit malt with a note open and the next launch lands you right back on it. Nothing about your session lives in RAM only.",
   },
   {
+    id: "g-daily-note",
+    category: "general",
+    headline: "Jump to today's journal in one keystroke",
+    story:
+      "⌘D opens (or creates) a note titled with today's date. A fresh one is seeded with #journal so your days collect into a searchable journal — toggle that off in Settings → general.",
+  },
+  {
     id: "g-rename-backlinks",
     category: "general",
     headline: "Rename a note without breaking links",

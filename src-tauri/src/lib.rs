@@ -633,6 +633,13 @@ fn set_security_reprompt_on_blur(enabled: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn set_daily_note_tag(enabled: bool) -> Result<(), String> {
+    let mut cfg = config::load();
+    cfg.daily_note_tag = enabled;
+    config::save(&cfg).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn complete_text_streaming(
     before: String,
     after: String,
@@ -1177,6 +1184,7 @@ pub fn run() {
             list_providers,
             get_config,
             set_tagging_enabled,
+            set_daily_note_tag,
             set_notes_dir,
             reveal_notes_dir,
             reveal_note,

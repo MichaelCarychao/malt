@@ -798,6 +798,13 @@
       searchInput?.select();
       return;
     }
+    if (key === "d") {
+      // Daily note: open (or create) today's dated note.
+      e.preventDefault();
+      e.stopPropagation();
+      void openDailyNote();
+      return;
+    }
     if (key === "arrowdown" || key === "j") {
       e.preventDefault();
       e.stopPropagation();
@@ -1948,6 +1955,47 @@
     }
   }
 
+  // Daily note: Cmd/Ctrl+D opens today's note (YYYY-MM-DD), creating it
+  // if needed. A fresh daily note is seeded with #journal unless the
+  // user disabled that in Settings → General.
+  let dailyNoteTag = $state(true);
+  function todayTitle(): string {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+  async function openDailyNote() {
+    const title = todayTitle();
+    const existing = allNotes.find(
+      (n) => n.title.localeCompare(title, undefined, { sensitivity: "base" }) === 0,
+    );
+    if (existing) {
+      pushToHistory("primary", existing.path);
+      selectedPath = existing.path;
+      focusedPane = "primary";
+      void scrollSelectedIntoView("nearest");
+      void tick().then(() => focusEditor());
+      return;
+    }
+    try {
+      const newPath = await invoke<string>("create_note", { title });
+      if (dailyNoteTag) {
+        // Seed the journal tag. The editor relocates it to the hidden
+        // canonical line + renders a pill, same as any inline tag.
+        await invoke("save_note", { path: newPath, content: "#journal\n" });
+      }
+      await refreshAllNotes();
+      pushToHistory("primary", newPath);
+      selectedPath = newPath;
+      focusedPane = "primary";
+      void tick().then(() => focusEditor());
+    } catch (e) {
+      console.error("openDailyNote failed", e);
+    }
+  }
+
   // ─── Vault management ────────────────────────────────────────────
 
   async function refreshVaults() {
@@ -2095,6 +2143,15 @@
     }
   }
 
+  async function refreshGeneralConfig() {
+    try {
+      const cfg = await invoke<{ daily_note_tag: boolean }>("get_config");
+      dailyNoteTag = cfg.daily_note_tag;
+    } catch {
+      // Default already true.
+    }
+  }
+
   // Persist the last open primary note across restarts so users land where
   // they left off instead of always at "most recent".
   const LAST_OPEN_KEY = "malt.lastOpenPath";
@@ -2145,6 +2202,10 @@
       const detail = (e as CustomEvent<{ reprompt_on_blur: boolean }>).detail;
       if (detail) securityRepromptOnBlur = detail.reprompt_on_blur;
     }) as EventListener);
+    window.addEventListener("malt:daily-note-tag-changed", ((e: Event) => {
+      const detail = (e as CustomEvent<{ enabled: boolean }>).detail;
+      if (detail) dailyNoteTag = detail.enabled;
+    }) as EventListener);
     // Splash + tip prep. Record the mount time so we can enforce a
     // minimum 1 second on-screen duration even on fast boots — without
     // it, instant boots flash the splash for a frame or two before the
@@ -2162,6 +2223,7 @@
       refreshTagMeta(),
       refreshApiKeyStatus(),
       refreshSecurityConfig(),
+      refreshGeneralConfig(),
       refreshVaults(),
     ]);
     // After list loads, try to restore the last-open note. The auto-select

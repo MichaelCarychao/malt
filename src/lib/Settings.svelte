@@ -69,6 +69,7 @@
     { keys: `${mod}+,`,                action: "Open / close settings",                       status: "live" },
     { keys: `${mod}+L`,                action: "Focus search field",                          status: "live" },
     { keys: `${mod}+N`,                action: "New note (clear & focus search)",             status: "live" },
+    { keys: `${mod}+D`,                action: "Daily note — open/create today's dated note",  status: "live" },
     { keys: `↑ / ↓`,                   action: "Move selection (in search field)",            status: "live" },
     { keys: `${mod}+↓ / ${mod}+;`,     action: "Next note (from anywhere)",                   status: "live" },
     { keys: `${mod}+↑ / ${mod}+K`,     action: "Previous note (from anywhere)",               status: "live" },
@@ -259,6 +260,7 @@
     }
   }
   let taggingEnabled = $state(false);
+  let dailyTag = $state(true);
   let configLoaded = $state(false);
 
   // ── Multi-provider AI state ───────────────────────────────────────
@@ -597,12 +599,30 @@
 
   async function loadConfig() {
     try {
-      const cfg = await invoke<{ tagging_enabled: boolean }>("get_config");
+      const cfg = await invoke<{ tagging_enabled: boolean; daily_note_tag: boolean }>(
+        "get_config",
+      );
       taggingEnabled = cfg.tagging_enabled;
+      dailyTag = cfg.daily_note_tag;
     } catch {
       taggingEnabled = false;
     } finally {
       configLoaded = true;
+    }
+  }
+
+  async function toggleDailyTag(e: Event) {
+    const target = e.target as HTMLInputElement;
+    const enabled = target.checked;
+    try {
+      await invoke("set_daily_note_tag", { enabled });
+      dailyTag = enabled;
+      window.dispatchEvent(
+        new CustomEvent("malt:daily-note-tag-changed", { detail: { enabled } }),
+      );
+    } catch (err) {
+      target.checked = !enabled;
+      console.error("set_daily_note_tag failed", err);
     }
   }
 
@@ -692,6 +712,32 @@
                   {alwaysShowMarkdown
                     ? "every ** and _ stays visible while you edit."
                     : "renders WYSIWYG; markers reveal when you touch the styled word."}
+                </label>
+              </td>
+              <td class="status"></td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+      <section>
+        <h3>daily note</h3>
+        <table>
+          <tbody>
+            <tr>
+              <td class="keys">{mod}+D</td>
+              <td class="action">Opens (or creates) today's note, titled with the date (YYYY-MM-DD).</td>
+              <td class="status"></td>
+            </tr>
+            <tr>
+              <td class="keys">#journal tag</td>
+              <td class="action">
+                <label class="toggle-label">
+                  <input
+                    type="checkbox"
+                    checked={dailyTag}
+                    onchange={toggleDailyTag}
+                  />
+                  {dailyTag ? "on" : "off"} — seed a fresh daily note with #journal
                 </label>
               </td>
               <td class="status"></td>

@@ -38,6 +38,11 @@ pub struct Config {
     /// clobbering the other when you switch providers.
     #[serde(default)]
     pub provider_models: HashMap<String, String>,
+    /// When true (default), a freshly-created daily note (Cmd/Ctrl+D)
+    /// is seeded with a #journal tag. Turn off if you'd rather start
+    /// the daily note blank.
+    #[serde(default = "default_true")]
+    pub daily_note_tag: bool,
 }
 
 fn default_true() -> bool {
@@ -58,6 +63,7 @@ impl Default for Config {
             reprompt_on_blur: true,
             active_provider: default_provider(),
             provider_models: HashMap::new(),
+            daily_note_tag: true,
         }
     }
 }
