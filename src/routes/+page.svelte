@@ -2005,6 +2005,12 @@
       (n) => n.title.localeCompare(title, undefined, { sensitivity: "base" }) === 0,
     );
     if (existing) {
+      // Clear any active query first: if the search bar is filtering to
+      // something the dated note doesn't match, the auto-select effect
+      // would snap selection back to a visible row and the editor would
+      // never move to the daily note. An empty query lists everything.
+      query = "";
+      await performSearch("");
       pushToHistory("primary", existing.path);
       selectedPath = existing.path;
       focusedPane = "primary";
@@ -2022,7 +2028,10 @@
         // to offset 0 (the empty first line), ready to write.
         await invoke("save_note", { path: newPath, content: "\n#journal\n" });
       }
-      await refreshAllNotes();
+      // Clear the query (same reason as above) and refresh so the new
+      // note is present + visible before we select it.
+      query = "";
+      await Promise.all([refreshAllNotes(), performSearch("")]);
       pushToHistory("primary", newPath);
       selectedPath = newPath;
       focusedPane = "primary";
