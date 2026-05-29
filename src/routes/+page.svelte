@@ -2015,9 +2015,12 @@
     try {
       const newPath = await invoke<string>("create_note", { title });
       if (dailyNoteTag) {
-        // Seed the journal tag. The editor relocates it to the hidden
-        // canonical line + renders a pill, same as any inline tag.
-        await invoke("save_note", { path: newPath, content: "#journal\n" });
+        // Seed the journal tag on its OWN line at the bottom, with an
+        // empty first line for the cursor. The editor's tagLineHider
+        // hides the canonical bottom tag line + shows it as a pill, so
+        // #journal never sits in the typing path. The cursor defaults
+        // to offset 0 (the empty first line), ready to write.
+        await invoke("save_note", { path: newPath, content: "\n#journal\n" });
       }
       await refreshAllNotes();
       pushToHistory("primary", newPath);

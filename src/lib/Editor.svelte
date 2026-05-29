@@ -9,6 +9,7 @@
     StateEffect,
     RangeSetBuilder,
     Prec,
+    Annotation,
   } from "@codemirror/state";
   import {
     EditorView,
@@ -1300,6 +1301,40 @@
     provide: (f) => EditorView.decorations.from(f),
   });
 
+  // Marks a transaction as an internal, programmatic rewrite (the
+  // relocate-tags-to-bottom transform, external-change reloads, full-doc
+  // resets) so the protect filter below lets it through. User keystrokes
+  // carry no annotation and are subject to protection.
+  const internalDocRewrite = Annotation.define<boolean>();
+
+  // Protect the hidden canonical tag line from user edits. Without this,
+  // backspacing past trailing newlines at the end of a note silently
+  // eats into the (invisible) tag line — you can delete tags you can't
+  // see. changeFilter returns the protected [from,to] range; CodeMirror
+  // drops any user deletion that would touch it while still allowing
+  // insertions adjacent to it and edits everywhere else. We protect from
+  // the separator newline before the tag line through the end of the
+  // document so the tags and their separator are both safe.
+  const protectTagLine = EditorState.changeFilter.of((tr) => {
+    if (tr.annotation(internalDocRewrite)) return true;
+    const doc = tr.startState.doc.toString();
+    const range = canonicalTagLineRange(doc);
+    if (!range) return true;
+    const line = tr.startState.doc.lineAt(range.from);
+    // Protect the tag CHARACTERS only — not the separator newline before
+    // them, and never position 0. That fully prevents backspacing into
+    // the hidden tags from the end of the file, while leaving an
+    // editable anchor on a note whose only content is the tag line (a
+    // fresh daily note). Insertions adjacent are always fine.
+    return [line.from, line.to];
+  });
+
+  // Make the hidden tag region atomic so arrow keys / word-motion skip
+  // over it cleanly instead of stepping into invisible characters.
+  const tagLineAtomic = EditorView.atomicRanges.of((view) => {
+    return view.state.field(tagLineHider, false) ?? Decoration.none;
+  });
+
   // Completion source for hashtag autocomplete. Fires when the user has
   // typed `#letter...` preceded by whitespace / start-of-line. Vocabulary
   // tags rank first, then any corpus tag, then anything the user has
@@ -1497,6 +1532,9 @@
         view.dispatch({
           changes: { from: 0, to: oldContent.length, insert: newContent },
           selection: { anchor: cursor },
+          // This rewrite legitimately rebuilds the canonical tag line, so
+          // it must bypass the protect filter.
+          annotations: internalDocRewrite.of(true),
         });
       }
       void flushSave(p, view.state.doc.toString());
@@ -1609,6 +1647,8 @@
       tagWatcher,
       tagPillPlugin,
       tagLineHider,
+      protectTagLine,
+      tagLineAtomic,
       EditorView.updateListener.of((u) => {
         if (u.docChanged) {
           scheduleSave();
@@ -1695,6 +1735,8 @@
     }
     view.dispatch({
       changes: { from: 0, to: view.state.doc.length, insert: fresh },
+      // Whole-doc reload from disk — bypass the tag-line protect filter.
+      annotations: internalDocRewrite.of(true),
     });
     lastSavedContent = fresh;
   }
