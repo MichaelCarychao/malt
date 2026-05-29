@@ -7,6 +7,7 @@ mod export;
 mod frontmatter;
 mod index;
 mod link_suggestions;
+mod mentions;
 mod notes;
 mod openai_compat;
 mod prompts;
@@ -205,6 +206,28 @@ fn find_backlinks(
     state: tauri::State<AppState>,
 ) -> Vec<backlinks::BacklinkInfo> {
     state.backlinks.for_path(&path)
+}
+
+/// Notes that mention this note's title in prose without a [[wikilink]].
+#[tauri::command]
+fn find_unlinked_mentions(path: String) -> Vec<mentions::UnlinkedMention> {
+    mentions::find(&path)
+}
+
+/// Turn the first unlinked mention of `target_title` inside
+/// `source_path` into a wikilink. The watcher will refresh backlinks +
+/// the editor if it's open.
+#[tauri::command]
+fn link_unlinked_mention(
+    source_path: String,
+    target_title: String,
+    state: tauri::State<AppState>,
+) -> Result<(), String> {
+    mentions::link_first(&source_path, &target_title)?;
+    // Refresh backlinks immediately so the linkbacks panel updates
+    // without waiting for the debounced watcher event.
+    state.backlinks.rebuild();
+    Ok(())
 }
 
 #[tauri::command]
@@ -1166,6 +1189,8 @@ pub fn run() {
             find_backlinks,
             find_related,
             semantic_search,
+            find_unlinked_mentions,
+            link_unlinked_mention,
             suggest_wikilinks,
             suggest_wikilinks_ai,
             export_as_string,

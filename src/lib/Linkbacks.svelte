@@ -17,6 +17,13 @@
     similarity: number;
   };
 
+  type UnlinkedMention = {
+    path: string;
+    title: string;
+    snippet: string;
+    count: number;
+  };
+
   let {
     currentPath,
     collapsed = $bindable(false),
@@ -29,32 +36,61 @@
 
   let backlinks = $state<BacklinkInfo[]>([]);
   let related = $state<RelatedNote[]>([]);
+  let unlinked = $state<UnlinkedMention[]>([]);
   let unlistenNotes: UnlistenFn | null = null;
   let unlistenRelated: UnlistenFn | null = null;
   let fetchGen = 0;
+
+  // Title of the current note (file stem) — the target whose mentions
+  // we're hunting. Used as the wikilink text when linking a mention.
+  let currentTitle = $derived.by(() => {
+    if (!currentPath) return "";
+    const slash = Math.max(currentPath.lastIndexOf("/"), currentPath.lastIndexOf("\\"));
+    const base = slash >= 0 ? currentPath.slice(slash + 1) : currentPath;
+    return base.toLowerCase().endsWith(".md") ? base.slice(0, -3) : base;
+  });
 
   async function refresh() {
     const myGen = ++fetchGen;
     if (!currentPath) {
       backlinks = [];
       related = [];
+      unlinked = [];
       return;
     }
     const path = currentPath;
     try {
-      const [bls, rels] = await Promise.all([
+      const [bls, rels, mentions] = await Promise.all([
         invoke<BacklinkInfo[]>("find_backlinks", { path }),
         invoke<RelatedNote[]>("find_related", { path }),
+        invoke<UnlinkedMention[]>("find_unlinked_mentions", { path }),
       ]);
       if (myGen === fetchGen) {
         backlinks = bls;
         related = rels;
+        unlinked = mentions;
       }
     } catch {
       if (myGen === fetchGen) {
         backlinks = [];
         related = [];
+        unlinked = [];
       }
+    }
+  }
+
+  async function linkMention(sourcePath: string) {
+    if (!currentTitle) return;
+    try {
+      await invoke("link_unlinked_mention", {
+        sourcePath,
+        targetTitle: currentTitle,
+      });
+      // Optimistically drop it from the list; a full refresh follows
+      // when the watcher fires notes_changed.
+      unlinked = unlinked.filter((m) => m.path !== sourcePath);
+    } catch (e) {
+      console.error("link_unlinked_mention failed", e);
     }
   }
 
@@ -100,7 +136,7 @@
   >
     <span class="chevron">{collapsed ? "▶" : "▼"}</span>
     <span class="label">linkbacks</span>
-    <span class="count">{backlinks.length}{related.length > 0 ? ` · ${related.length} related` : ""}</span>
+    <span class="count">{backlinks.length}{related.length > 0 ? ` · ${related.length} related` : ""}{unlinked.length > 0 ? ` · ${unlinked.length} unlinked` : ""}</span>
   </div>
   {#if !collapsed}
     <div class="sections">
@@ -135,6 +171,30 @@
           {/if}
         </ul>
       </div>
+      {#if unlinked.length > 0}
+        <div class="section">
+          <div class="section-label">unlinked mentions <span class="related-hint">names this note without a link</span></div>
+          <ul class="bl-list">
+            {#each unlinked as m (m.path)}
+              <li class="bl-row mention-row">
+                <span class="mention-main" onclick={() => onNavigate?.(m.path)} role="button" tabindex="-1"
+                  onkeydown={(e) => { if (e.key === "Enter") onNavigate?.(m.path); }}>
+                  <span class="bl-title">
+                    {m.title}
+                    {#if m.count > 1}<span class="sim">{m.count}×</span>{/if}
+                  </span>
+                  <span class="bl-snippet">{m.snippet}</span>
+                </span>
+                <button
+                  class="mention-link-btn"
+                  onclick={(e) => { e.stopPropagation(); void linkMention(m.path); }}
+                  title={`Wrap the first mention in [[${currentTitle}]]`}
+                >link</button>
+              </li>
+            {/each}
+          </ul>
+        </div>
+      {/if}
     </div>
   {/if}
 </div>
@@ -249,5 +309,32 @@
     color: #555;
     font-size: 11px;
     font-style: italic;
+  }
+  .mention-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .mention-main {
+    flex: 1;
+    min-width: 0;
+    cursor: pointer;
+  }
+  .mention-link-btn {
+    flex-shrink: 0;
+    background: transparent;
+    border: 1px solid #2e2e2e;
+    color: #97a3b0;
+    font: inherit;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 2px 8px;
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  .mention-link-btn:hover {
+    border-color: #6cb6ff;
+    color: #6cb6ff;
   }
 </style>

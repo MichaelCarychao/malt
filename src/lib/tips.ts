@@ -62,6 +62,13 @@ export const TIPS: Tip[] = [
       "⌘, toggles Settings open and shut. Same trick: ⌘F toggles find in note, ⌘L focuses the search bar.",
   },
   {
+    id: "g-unlinked-mentions",
+    category: "general",
+    headline: "Discover links I never made",
+    story:
+      "The linkbacks panel shows \"unlinked mentions\" — notes that name the current one in plain prose without a [[link]]. Hit \"link\" to wire one up. Latent structure, surfaced.",
+  },
+  {
     id: "g-split-pane",
     category: "general",
     headline: "Pull two notes side by side",
