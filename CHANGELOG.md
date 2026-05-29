@@ -4,6 +4,29 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.1 — 2026-05-29
+
+Refinement batch.
+
+- **Steer the AI (Cmd/Ctrl+Shift+;).** A one-line modal lets you aim a
+  generation — "make it darker", "pivot to the counterargument",
+  "shorter" — injected as a `<direction>` note into the same
+  completion/rewrite. Works across all providers; the default
+  completion + rewrite prompts explain the tag.
+- **Daily note no longer puts #journal in your way.** The seeded tag
+  now lives on its own hidden canonical line with the cursor on an
+  empty first line, ready to type.
+- **Hidden tags can't be deleted by accident.** Backspacing past
+  trailing newlines at the end of a note used to silently eat into
+  the invisible tag line. A change-filter now protects those tag
+  characters (the relocate transform + external reloads bypass it),
+  and arrow/word motion skips the hidden region.
+- **Unlinked-mention scan is built for scale.** Instead of reading
+  every note on each note-open, the tantivy index narrows to
+  candidate notes containing the title (a phrase query), and the
+  precise check runs on a background worker so the UI never stalls —
+  O(matches), not O(vault). Ready for vaults in the tens of thousands.
+
 ## 0.4.0 — 2026-05-28
 
 Discovery + journaling batch (built overnight on the v0.3.3 review).

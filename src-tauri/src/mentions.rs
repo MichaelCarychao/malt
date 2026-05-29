@@ -123,27 +123,40 @@ fn snippet_around(body: &str, offset: usize, title_len: usize) -> String {
     format!("{prefix}{compact}{suffix}")
 }
 
-/// Find every note that mentions `target_path`'s title in plain prose
-/// without already linking it.
-pub fn find(target_path: &str) -> Vec<UnlinkedMention> {
-    let target_title = std::path::Path::new(target_path)
+/// The title (file stem) malt would hunt mentions of, or None if it's
+/// too short to be worth scanning (1–2 chars produce noise). Exposed so
+/// the caller can feed it to the index for candidate lookup.
+pub fn title_for(target_path: &str) -> Option<String> {
+    let title = std::path::Path::new(target_path)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_string();
-    // Very short titles (1–2 chars) produce noise; require ≥3.
-    if target_title.chars().count() < 3 {
-        return Vec::new();
+    if title.chars().count() < 3 {
+        None
+    } else {
+        Some(title)
     }
-    let title_lower = target_title.to_lowercase();
-    let title_len = target_title.len();
+}
+
+/// Find unlinked mentions of `title` among `candidate_paths` — the notes
+/// the index says contain the title text. Scoping to candidates instead
+/// of the whole corpus keeps this O(matches), not O(vault), so it stays
+/// fast as vaults grow into the tens of thousands of notes.
+///
+/// The candidate set is a superset (the index matches tokenized phrases;
+/// we still do the precise word-boundary + not-already-linked check per
+/// candidate here), so passing a slightly-too-broad list is fine.
+pub fn find(target_path: &str, title: &str, candidate_paths: &[String]) -> Vec<UnlinkedMention> {
+    let title_lower = title.to_lowercase();
+    let title_len = title.len();
 
     let mut out = Vec::new();
-    for note in crate::notes::list_notes() {
-        if note.path == target_path {
+    for path in candidate_paths {
+        if path == target_path {
             continue;
         }
-        let content = match std::fs::read_to_string(&note.path) {
+        let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(_) => continue,
         };
@@ -155,10 +168,15 @@ pub fn find(target_path: &str) -> Vec<UnlinkedMention> {
         if offsets.is_empty() {
             continue;
         }
+        let display_title = std::path::Path::new(path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(path)
+            .to_string();
         let snippet = snippet_around(body, offsets[0], title_len);
         out.push(UnlinkedMention {
-            path: note.path,
-            title: note.title,
+            path: path.clone(),
+            title: display_title,
             snippet,
             count: offsets.len(),
         });

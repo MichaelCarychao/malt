@@ -209,9 +209,23 @@ fn find_backlinks(
 }
 
 /// Notes that mention this note's title in prose without a [[wikilink]].
+/// Index-backed + off-thread so it stays snappy on large vaults: the
+/// tantivy index narrows the corpus to candidate notes containing the
+/// title, and the precise word-boundary scan runs on a blocking worker
+/// so the UI thread never stalls.
 #[tauri::command]
-fn find_unlinked_mentions(path: String) -> Vec<mentions::UnlinkedMention> {
-    mentions::find(&path)
+async fn find_unlinked_mentions(
+    path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<mentions::UnlinkedMention>, String> {
+    let Some(title) = mentions::title_for(&path) else {
+        return Ok(Vec::new());
+    };
+    let candidates = state.index.notes_containing(&title).unwrap_or_default();
+    let result = tauri::async_runtime::spawn_blocking(move || mentions::find(&path, &title, &candidates))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(result)
 }
 
 /// Turn the first unlinked mention of `target_title` inside

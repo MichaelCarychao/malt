@@ -3,7 +3,10 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tantivy::{
     collector::TopDocs,
-    query::{AllQuery, BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, Query, RangeQuery, TermQuery},
+    query::{
+        AllQuery, BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, Query, QueryParser, RangeQuery,
+        TermQuery,
+    },
     schema::{Field, IndexRecordOption, Schema, Value, FAST, INDEXED, STORED, STRING, TEXT},
     Index, IndexReader, ReloadPolicy, TantivyDocument, Term,
 };
@@ -98,6 +101,41 @@ impl NoteIndex {
                 if let Some(s) = v.as_str() {
                     paths.push(s.to_string());
                 }
+            }
+        }
+        Ok(paths)
+    }
+
+    /// Paths of notes whose body contains `phrase` (as a tokenized phrase
+    /// match). Used to scope the unlinked-mention scan: instead of reading
+    /// every note in the vault, we read only the handful the index says
+    /// could possibly contain the title. This is what keeps the feature
+    /// O(matches) rather than O(corpus) on large vaults.
+    ///
+    /// Title-cased / punctuated phrases are handled by the query parser's
+    /// tokenizer (same one the body field is indexed with), so casing and
+    /// surrounding punctuation don't matter.
+    pub fn notes_containing(&self, phrase: &str) -> tantivy::Result<Vec<String>> {
+        let trimmed = phrase.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let searcher = self.reader.searcher();
+        let parser = QueryParser::for_index(&self.index, vec![self.body_field]);
+        // Wrap in quotes for a phrase query; strip any embedded quotes so
+        // the parser can't choke on unbalanced ones.
+        let sanitized = trimmed.replace('"', " ");
+        let query = match parser.parse_query(&format!("\"{sanitized}\"")) {
+            Ok(q) => q,
+            // Parser rejects pure-punctuation / empty-after-tokenize input.
+            Err(_) => return Ok(Vec::new()),
+        };
+        let top = searcher.search(&query, &TopDocs::with_limit(1000))?;
+        let mut paths = Vec::with_capacity(top.len());
+        for (_score, addr) in top {
+            let doc: TantivyDocument = searcher.doc(addr)?;
+            if let Some(s) = doc.get_first(self.path_field).and_then(|v| v.as_str()) {
+                paths.push(s.to_string());
             }
         }
         Ok(paths)
