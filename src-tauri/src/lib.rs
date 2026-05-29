@@ -112,9 +112,9 @@ fn save_note(
 // Encrypted-note IPCs. The frontend keeps a per-path password cache in
 // memory and re-prompts on focus loss when the security toggle is on;
 // the backend is stateless here. Each save round-trips through
-// `save_encrypted_note`, which re-derives a key and writes a fresh
-// envelope. The KDF is intentionally slow (Argon2id default) so each
-// save takes a few hundred ms — acceptable for a manual save flow.
+// `save_encrypted_note`, which reuses the note's existing salt + a
+// process-wide derived-key cache so re-saves are a fast AES-GCM pass,
+// not a fresh (slow) Argon2 derivation.
 
 #[tauri::command]
 fn is_note_encrypted(path: String) -> bool {
@@ -140,7 +140,11 @@ fn save_encrypted_note(
     password: String,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
-    let envelope = encryption::encrypt(&content, &password)?;
+    // Reuse the salt from the note's current on-disk envelope so the
+    // derived-key cache hits — turns each autosave into a cheap AES-GCM
+    // pass instead of a fresh Argon2id run. Fresh nonce every time.
+    let prior = std::fs::read_to_string(&path).unwrap_or_default();
+    let envelope = encryption::encrypt_reusing_salt(&content, &password, &prior)?;
     std::fs::write(&path, envelope).map_err(|e| e.to_string())?;
     // Re-enqueue for embedding so the index drops the prior body
     // representation (embedding worker will see encrypted content + skip
@@ -603,16 +607,6 @@ fn set_security_reprompt_on_blur(enabled: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn complete_text(before: String, after: String) -> Result<String, String> {
-    if before.trim().is_empty() && after.trim().is_empty() {
-        return Ok(String::new());
-    }
-    let key = secrets::get_api_key().map_err(|e| format!("no API key: {e:?}"))?;
-    let model = config::load().completion_model;
-    ai::propose_completion(&key, &model, &before, &after).await
-}
-
-#[tauri::command]
 async fn complete_text_streaming(
     before: String,
     after: String,
@@ -711,13 +705,6 @@ fn set_prompt(key: prompts::PromptKey, content: String) -> Result<(), String> {
 #[tauri::command]
 fn reset_prompt(key: prompts::PromptKey) -> Result<(), String> {
     prompts::reset(key).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn set_completion_model(model: String) -> Result<(), String> {
-    let mut cfg = config::load();
-    cfg.completion_model = model;
-    config::save(&cfg).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1149,7 +1136,6 @@ pub fn run() {
             list_providers,
             get_config,
             set_tagging_enabled,
-            set_completion_model,
             set_notes_dir,
             reveal_notes_dir,
             reveal_note,
@@ -1171,7 +1157,6 @@ pub fn run() {
             get_tag_vocabulary,
             set_tag_vocabulary,
             list_all_tags,
-            complete_text,
             complete_text_streaming,
             rewrite_text_streaming,
             brew_streaming,

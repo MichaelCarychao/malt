@@ -92,6 +92,9 @@ impl Provider {
     }
 
     /// True for providers that go through `openai_compat::stream`.
+    /// Currently informational (callers branch on `== Anthropic`), kept
+    /// as the clearer predicate for future dispatch sites.
+    #[allow(dead_code)]
     pub fn is_openai_compat(self) -> bool {
         self.openai_base_url().is_some()
     }

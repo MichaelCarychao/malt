@@ -299,27 +299,6 @@ where
     Ok(())
 }
 
-pub async fn propose_completion(
-    api_key: &str,
-    model: &str,
-    before: &str,
-    after: &str,
-) -> Result<String, String> {
-    let user_msg = format!("{before}{{INSERT HERE}}{after}");
-    let system_prompt = prompts::get(PromptKey::Completion);
-    let req = MessagesRequest {
-        model,
-        max_tokens: 400,
-        system: Some(&system_prompt),
-        stream: None,
-        messages: vec![Message {
-            role: "user",
-            content: &user_msg,
-        }],
-    };
-    send(req, api_key).await
-}
-
 pub async fn propose_entities(api_key: &str, body: &str) -> Result<Vec<String>, String> {
     let system_prompt = prompts::get(PromptKey::Entities);
     let req = MessagesRequest {

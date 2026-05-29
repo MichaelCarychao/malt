@@ -1948,6 +1948,11 @@
       secondaryHistory = { stack: [], idx: -1 };
       rawResults = [];
       allNotes = [];
+      // Drop every cached encrypted-note password — they belong to the
+      // vault we're leaving. (Paths are unique so this isn't strictly a
+      // correctness bug, but holding another vault's note passwords in
+      // memory after switching away is poor hygiene.)
+      unlockedPasswords = new Map();
       vaultsState = await invoke<VaultsState>("switch_vault", { index });
       // Pull the new vault's listing now so the auto-select effect
       // has something to pick on the next reactive cycle.
@@ -2044,6 +2049,7 @@
       secondaryHistory = { stack: [], idx: -1 };
       rawResults = [];
       allNotes = [];
+      unlockedPasswords = new Map();
       vaultsState = await invoke<VaultsState>("remove_vault", { index });
       await Promise.all([refreshAllNotes(), performSearch(query)]);
     } catch (e) {
