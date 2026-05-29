@@ -4,6 +4,29 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.3.3 — 2026-05-28
+
+Review/hardening pass on the v0.3.x feature surface.
+
+- **Related Notes no longer leak across vaults.** The embedding store
+  is a single shared SQLite file keyed by absolute path, and nothing
+  purged it on vault switch — so `find_related` could surface another
+  vault's note titles/snippets, breaking the siloing promise. Fixed
+  by over-fetching KNN candidates and filtering to the active vault's
+  path prefix in `find_related`. (A per-vault DB file is the
+  fully-correct long-term fix; this kills the user-visible leak with
+  no migration.)
+- **OpenAI-compat streaming is more robust.** The SSE parser split
+  only on `\n\n`; a gateway framing events with `\r\n\r\n` would have
+  buffered forever and emitted nothing. Now normalizes CRLF→LF and
+  accepts both `data: ` and `data:` (no-space) prefixes — covers
+  proxies in front of OpenAI/DeepSeek/Grok/Gemini.
+- **Type checker is finally clean (0 errors).** Resolved the
+  long-standing `@replit/codemirror-vim` `handleKey` type mismatch
+  with a documented cast — the CM6 build accepts the `EditorView` at
+  runtime, the bundled types just describe the legacy adapter. Also
+  removed a dead `.tip-close` CSS selector.
+
 ## 0.3.2 — 2026-05-28
 
 - **Multi-provider AI.** New `openai_compat.rs` shared client covers

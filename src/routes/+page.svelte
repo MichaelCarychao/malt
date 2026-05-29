@@ -3608,22 +3608,6 @@
   .tip-skip-label input {
     margin: 0;
   }
-  .tip-close {
-    background: transparent;
-    border: 1px solid #333;
-    color: #aaa;
-    font: inherit;
-    font-size: 11px;
-    padding: 4px 14px;
-    margin-top: 14px;
-    cursor: pointer;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-  .tip-close:hover {
-    color: #e0e0e0;
-    border-color: #555;
-  }
   @keyframes boot-fade {
     from { opacity: 1; }
     to { opacity: 0; visibility: hidden; }

@@ -179,13 +179,23 @@ where
         .await
         .map_err(|e| format!("chunk error: {e}"))?
     {
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        // Normalize CRLF → LF up front. Some gateways (and certain
+        // proxies in front of these APIs) frame SSE events with
+        // `\r\n\r\n`, which `find("\n\n")` would never match — the
+        // buffer would grow forever and emit nothing. SSE is line-
+        // oriented so dropping the carriage returns is safe.
+        buffer.push_str(&String::from_utf8_lossy(&chunk).replace("\r\n", "\n"));
         // SSE events separated by blank lines.
         while let Some(end) = buffer.find("\n\n") {
             let event = buffer[..end].to_string();
             buffer.drain(..end + 2);
             for line in event.lines() {
-                let Some(data) = line.strip_prefix("data: ") else {
+                // Accept both "data: {...}" (OpenAI) and "data:{...}"
+                // (some compat forks omit the space).
+                let Some(data) = line
+                    .strip_prefix("data: ")
+                    .or_else(|| line.strip_prefix("data:"))
+                else {
                     continue;
                 };
                 if data.trim() == "[DONE]" {

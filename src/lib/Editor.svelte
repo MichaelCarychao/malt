@@ -1570,7 +1570,11 @@
     }
 
     if (getVimEnabled() && body.length === 0) {
-      Vim.handleKey(view, "i", "macro");
+      // @replit/codemirror-vim types handleKey's first arg as its legacy
+      // `CodeMirror` adapter, but the CM6 build accepts the EditorView at
+      // runtime (that's the documented CM6 entry point). Cast through
+      // unknown to satisfy the checker without a behavior change.
+      Vim.handleKey(view as unknown as Parameters<typeof Vim.handleKey>[0], "i", "macro");
     }
 
     onReady?.(view);

@@ -141,8 +141,19 @@ impl EmbedIndex {
             Err(_) => return Vec::new(),
         };
 
-        // KNN: ask for k + 1 so we can drop the self-match cleanly.
-        let k = limit + 1;
+        // The vec_notes table is a single shared store that accumulates
+        // embeddings from every vault the user has opened (embed_meta is
+        // keyed by absolute path and we never purge on vault switch). To
+        // honor the "vaults are fully siloed" promise — and to avoid
+        // leaking other vaults' titles/snippets into Related Notes — we
+        // restrict results to the active vault. KNN's `k` constraint is
+        // applied by the vec0 virtual table BEFORE the join, so a SQL
+        // `WHERE m.path LIKE …` can't be pushed down reliably; instead we
+        // over-fetch a generous candidate set and filter by vault prefix
+        // in Rust. (A per-vault DB file is the fully-correct long-term
+        // fix; this removes the user-visible leak with zero migration.)
+        let vault_prefix = crate::notes::notes_dir().to_string_lossy().to_string();
+        let k = ((limit + 1) * 10).clamp(16, 200);
         let mut stmt = match conn.prepare(
             "SELECT m.path, v.distance
              FROM vec_notes v
@@ -164,7 +175,8 @@ impl EmbedIndex {
 
         // sqlite-vec returns cosine *distance* (0 = identical, 2 = opposite).
         // similarity = 1 - distance/2  ∈ [0, 1].
-        hits.retain(|(p, _)| p != path);
+        // Drop the self-match AND anything outside the active vault.
+        hits.retain(|(p, _)| p != path && p.starts_with(&vault_prefix));
         let mut out: Vec<RelatedNote> = Vec::new();
         for (p, dist) in hits.into_iter().take(limit) {
             let sim = 1.0 - (dist / 2.0);
