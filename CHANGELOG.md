@@ -4,6 +4,32 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.4 — 2026-05-29
+
+"Plays nice with other tools" batch — making malt safe as the editor over
+a Markdown folder another system writes to, without either side stepping
+on the other.
+
+- **Conflict-safe external reload.** If a file changes on disk while the
+  editor buffer has unsaved edits, malt no longer silently overwrites
+  your work. A small bar appears — *keep mine* / *use theirs* — and
+  autosave pauses until you choose. A clean buffer still fast-forwards to
+  the new on-disk version live, as before. No cooperation required from
+  the other writer.
+- **External-rename cascade.** Rename a note *outside* malt (a script, a
+  file manager, a sync tool) and malt now detects it and rewrites every
+  `[[wikilink]]` pointing at the old name across the vault — the same
+  atomic fix-up the in-app rename does. Detection is by content
+  fingerprint, so it survives the delete+create event soup sync tools
+  produce. (Limitation: if the rename coincides with a content edit in
+  the same instant, the fingerprint won't match and links aren't
+  rewritten.)
+- **Coalesced reindexing.** The file watcher now collapses a burst of
+  writes into a single reindex (quiet-period debounce, capped so a
+  continuous stream still flushes a few times a minute). A tool
+  batch-writing hundreds of files no longer triggers hundreds of
+  rebuilds — important for a folder under heavy programmatic write load.
+
 ## 0.4.3 — 2026-05-29
 
 Tag flair + a frontmatter-safety fix that makes malt a trustworthy editor

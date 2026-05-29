@@ -1,5 +1,6 @@
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::RwLock;
 
 #[derive(Serialize, Clone, Debug)]
@@ -204,6 +205,54 @@ pub fn rewrite_wikilinks_in_body(body: &str, old_title: &str, new_title: &str) -
         }
     }
     (out, count)
+}
+
+/// Rewrite every `[[old_title]]` → `[[new_title]]` across all `.md` files
+/// in `dir`, skipping `skip_path` (the renamed file itself) and encrypted
+/// notes (ciphertext has no parseable wikilinks). Returns the number of
+/// files changed. Shared by the in-app rename and the external-rename
+/// cascade so both keep links intact by exactly the same rules.
+pub fn cascade_wikilink_rename(
+    dir: &Path,
+    old_title: &str,
+    new_title: &str,
+    skip_path: &Path,
+) -> usize {
+    let mut changed = 0usize;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_file() || p == skip_path {
+            continue;
+        }
+        let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.to_lowercase().ends_with(".md")
+            || name.starts_with(".~lock")
+            || name.starts_with("~$")
+        {
+            continue;
+        }
+        let content = match std::fs::read_to_string(&p) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if crate::encryption::is_encrypted(&content) {
+            continue;
+        }
+        let (fm, body) = crate::frontmatter::split(&content);
+        let (new_body, count) = rewrite_wikilinks_in_body(body, old_title, new_title);
+        if count > 0 {
+            let full = crate::frontmatter::merge(&fm, &new_body);
+            if std::fs::write(&p, full).is_ok() {
+                changed += 1;
+            }
+        }
+    }
+    changed
 }
 
 fn slugify(s: &str) -> String {

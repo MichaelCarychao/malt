@@ -1,9 +1,10 @@
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use tauri::{AppHandle, Emitter};
 
 use crate::backlinks::BacklinkIndex;
@@ -390,6 +391,127 @@ pub fn repoint_watcher(handle: &WatcherHandle, old: &PathBuf, new: &PathBuf) {
     }
 }
 
+/// Collect the `.md` paths from a watcher event into `into`, ignoring
+/// lock/temp/non-markdown files.
+fn collect_relevant(event: &Event, into: &mut HashSet<PathBuf>) {
+    for p in &event.paths {
+        if p.file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| !should_ignore(n))
+            .unwrap_or(false)
+        {
+            into.insert(p.clone());
+        }
+    }
+}
+
+/// Content fingerprint for rename detection. Hash the whole file so a
+/// pure rename (identical bytes at a new path) is recognizable even
+/// across a sync tool's delete+create event soup.
+fn content_hash(content: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    content.hash(&mut h);
+    h.finish()
+}
+
+/// path → content-hash for every `.md` file in `dir` with non-empty
+/// content. Empty files are excluded: too many would share a hash to
+/// match unambiguously.
+fn snapshot_hashes(dir: &Path) -> HashMap<PathBuf, u64> {
+    let mut out = HashMap::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if should_ignore(name) || !p.is_file() {
+                continue;
+            }
+            if let Ok(content) = std::fs::read_to_string(&p) {
+                if !content.trim().is_empty() {
+                    out.insert(p, content_hash(&content));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Like `snapshot_hashes` but reuses `prev` hashes for files NOT in the
+/// `changed` set, re-reading only changed/new files. Keeps per-batch cost
+/// proportional to what changed rather than the whole vault.
+fn snapshot_hashes_reusing(
+    dir: &Path,
+    prev: &HashMap<PathBuf, u64>,
+    changed: &HashSet<PathBuf>,
+) -> HashMap<PathBuf, u64> {
+    let mut out = HashMap::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if should_ignore(name) || !p.is_file() {
+                continue;
+            }
+            if !changed.contains(&p) {
+                if let Some(h) = prev.get(&p) {
+                    out.insert(p, *h);
+                    continue;
+                }
+            }
+            if let Ok(content) = std::fs::read_to_string(&p) {
+                if !content.trim().is_empty() {
+                    out.insert(p, content_hash(&content));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Infer external renames from two directory snapshots: a path that
+/// disappeared whose content fingerprint reappeared at exactly one new
+/// path is treated as a rename. Ambiguous matches (same content at
+/// multiple paths) are skipped — we never guess.
+fn detect_renames(
+    prev: &HashMap<PathBuf, u64>,
+    curr: &HashMap<PathBuf, u64>,
+) -> Vec<(PathBuf, PathBuf)> {
+    let mut removed_by_hash: HashMap<u64, Vec<&PathBuf>> = HashMap::new();
+    for (p, h) in prev {
+        if !curr.contains_key(p) {
+            removed_by_hash.entry(*h).or_default().push(p);
+        }
+    }
+    let mut added_by_hash: HashMap<u64, Vec<&PathBuf>> = HashMap::new();
+    for (p, h) in curr {
+        if !prev.contains_key(p) {
+            added_by_hash.entry(*h).or_default().push(p);
+        }
+    }
+    let mut out = Vec::new();
+    for (h, removed) in &removed_by_hash {
+        if removed.len() != 1 {
+            continue;
+        }
+        if let Some(added) = added_by_hash.get(h) {
+            if added.len() == 1 {
+                out.push((removed[0].clone(), added[0].clone()));
+            }
+        }
+    }
+    out
+}
+
+fn title_of(path: &Path) -> Option<String> {
+    path.file_stem().and_then(|s| s.to_str()).map(String::from)
+}
+
 pub fn start_watcher(
     app_handle: AppHandle,
     index: Arc<NoteIndex>,
@@ -418,49 +540,85 @@ pub fn start_watcher(
     std::thread::spawn(move || {
         // No longer need to keep `watcher` alive here — the AppState
         // holds the Arc.
-        let debounce = Duration::from_millis(250);
+        //
+        // Coalescing debounce: after the first event we keep draining until
+        // the folder is quiet for QUIET, capped at MAX_WAIT. A burst of
+        // writes (e.g. an external tool batch-writing hundreds of files)
+        // collapses into ONE reindex instead of one per debounce tick;
+        // MAX_WAIT guarantees a continuous stream still flushes a few times
+        // a minute so the UI never goes stale.
+        const QUIET: Duration = Duration::from_millis(300);
+        const MAX_WAIT: Duration = Duration::from_secs(3);
+
+        // path → content fingerprint, the baseline for external-rename
+        // detection. Initialized from the current vault so even the first
+        // event can detect a rename.
+        let mut snapshot_dir = notes_dir();
+        let mut prev_hashes = snapshot_hashes(&snapshot_dir);
+
         loop {
-            let event = match rx.recv() {
+            // Block for the first event of a batch.
+            let first = match rx.recv() {
                 Ok(e) => e,
                 Err(_) => break,
             };
-            let relevant = event.paths.iter().any(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| !should_ignore(n))
-                    .unwrap_or(false)
-            });
-            if !relevant {
+            let mut changed: HashSet<PathBuf> = HashSet::new();
+            collect_relevant(&first, &mut changed);
+            if changed.is_empty() {
                 continue;
             }
-            std::thread::sleep(debounce);
-            let mut changed: std::collections::HashSet<PathBuf> = event
-                .paths
-                .iter()
-                .filter(|p| {
-                    p.file_name()
-                        .and_then(|n| n.to_str())
-                        .map(|n| !should_ignore(n))
-                        .unwrap_or(false)
-                })
-                .cloned()
-                .collect();
-            while let Ok(e) = rx.try_recv() {
-                for p in e.paths {
-                    if p.file_name()
-                        .and_then(|n| n.to_str())
-                        .map(|n| !should_ignore(n))
-                        .unwrap_or(false)
-                    {
-                        changed.insert(p);
-                    }
+            // Coalesce the burst.
+            let deadline = Instant::now() + MAX_WAIT;
+            loop {
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let wait = QUIET.min(deadline - now);
+                match rx.recv_timeout(wait) {
+                    Ok(e) => collect_relevant(&e, &mut changed),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
                 }
             }
+
+            let dir = notes_dir();
+            if dir != snapshot_dir {
+                // Vault switched out from under us — rebaseline and skip
+                // rename detection this round (cross-vault content
+                // collisions would otherwise masquerade as renames).
+                snapshot_dir = dir.clone();
+                prev_hashes = snapshot_hashes(&dir);
+            } else {
+                // Detect + cascade external renames BEFORE reindexing so the
+                // index reflects the rewritten links. A file that vanished
+                // and reappeared verbatim at a new path is a rename; rewrite
+                // every [[old]] → [[new]] in the other notes and repoint its
+                // embedding.
+                let curr_hashes = snapshot_hashes_reusing(&dir, &prev_hashes, &changed);
+                for (old_path, new_path) in detect_renames(&prev_hashes, &curr_hashes) {
+                    if let (Some(old_title), Some(new_title)) =
+                        (title_of(&old_path), title_of(&new_path))
+                    {
+                        if old_title != new_title {
+                            crate::backlinks::cascade_wikilink_rename(
+                                &dir, &old_title, &new_title, &new_path,
+                            );
+                            embeddings.rename_path(
+                                &old_path.to_string_lossy(),
+                                &new_path.to_string_lossy(),
+                            );
+                        }
+                    }
+                }
+                prev_hashes = curr_hashes;
+            }
+
             let _ = index.rebuild();
             backlinks.rebuild();
             tagger.enqueue_dir();
-            for p in changed {
-                embeddings.enqueue_path(p);
+            for p in &changed {
+                embeddings.enqueue_path(p.clone());
             }
             let _ = app_handle.emit("notes_changed", ());
         }

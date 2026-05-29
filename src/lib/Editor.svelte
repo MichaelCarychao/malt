@@ -145,6 +145,28 @@
   let steerOpen = $state(false);
   let steerText = $state("");
   let steerInputEl: HTMLInputElement | null = $state(null);
+
+  // Set to the on-disk version when the file changes underneath unsaved
+  // edits — a genuine conflict. While non-null we DON'T overwrite the
+  // buffer and we pause autosave (see scheduleSave), so neither side
+  // clobbers the other until the user picks "keep mine" / "use theirs".
+  let externalConflict = $state<string | null>(null);
+  function useMyVersion() {
+    externalConflict = null;
+    // Persist the buffer over the external change ("mine" wins).
+    if (currentPath && view) void flushSave(currentPath, view.state.doc.toString());
+  }
+  function useTheirVersion() {
+    const fresh = externalConflict;
+    externalConflict = null;
+    if (fresh === null || !view) return;
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: fresh },
+      annotations: internalDocRewrite.of(true),
+    });
+    lastSavedContent = fresh;
+  }
+
   function openSteer() {
     steerText = "";
     steerOpen = true;
@@ -1521,6 +1543,12 @@
     const p = currentPath;
     saveTimer = window.setTimeout(() => {
       if (!view) return;
+      // A conflict is pending resolution — don't write either side until
+      // the user chooses, or we'd silently clobber the on-disk version.
+      if (externalConflict !== null) {
+        saveTimer = null;
+        return;
+      }
       // Run the tag relocation transform before saving. If it changes the doc,
       // dispatch a single replace so the user sees their inline hashtags
       // migrate to the canonical bottom line (which is then hidden by the
@@ -1555,6 +1583,8 @@
       view = null;
     }
     currentPath = p;
+    // A pending conflict belongs to the note we're leaving — drop it.
+    externalConflict = null;
     if (!p) return;
 
     let body = "";
@@ -1710,7 +1740,6 @@
 
   async function handleExternalChange() {
     if (!currentPath || !view) return;
-    if (saveTimer !== null) return;
     let fresh = "";
     try {
       if (isEncrypted && password) {
@@ -1727,15 +1756,29 @@
     } catch {
       return;
     }
+    // Disk already matches what we last wrote — nothing external happened
+    // (this is also how our own autosave echoes back via the watcher).
     if (fresh === lastSavedContent) return;
     const current = view.state.doc.toString();
+    // Buffer already equals disk — just resync our marker + clear any
+    // stale conflict.
     if (current === fresh) {
       lastSavedContent = fresh;
+      externalConflict = null;
       return;
     }
+    // The file changed on disk to something we didn't write. If the buffer
+    // also has unsaved edits, both sides diverged from our last save — a
+    // genuine conflict. Don't clobber the user's work: surface a choice and
+    // let scheduleSave pause autosave until they resolve it.
+    if (current !== lastSavedContent) {
+      externalConflict = fresh;
+      return;
+    }
+    // Clean buffer (nothing unsaved) → safe to fast-forward to the new
+    // on-disk version live. Bypass the tag-line protect filter.
     view.dispatch({
       changes: { from: 0, to: view.state.doc.length, insert: fresh },
-      // Whole-doc reload from disk — bypass the tag-line protect filter.
       annotations: internalDocRewrite.of(true),
     });
     lastSavedContent = fresh;
@@ -1828,6 +1871,23 @@
         >×</button>
       </span>
     {/each}
+  </div>
+{/if}
+{#if externalConflict !== null}
+  <div class="conflict-bar" role="alert">
+    <span class="conflict-msg">⚠ changed on disk while you had unsaved edits</span>
+    <button
+      class="conflict-btn"
+      onclick={useMyVersion}
+      title="Keep what's in the editor and overwrite the file on disk"
+      tabindex="-1"
+    >keep mine</button>
+    <button
+      class="conflict-btn theirs"
+      onclick={useTheirVersion}
+      title="Discard your unsaved edits and load the version from disk"
+      tabindex="-1"
+    >use theirs</button>
   </div>
 {/if}
 <div bind:this={container} class="editor"></div>
@@ -2387,6 +2447,49 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
+  }
+  /* Non-destructive conflict affordance: shown when the file changed on
+     disk while the buffer had unsaved edits. Sits above the editor; the
+     user keeps editing freely and resolves whenever. */
+  .conflict-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 10px;
+    background: #3a2e16;
+    border-bottom: 1px solid #5c4a1f;
+    color: #e6c875;
+    font-size: 11px;
+    flex: 0 0 auto;
+  }
+  .conflict-msg {
+    flex: 1 1 auto;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .conflict-btn {
+    flex: 0 0 auto;
+    background: #2a2a2a;
+    border: 1px solid #5c4a1f;
+    color: #e6c875;
+    font: inherit;
+    font-size: 11px;
+    padding: 2px 8px;
+    cursor: pointer;
+    border-radius: 3px;
+  }
+  .conflict-btn:hover {
+    background: #3a3320;
+    color: #fff;
+  }
+  .conflict-btn.theirs {
+    border-color: #555;
+    color: #bbb;
+  }
+  .conflict-btn.theirs:hover {
+    background: #333;
+    color: #fff;
   }
   :global(.editor .cm-editor) {
     flex: 1 1 auto;

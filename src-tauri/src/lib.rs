@@ -476,37 +476,9 @@ fn rename_note(
     std::fs::rename(&old_path, &new_path).map_err(|e| e.to_string())?;
     let new_path_str = new_path.to_string_lossy().to_string();
 
-    // Rewrite backlinks in every other .md file in the directory.
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if !p.is_file() {
-                continue;
-            }
-            let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            if !name.to_lowercase().ends_with(".md")
-                || name.starts_with(".~lock")
-                || name.starts_with("~$")
-            {
-                continue;
-            }
-            if p == new_path {
-                continue;
-            }
-            let content = match std::fs::read_to_string(&p) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let (fm, body) = frontmatter::split(&content);
-            let (new_body, count) = backlinks::rewrite_wikilinks_in_body(body, &old_title, trimmed);
-            if count > 0 {
-                let full = frontmatter::merge(&fm, &new_body);
-                let _ = std::fs::write(&p, full);
-            }
-        }
-    }
+    // Rewrite backlinks in every other .md file in the directory. Shared
+    // with the external-rename cascade in the watcher.
+    backlinks::cascade_wikilink_rename(&dir, &old_title, trimmed, &new_path);
 
     // Rewire embeddings: same content, different path. Cheap point update.
     state.embeddings.rename_path(&path, &new_path_str);

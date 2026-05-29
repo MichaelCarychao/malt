@@ -346,6 +346,13 @@ export const TIPS: Tip[] = [
     story:
       "Sync conflict files (Dropbox/Syncthing) get a ⚠ badge in the sidebar. Click one and the original opens beside it for side-by-side merge.",
   },
+  {
+    id: "a-plays-nice",
+    category: "about",
+    headline: "Let another tool share my notes folder",
+    story:
+      "malt is safe to run alongside scripts or apps that write the same folder. If a file changes on disk while you have unsaved edits, malt asks instead of clobbering; and an external rename cascades through your [[wikilinks]] automatically.",
+  },
 ];
 
 // ─── OS-aware key rendering ──────────────────────────────────────────
