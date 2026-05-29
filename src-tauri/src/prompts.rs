@@ -53,9 +53,9 @@ impl PromptKey {
     pub fn description(self) -> &'static str {
         match self {
             PromptKey::Tag => "Sent by the background auto-tagger to propose 1–5 inline hashtags for each note. Off by default.",
-            PromptKey::Entities => "Sent when you press Cmd+Shift+L; Claude proposes entity names worth turning into [[wikilinks]].",
-            PromptKey::Completion => "Sent on Cmd+J in the editor. Three modes (continue / begin / bridge) handled in one prompt.",
-            PromptKey::Rewrite => "Sent on Cmd+J with a selection. Rewrites the marked text in voice with the rest of the note as context.",
+            PromptKey::Entities => "Sent when you press Cmd+Shift+L; the model proposes entity names worth turning into [[wikilinks]].",
+            PromptKey::Completion => "Sent on Cmd+; in the editor. Three modes (continue / begin / bridge) handled in one prompt.",
+            PromptKey::Rewrite => "Sent on Cmd+; with a selection. Rewrites the marked text in voice with the rest of the note as context.",
             PromptKey::Brew => "Sent on Cmd+Shift+B. Brainstorms ways to explore, double down on, or follow up on what the note has started.",
         }
     }

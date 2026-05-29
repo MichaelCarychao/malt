@@ -599,19 +599,45 @@
     }
   }
 
+  // Strip wrappers some models add despite the prompt's "no fences / no
+  // quotes" instruction. Runs once at accept-time (not per stream chunk),
+  // so it works regardless of provider. Only unwraps when the ENTIRE
+  // output is enveloped — never touches fences/quotes that are part of
+  // the intended text.
+  function sanitizeCompletion(text: string): string {
+    let t = text;
+    // Whole-output triple-backtick fence: ```[lang]\n … \n```
+    const fence = t.match(/^```[^\n]*\n([\s\S]*?)\n?```$/);
+    if (fence) t = fence[1];
+    // Whole-output matched quotes (straight or curly). Only if both ends
+    // match and there's no same-quote inside (so we don't maul prose).
+    const pairs: [string, string][] = [['"', '"'], ["'", "'"], ["“", "”"]];
+    for (const [open, close] of pairs) {
+      if (t.length >= 2 && t.startsWith(open) && t.endsWith(close)) {
+        const inner = t.slice(1, -1);
+        if (!inner.includes(open) && !inner.includes(close)) {
+          t = inner;
+          break;
+        }
+      }
+    }
+    return t;
+  }
+
   function acceptCompletion(v: EditorView): boolean {
     const ghost = v.state.field(ghostField, false);
     if (!ghost) return false;
+    const clean = sanitizeCompletion(ghost.text);
     if (ghost.mode === "rewrite") {
       v.dispatch({
-        changes: { from: ghost.from, to: ghost.to, insert: ghost.text },
-        selection: { anchor: ghost.from + ghost.text.length },
+        changes: { from: ghost.from, to: ghost.to, insert: clean },
+        selection: { anchor: ghost.from + clean.length },
         effects: setGhost.of(null),
       });
     } else {
       v.dispatch({
-        changes: { from: ghost.pos, to: ghost.pos, insert: ghost.text },
-        selection: { anchor: ghost.pos + ghost.text.length },
+        changes: { from: ghost.pos, to: ghost.pos, insert: clean },
+        selection: { anchor: ghost.pos + clean.length },
         effects: setGhost.of(null),
       });
     }

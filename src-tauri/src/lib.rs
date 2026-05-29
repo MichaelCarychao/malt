@@ -296,6 +296,32 @@ fn find_related(
     state.embeddings.find_related(&path, 5, 0.55)
 }
 
+/// Semantic search over the active vault — powers the `~concept` search
+/// mode. Embeds the query and returns the nearest notes as NoteSummary
+/// (so the sidebar renders them like any other result set). Falls back
+/// to an empty list (handled as "no matches") on any error so a missing
+/// API/model never breaks the search bar.
+#[tauri::command]
+fn semantic_search(
+    query: String,
+    state: tauri::State<AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<Vec<notes::NoteSummary>, String> {
+    let hits = state
+        .embeddings
+        .search_text(&query, 50, &app_handle)?;
+    let by_path: HashMap<String, notes::NoteSummary> = notes::list_notes()
+        .into_iter()
+        .map(|n| (n.path.clone(), n))
+        .collect();
+    // Preserve KNN rank order; drop hits whose file vanished since
+    // indexing (handles a just-deleted note still lingering in the DB).
+    Ok(hits
+        .into_iter()
+        .filter_map(|h| by_path.get(&h.path).cloned())
+        .collect())
+}
+
 #[tauri::command]
 fn delete_note(path: String, state: tauri::State<AppState>) -> Result<(), String> {
     let dir = notes::notes_dir();
@@ -1132,6 +1158,7 @@ pub fn run() {
             delete_note,
             find_backlinks,
             find_related,
+            semantic_search,
             suggest_wikilinks,
             suggest_wikilinks_ai,
             export_as_string,

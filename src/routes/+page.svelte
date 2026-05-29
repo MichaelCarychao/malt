@@ -568,8 +568,30 @@
 
   let notes = $derived(applySort(rawResults, sortMode));
 
+  // A leading ~ switches to semantic (embedding) search: "find what I
+  // meant, not the words I used." Everything after the ~ is the concept.
+  let semanticMode = $derived(query.trimStart().startsWith("~"));
+
   async function performSearch(q: string) {
     const myGen = ++queryGen;
+    const trimmed = q.trimStart();
+    if (trimmed.startsWith("~")) {
+      const concept = trimmed.slice(1).trim();
+      if (!concept) {
+        // Bare "~" — show nothing yet; the user is mid-typing a concept.
+        if (myGen === queryGen) rawResults = [];
+        return;
+      }
+      try {
+        const results = await invoke<Note[]>("semantic_search", { query: concept });
+        if (myGen === queryGen) rawResults = results;
+      } catch (e) {
+        // Model/endpoint unavailable → empty rather than a broken bar.
+        console.error("semantic_search failed", e);
+        if (myGen === queryGen) rawResults = [];
+      }
+      return;
+    }
     const results = await invoke<Note[]>("search_notes", { query: q });
     if (myGen === queryGen) rawResults = results;
   }
@@ -1085,6 +1107,13 @@
     const trimmed = query.trim();
     // Empty query: jump into the editor on whatever's selected, if anything.
     if (!trimmed) {
+      if (selectedPath) focusEditor();
+      return;
+    }
+    // Semantic mode (~concept): Enter never *creates* a note named "~…".
+    // It opens the top-ranked / selected result, or no-ops if there are
+    // none. Creating happens only in lexical mode.
+    if (semanticMode) {
       if (selectedPath) focusEditor();
       return;
     }
@@ -2225,7 +2254,11 @@
         tabindex="-1"
       >{activeVaultName}</button>
       <span class="sep">·</span>
-      {#if query}
+      {#if semanticMode}
+        <span class="semantic-badge" title="Semantic search — ranked by meaning, not keywords">~ semantic</span>
+        <span class="sep">·</span>
+        {notes.length} near
+      {:else if query}
         {notes.length} match{notes.length === 1 ? "" : "es"}
       {:else}
         {notes.length} note{notes.length === 1 ? "" : "s"}
@@ -2316,7 +2349,9 @@
           <span class="modified">{formatModified(note.modified)}</span>
         </li>
       {/each}
-      {#if notes.length === 0 && query}
+      {#if notes.length === 0 && query && semanticMode}
+        <li class="empty">No semantically-similar notes. (Needs the embedding model + at least a couple of indexed notes.)</li>
+      {:else if notes.length === 0 && query}
         <li class="empty">No matches. Press Enter to create "{query}".</li>
       {/if}
       {#if notes.length === 0 && !query}
@@ -3234,6 +3269,16 @@
   }
   .vault-chip:hover {
     text-decoration: underline;
+  }
+  .semantic-badge {
+    color: #97b8d8;
+    background: rgba(108, 182, 255, 0.1);
+    border: 1px solid rgba(108, 182, 255, 0.25);
+    padding: 0 5px;
+    border-radius: 3px;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
   }
   .vault-menu {
     position: fixed;

@@ -150,6 +150,13 @@ export const TIPS: Tip[] = [
       "Right-click any saved-search chip to rename, reorder, or remove from the quick bar (without deleting). Built-ins can be unbound but never deleted.",
   },
   {
+    id: "ss-semantic",
+    category: "searches",
+    headline: "Find what I meant, not what I typed",
+    story:
+      "Start a search with ~ to switch to semantic mode — \"~things that drained me\" ranks notes by meaning, not keywords. Runs on the local embedding model; fully offline, per-vault.",
+  },
+  {
     id: "ss-operators",
     category: "searches",
     headline: "Stack query operators for power filters",

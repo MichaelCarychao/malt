@@ -206,6 +206,71 @@ impl EmbedIndex {
         out
     }
 
+    /// Semantic search: embed an arbitrary query string and return the
+    /// active vault's notes nearest to it. Powers the `~concept` search
+    /// mode. Loads the model on first use (may emit the embedding-status
+    /// "loading" banner). Returns ranked RelatedNote (reusing that shape
+    /// — `similarity` doubles as the relevance score).
+    pub fn search_text(
+        &self,
+        query: &str,
+        limit: usize,
+        app_handle: &AppHandle,
+    ) -> Result<Vec<RelatedNote>, String> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        if !self.load_model(app_handle) {
+            return Err("semantic model unavailable".into());
+        }
+        let embedding: Vec<f32> = {
+            let mut m = self.model.lock().expect("model lock");
+            let model = m.as_mut().ok_or("model gone after load")?;
+            let mut out = model
+                .embed(vec![q.to_string()], None)
+                .map_err(|e| format!("embed failed: {e:?}"))?;
+            out.pop().ok_or("embed returned empty")?
+        };
+        if embedding.len() != EMBED_DIM {
+            return Err("embedding dim mismatch".into());
+        }
+        let query_blob = f32_slice_to_le_bytes(&embedding);
+
+        let conn = self.db.lock().expect("db lock");
+        let mut stmt = conn
+            .prepare(
+                "SELECT m.path, v.distance
+                 FROM vec_notes v
+                 JOIN embed_meta m ON v.rowid = m.vec_rowid
+                 WHERE v.embedding MATCH ?1 AND k = ?2
+                 ORDER BY v.distance",
+            )
+            .map_err(|e| e.to_string())?;
+        let hits: Vec<(String, f32)> = stmt
+            .query_map(params![query_blob, limit as i64], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f32>(1)?))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect();
+
+        Ok(hits
+            .into_iter()
+            .map(|(p, dist)| {
+                let sim = 1.0 - (dist / 2.0);
+                let title = title_for(&p);
+                let snippet = snippet_for(&p);
+                RelatedNote {
+                    path: p,
+                    title,
+                    snippet,
+                    similarity: sim,
+                }
+            })
+            .collect())
+    }
+
     fn load_model(&self, app_handle: &AppHandle) -> bool {
         let mut m = self.model.lock().expect("model lock");
         if m.is_some() {

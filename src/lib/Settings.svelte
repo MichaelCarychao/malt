@@ -89,6 +89,7 @@
     { keys: `tag:foo  -tag:foo`,       action: "Query operator: filter notes by hashtag",       status: "live" },
     { keys: `modified:<7d  <24h  >30d`, action: "Query operator: filter by recency",            status: "live" },
     { keys: `empty:true  empty:false`,  action: "Query operator: find blank notes (or only filled)", status: "live" },
+    { keys: `~concept`,                 action: "Semantic search — rank notes by meaning, not keywords", status: "live" },
     { keys: `Enter (in search)`,       action: "Exact title → open; arrowed → open; else create new note", status: "live" },
     { keys: `Esc`,                     action: "Clear query + focus search (except in editor / modals)", status: "live" },
     { keys: `Tab (in search)`,         action: "Jump to editor",                              status: "live" },
