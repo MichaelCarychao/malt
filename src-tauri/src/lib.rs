@@ -811,11 +811,12 @@ async fn switch_vault(
     let new_dir = notes::notes_dir();
     notes::repoint_watcher(&state.watcher, &old_dir, &new_dir);
     // Reindex everything for the new vault. Backlinks + search index
-    // rebuild are cheap (in-memory); embeddings are queued by the
-    // background worker so the user doesn't block on them. The
-    // notes_changed event triggers a frontend refresh.
+    // rebuild are cheap (in-memory); embeddings repoint to the new
+    // vault's own DB then re-queue. The notes_changed event triggers a
+    // frontend refresh.
     state.index.rebuild().map_err(|e| e.to_string())?;
     state.backlinks.rebuild();
+    let _ = state.embeddings.repoint();
     state.embeddings.enqueue_dir();
     let _ = tauri::Emitter::emit(&app_handle, "notes_changed", ());
     let _ = tauri::Emitter::emit(&app_handle, "vault_changed", &updated);
@@ -833,16 +834,29 @@ fn remove_vault(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<vaults::VaultsState, String> {
+    // Capture the removed vault's path BEFORE removal so we can reclaim
+    // its embedding DB. (Removing only unlinks from malt — the user's
+    // .md files on disk are untouched — but the derived embedding file
+    // is malt's and safe to delete.)
+    let removed_path = vaults::load()
+        .vaults
+        .get(index as usize)
+        .map(|v| v.path.clone());
     let old_dir = notes::notes_dir();
     let updated = vaults::remove(index as usize)?;
     let new_dir = notes::notes_dir();
     if old_dir != new_dir {
         notes::repoint_watcher(&state.watcher, &old_dir, &new_dir);
     }
-    // Removing a vault may have shifted the active one. Reindex to
-    // match whatever the new active vault is.
+    // Reclaim the removed vault's embedding DB file.
+    if let Some(p) = removed_path {
+        embeddings::delete_db_for(&p);
+    }
+    // Removing a vault may have shifted the active one. Reindex + repoint
+    // embeddings to whatever the new active vault is.
     state.index.rebuild().map_err(|e| e.to_string())?;
     state.backlinks.rebuild();
+    let _ = state.embeddings.repoint();
     state.embeddings.enqueue_dir();
     let _ = tauri::Emitter::emit(&app_handle, "notes_changed", ());
     let _ = tauri::Emitter::emit(&app_handle, "vault_changed", &updated);

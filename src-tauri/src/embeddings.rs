@@ -36,38 +36,59 @@ pub struct RelatedNote {
     pub similarity: f32,
 }
 
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS embed_meta (
+        path TEXT PRIMARY KEY,
+        content_hash TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        vec_rowid INTEGER NOT NULL UNIQUE
+    );
+    CREATE VIRTUAL TABLE IF NOT EXISTS vec_notes USING vec0(embedding float[384]);";
+
+/// Open (creating if needed) the embedding DB for the *currently active
+/// vault*. Each vault gets its own file so semantic results are fully
+/// siloed — no cross-vault leakage, and removing a vault can reclaim its
+/// embeddings by deleting one file.
+fn open_active_db() -> Result<Connection, String> {
+    let path = db_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let conn = Connection::open(&path).map_err(|e| e.to_string())?;
+    // WAL + NORMAL synchronous: better write throughput, durability still
+    // fine for derived data we can re-embed at any time.
+    let _ = conn.pragma_update(None, "journal_mode", "WAL");
+    let _ = conn.pragma_update(None, "synchronous", "NORMAL");
+    conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
+    Ok(conn)
+}
+
 impl EmbedIndex {
     pub fn new() -> Result<Arc<Self>, String> {
         // Register sqlite-vec as a SQLite auto-extension. Must happen before
         // any Connection::open call. Done once at process start.
         register_sqlite_vec_extension();
 
-        let db_path = db_path();
-        if let Some(parent) = db_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
-        // WAL + NORMAL synchronous: better write throughput, durability still
-        // fine for derived data we can re-embed at any time.
-        let _ = conn.pragma_update(None, "journal_mode", "WAL");
-        let _ = conn.pragma_update(None, "synchronous", "NORMAL");
-
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS embed_meta (
-                path TEXT PRIMARY KEY,
-                content_hash TEXT NOT NULL,
-                updated_at INTEGER NOT NULL,
-                vec_rowid INTEGER NOT NULL UNIQUE
-            );
-            CREATE VIRTUAL TABLE IF NOT EXISTS vec_notes USING vec0(embedding float[384]);",
-        )
-        .map_err(|e| e.to_string())?;
-
+        let conn = open_active_db()?;
         Ok(Arc::new(Self {
             queue: Mutex::new(HashSet::new()),
             db: Mutex::new(conn),
             model: Mutex::new(None),
         }))
+    }
+
+    /// Repoint the connection at the active vault's DB. Called on vault
+    /// switch / removal (right before enqueue_dir re-embeds the new
+    /// vault). Also clears the in-flight queue so we don't process paths
+    /// from the vault we just left.
+    pub fn repoint(&self) -> Result<(), String> {
+        let conn = open_active_db()?;
+        {
+            let mut q = self.queue.lock().expect("queue lock");
+            q.clear();
+        }
+        let mut guard = self.db.lock().expect("db lock");
+        *guard = conn;
+        Ok(())
     }
 
     pub fn enqueue_path(&self, path: PathBuf) {
@@ -141,19 +162,10 @@ impl EmbedIndex {
             Err(_) => return Vec::new(),
         };
 
-        // The vec_notes table is a single shared store that accumulates
-        // embeddings from every vault the user has opened (embed_meta is
-        // keyed by absolute path and we never purge on vault switch). To
-        // honor the "vaults are fully siloed" promise — and to avoid
-        // leaking other vaults' titles/snippets into Related Notes — we
-        // restrict results to the active vault. KNN's `k` constraint is
-        // applied by the vec0 virtual table BEFORE the join, so a SQL
-        // `WHERE m.path LIKE …` can't be pushed down reliably; instead we
-        // over-fetch a generous candidate set and filter by vault prefix
-        // in Rust. (A per-vault DB file is the fully-correct long-term
-        // fix; this removes the user-visible leak with zero migration.)
-        let vault_prefix = crate::notes::notes_dir().to_string_lossy().to_string();
-        let k = ((limit + 1) * 10).clamp(16, 200);
+        // The DB is now per-vault (see open_active_db / repoint), so every
+        // row already belongs to the active vault — no cross-vault filter
+        // needed. Ask for k+1 to absorb the self-match.
+        let k = limit + 1;
         let mut stmt = match conn.prepare(
             "SELECT m.path, v.distance
              FROM vec_notes v
@@ -175,8 +187,7 @@ impl EmbedIndex {
 
         // sqlite-vec returns cosine *distance* (0 = identical, 2 = opposite).
         // similarity = 1 - distance/2  ∈ [0, 1].
-        // Drop the self-match AND anything outside the active vault.
-        hits.retain(|(p, _)| p != path && p.starts_with(&vault_prefix));
+        hits.retain(|(p, _)| p != path);
         let mut out: Vec<RelatedNote> = Vec::new();
         for (p, dist) in hits.into_iter().take(limit) {
             let sim = 1.0 - (dist / 2.0);
@@ -360,11 +371,38 @@ pub fn start(index: Arc<EmbedIndex>, app_handle: AppHandle) {
     });
 }
 
+/// Per-vault embedding DB path: `…/malt/embeddings/vault-<hash>.db`,
+/// where <hash> is a stable hash of the active vault's absolute path.
+/// `db_file_for(path)` is the same computation for an arbitrary vault
+/// (used to delete a removed vault's DB).
 fn db_path() -> PathBuf {
+    db_file_for(&crate::vaults::active_path().to_string_lossy())
+}
+
+pub fn db_file_for(vault_path: &str) -> PathBuf {
+    use std::hash::{Hash, Hasher};
     let mut p = dirs::config_dir().unwrap_or_else(std::env::temp_dir);
     p.push("malt");
-    p.push("embeddings.db");
+    p.push("embeddings");
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    vault_path.hash(&mut h);
+    p.push(format!("vault-{:016x}.db", h.finish()));
     p
+}
+
+/// Delete a vault's embedding DB (and its WAL/SHM sidecars). Best-effort
+/// — used when a vault is removed from the registry so we don't leave
+/// orphaned embedding files behind. Errors are ignored.
+pub fn delete_db_for(vault_path: &str) {
+    let base = db_file_for(vault_path);
+    for suffix in ["", "-wal", "-shm"] {
+        let p = if suffix.is_empty() {
+            base.clone()
+        } else {
+            PathBuf::from(format!("{}{}", base.to_string_lossy(), suffix))
+        };
+        let _ = std::fs::remove_file(p);
+    }
 }
 
 fn is_md_file(path: &Path) -> bool {
