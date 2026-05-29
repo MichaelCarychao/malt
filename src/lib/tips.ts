@@ -194,6 +194,13 @@ export const TIPS: Tip[] = [
       "Settings → Tags & queries lets you seed a starter vocabulary. Those tags rank first in #-autocomplete — so #draft is one keypress, not three.",
   },
   {
+    id: "t-cooccurrence",
+    category: "tags",
+    headline: "See which tags travel together",
+    story:
+      "Filter by a single tag (e.g. tag:meeting) and an \"often with\" row appears — the tags that most share notes with it. Click one to narrow to both. A map of your own structure.",
+  },
+  {
     id: "t-click-pill",
     category: "tags",
     headline: "Filter the sidebar by clicking a tag",

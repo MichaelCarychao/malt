@@ -4,6 +4,46 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.0 — 2026-05-28
+
+Discovery + journaling batch (built overnight on the v0.3.3 review).
+
+- **Semantic search (`~concept`).** A leading `~` switches the search
+  bar to embedding-similarity ranking — "find what I meant, not the
+  words I typed." Local model, per-vault, fully offline. Status line
+  shows a "~ semantic · N near" badge; Enter opens the top result
+  (never creates a `~…`-named note).
+- **Unlinked mentions.** The linkbacks panel now surfaces notes that
+  name the current note in plain prose without a `[[link]]` — ranked
+  by mention count, with a one-click "link" that wraps the first
+  occurrence in a wikilink (casing preserved, verify-before-mutate so
+  it can't corrupt a file). Latent structure, surfaced.
+- **Daily note (Cmd/Ctrl+D).** Opens (or creates) today's dated note
+  (YYYY-MM-DD), seeded with `#journal` so days accumulate into a
+  searchable journal. Toggle the tag in Settings → General.
+- **Tag co-occurrence.** Filter by a single `tag:foo` and an "often
+  with" row appears — the tags that most share notes with it, each a
+  click away from narrowing to both. A map of your own structure.
+- **Per-vault embedding DBs.** Each vault now has its own embedding
+  store (`embeddings/vault-<hash>.db`), so Related Notes and semantic
+  search are fully siloed by construction — no cross-vault leakage.
+  Removing a vault reclaims its embedding file; switching repoints the
+  connection live.
+- **Encryption: cached key + salt reuse.** Re-saving an encrypted note
+  reuses its salt and a process-wide derived-key cache, so autosave is
+  a fast AES-GCM pass instead of a fresh (slow) Argon2 run. Password
+  cache clears on vault switch.
+- **Streaming no longer truncates.** Removed the 30 s total-request
+  timeout from both AI clients' streaming paths (it was killing long
+  brews mid-sentence); connect-timeout only now.
+- **Provider-agnostic prompts + output sanitizer.** Prompt
+  descriptions de-Claude'd and updated for the Cmd+; binding; ghost
+  completions strip stray code-fences / wrapping quotes at accept-time
+  so non-Anthropic models stay clean.
+- **Housekeeping.** Removed orphaned `complete_text` /
+  `set_completion_model` IPCs; type-check + cargo build are
+  warning-free.
+
 ## 0.3.3 — 2026-05-28
 
 Review/hardening pass on the v0.3.x feature surface.

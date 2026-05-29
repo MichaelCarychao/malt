@@ -572,6 +572,39 @@
   // meant, not the words I used." Everything after the ~ is the concept.
   let semanticMode = $derived(query.trimStart().startsWith("~"));
 
+  // When the query is exactly one `tag:foo` filter (no other terms), we
+  // surface co-occurring tags as "often with" chips. This regex pulls
+  // the bare tag out of that single-filter case; anything more complex
+  // (extra words, a second operator) yields null and hides the chips.
+  let singleTagFilter = $derived.by(() => {
+    const m = query.trim().match(/^tag:#?([A-Za-z0-9_\/-]+)$/i);
+    return m ? m[1].toLowerCase() : null;
+  });
+  let coTags = $state<TagCount[]>([]);
+  $effect(() => {
+    const tag = singleTagFilter;
+    if (!tag) {
+      coTags = [];
+      return;
+    }
+    let cancelled = false;
+    void invoke<TagCount[]>("tag_cooccurrence", { tag })
+      .then((r) => {
+        if (!cancelled) coTags = r;
+      })
+      .catch(() => {
+        if (!cancelled) coTags = [];
+      });
+    return () => {
+      cancelled = true;
+    };
+  });
+  function addCoTag(name: string) {
+    // Compose: append the co-tag as a second tag: filter (AND).
+    query = `tag:${singleTagFilter} tag:${name}`;
+    void tick().then(() => searchInput?.focus());
+  }
+
   async function performSearch(q: string) {
     const myGen = ++queryGen;
     const trimmed = q.trimStart();
@@ -2307,6 +2340,19 @@
       {/each}
     </div>
   {/if}
+  {#if singleTagFilter && coTags.length > 0}
+    <div class="cotag-row">
+      <span class="cotag-label">often with</span>
+      {#each coTags as ct (ct.name)}
+        <button
+          class="cotag-chip"
+          onclick={() => addCoTag(ct.name)}
+          title={`Also require #${ct.name} (${ct.count} note${ct.count === 1 ? "" : "s"} share both)`}
+          tabindex="-1"
+        >#{ct.name}<span class="cotag-count">{ct.count}</span></button>
+      {/each}
+    </div>
+  {/if}
   <div class="status">
     <span class="count">
       <button
@@ -3341,6 +3387,42 @@
     font-size: 9px;
     text-transform: uppercase;
     letter-spacing: 0.05em;
+  }
+  .cotag-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 4px 10px 6px;
+    border-bottom: 1px solid #1c1c1c;
+  }
+  .cotag-label {
+    color: #555;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .cotag-chip {
+    background: transparent;
+    border: 1px solid #2e2e2e;
+    color: #b59b6b;
+    font: inherit;
+    font-size: 10px;
+    padding: 1px 7px;
+    border-radius: 10px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .cotag-chip:hover {
+    border-color: #d6b06a;
+    color: #d6b06a;
+  }
+  .cotag-count {
+    color: #555;
+    font-size: 9px;
+    font-variant-numeric: tabular-nums;
   }
   .vault-menu {
     position: fixed;

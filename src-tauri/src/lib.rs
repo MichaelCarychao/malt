@@ -1126,6 +1126,36 @@ struct TagCount {
     count: u32,
 }
 
+/// Tags that co-occur with `tag` across the corpus, ranked by how often
+/// they share a note with it. Powers the "often with" chips shown when
+/// filtering by a single tag. `tag` is canonicalized first so "Draft",
+/// "#draft", and "draft" all resolve the same.
+#[tauri::command]
+fn tag_cooccurrence(tag: String) -> Vec<TagCount> {
+    let target = tags::canonicalize(&tag);
+    if target.is_empty() {
+        return Vec::new();
+    }
+    let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    for note in notes::list_notes() {
+        if !note.tags.iter().any(|t| t == &target) {
+            continue;
+        }
+        for t in &note.tags {
+            if t != &target {
+                *counts.entry(t.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut out: Vec<TagCount> = counts
+        .into_iter()
+        .map(|(name, count)| TagCount { name, count })
+        .collect();
+    out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
+    out.truncate(8);
+    out
+}
+
 fn open_path_in_explorer(path: &std::path::Path) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
@@ -1231,6 +1261,7 @@ pub fn run() {
             get_tag_vocabulary,
             set_tag_vocabulary,
             list_all_tags,
+            tag_cooccurrence,
             complete_text_streaming,
             rewrite_text_streaming,
             brew_streaming,
