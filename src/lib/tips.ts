@@ -122,9 +122,16 @@ export const TIPS: Tip[] = [
   {
     id: "s-cmd-i-everywhere",
     category: "shortcuts",
-    headline: "Have Claude finish my thought",
+    headline: "Have the AI finish my thought",
     story:
-      "⌘; in the editor asks Claude to continue from your cursor. Select text first and ⌘; rewrites that selection. Re-press to re-roll.",
+      "⌘; in the editor continues from your cursor. Select text first and ⌘; rewrites that selection. Re-press to re-roll.",
+  },
+  {
+    id: "ai-steer",
+    category: "ai",
+    headline: "Aim the AI before it writes",
+    story:
+      "⌘⇧; opens a one-line steer box — \"make it darker\", \"pivot to the counterargument\", \"shorter\" — then generates with that nudge. Works for both continue and rewrite.",
   },
   {
     id: "s-esc-clear",

@@ -666,6 +666,7 @@ fn set_daily_note_tag(enabled: bool) -> Result<(), String> {
 async fn complete_text_streaming(
     before: String,
     after: String,
+    direction: Option<String>,
     on_chunk: tauri::ipc::Channel<String>,
 ) -> Result<(), String> {
     if before.trim().is_empty() && after.trim().is_empty() {
@@ -676,7 +677,8 @@ async fn complete_text_streaming(
     let key = secrets::get_api_key_for(provider.id())
         .map_err(|e| format!("no API key for {}: {e:?}", provider.label()))?;
     let model = cfg.model_for(provider);
-    ai::dispatch_stream_completion(provider, &key, &model, &before, &after, |text| {
+    let dir = direction.unwrap_or_default();
+    ai::dispatch_stream_completion(provider, &key, &model, &before, &after, &dir, |text| {
         let _ = on_chunk.send(text.to_string());
     })
     .await
@@ -687,6 +689,7 @@ async fn rewrite_text_streaming(
     before: String,
     selected: String,
     after: String,
+    direction: Option<String>,
     on_chunk: tauri::ipc::Channel<String>,
 ) -> Result<(), String> {
     if selected.trim().is_empty() {
@@ -697,7 +700,8 @@ async fn rewrite_text_streaming(
     let key = secrets::get_api_key_for(provider.id())
         .map_err(|e| format!("no API key for {}: {e:?}", provider.label()))?;
     let model = cfg.model_for(provider);
-    ai::dispatch_stream_rewrite(provider, &key, &model, &before, &selected, &after, |text| {
+    let dir = direction.unwrap_or_default();
+    ai::dispatch_stream_rewrite(provider, &key, &model, &before, &selected, &after, &dir, |text| {
         let _ = on_chunk.send(text.to_string());
     })
     .await

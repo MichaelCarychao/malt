@@ -137,14 +137,28 @@ pub async fn test_call(api_key: &str) -> Result<String, String> {
     send(req, api_key).await
 }
 
+/// Append an optional steering note to a user message as a
+/// `<direction>...</direction>` block. No-op when empty. Shared by every
+/// generation path so steering works identically across providers.
+fn with_direction(user_msg: String, direction: &str) -> String {
+    let d = direction.trim();
+    if d.is_empty() {
+        user_msg
+    } else {
+        format!("{user_msg}\n\n<direction>{d}</direction>")
+    }
+}
+
 /// Stream an infill completion from Claude. The model sees the full document
 /// with `{INSERT HERE}` at the cursor position and outputs only the text to
-/// insert. `on_text` is invoked for each delta as it streams in.
+/// insert. `on_text` is invoked for each delta as it streams in. `direction`
+/// is an optional steering note (empty = none).
 pub async fn stream_completion<F>(
     api_key: &str,
     model: &str,
     before: &str,
     after: &str,
+    direction: &str,
     mut on_text: F,
 ) -> Result<(), String>
 where
@@ -160,7 +174,10 @@ where
     } else {
         "bridge"
     };
-    let user_msg = format!("<{mode}>{before}{{INSERT HERE}}{after}</{mode}>");
+    let user_msg = with_direction(
+        format!("<{mode}>{before}{{INSERT HERE}}{after}</{mode}>"),
+        direction,
+    );
     let system_prompt = prompts::get(PromptKey::Completion);
     let req = MessagesRequest {
         model,
@@ -233,12 +250,16 @@ pub async fn stream_rewrite<F>(
     before: &str,
     selected: &str,
     after: &str,
+    direction: &str,
     mut on_text: F,
 ) -> Result<(), String>
 where
     F: FnMut(&str),
 {
-    let user_msg = format!("{before}<rewrite>{selected}</rewrite>{after}");
+    let user_msg = with_direction(
+        format!("{before}<rewrite>{selected}</rewrite>{after}"),
+        direction,
+    );
     let system_prompt = prompts::get(PromptKey::Rewrite);
     let req = MessagesRequest {
         model,
@@ -460,11 +481,15 @@ pub async fn dispatch_stream_completion<F>(
     model: &str,
     before: &str,
     after: &str,
+    direction: &str,
     mut on_text: F,
 ) -> Result<(), String>
 where
     F: FnMut(&str),
 {
+    if provider == Provider::Anthropic {
+        return stream_completion(api_key, model, before, after, direction, on_text).await;
+    }
     let mode = if before.trim().is_empty() && !after.trim().is_empty() {
         "begin"
     } else if !before.trim().is_empty() && after.trim().is_empty() {
@@ -472,11 +497,11 @@ where
     } else {
         "bridge"
     };
-    let user_msg = format!("<{mode}>{before}{{INSERT HERE}}{after}</{mode}>");
+    let user_msg = with_direction(
+        format!("<{mode}>{before}{{INSERT HERE}}{after}</{mode}>"),
+        direction,
+    );
     let system_prompt = prompts::get(PromptKey::Completion);
-    if provider == Provider::Anthropic {
-        return stream_completion(api_key, model, before, after, on_text).await;
-    }
     let base_url = provider.openai_base_url().ok_or("provider lacks base URL")?;
     openai_compat::stream(
         base_url,
@@ -497,15 +522,19 @@ pub async fn dispatch_stream_rewrite<F>(
     before: &str,
     selected: &str,
     after: &str,
+    direction: &str,
     mut on_text: F,
 ) -> Result<(), String>
 where
     F: FnMut(&str),
 {
     if provider == Provider::Anthropic {
-        return stream_rewrite(api_key, model, before, selected, after, on_text).await;
+        return stream_rewrite(api_key, model, before, selected, after, direction, on_text).await;
     }
-    let user_msg = format!("{before}<rewrite>{selected}</rewrite>{after}");
+    let user_msg = with_direction(
+        format!("{before}<rewrite>{selected}</rewrite>{after}"),
+        direction,
+    );
     let system_prompt = prompts::get(PromptKey::Rewrite);
     let base_url = provider.openai_base_url().ok_or("provider lacks base URL")?;
     openai_compat::stream(

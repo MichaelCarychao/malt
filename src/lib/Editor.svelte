@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, tick } from "svelte";
   import { invoke, Channel } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import {
@@ -137,6 +137,31 @@
 
   // Right-click pill menu: floating div anchored at cursor.
   let pillMenu = $state<{ tag: string; x: number; y: number } | null>(null);
+
+  // Steer-generation modal (Cmd/Ctrl+Shift+;). The text is injected as a
+  // <direction> note into the next completion/rewrite so the user can
+  // nudge the model ("make it darker", "pivot to the counterargument").
+  let steerOpen = $state(false);
+  let steerText = $state("");
+  let steerInputEl: HTMLInputElement | null = $state(null);
+  function openSteer() {
+    steerText = "";
+    steerOpen = true;
+    void tick().then(() => steerInputEl?.focus());
+  }
+  function cancelSteer() {
+    steerOpen = false;
+    // Hand focus back to the editor so the user keeps typing.
+    view?.focus();
+  }
+  function submitSteer() {
+    const dir = steerText.trim();
+    steerOpen = false;
+    if (view) {
+      view.focus();
+      void fetchCompletion(view, dir);
+    }
+  }
 
   // Link-suggestion modal (Cmd+Shift+L → review & apply).
   type LinkSuggestion = {
@@ -499,7 +524,7 @@
       }),
   });
 
-  async function fetchCompletion(v: EditorView) {
+  async function fetchCompletion(v: EditorView, direction = "") {
     const myGen = ++fetchGen;
     const sel = v.state.selection.main;
     const docLen = v.state.doc.length;
@@ -542,7 +567,7 @@
       };
 
       try {
-        await invoke("rewrite_text_streaming", { before, selected, after, onChunk: channel });
+        await invoke("rewrite_text_streaming", { before, selected, after, direction, onChunk: channel });
         if (myGen === fetchGen && !started && view) {
           v.dispatch({ effects: setGhost.of(null) });
         }
@@ -587,7 +612,7 @@
     };
 
     try {
-      await invoke("complete_text_streaming", { before, after, onChunk: channel });
+      await invoke("complete_text_streaming", { before, after, direction, onChunk: channel });
       if (myGen === fetchGen && !started && view) {
         v.dispatch({ effects: setGhost.of(null) });
       }
@@ -761,6 +786,25 @@
         key: "Mod-;",
         run: (v) => {
           void fetchCompletion(v);
+          return true;
+        },
+      },
+      {
+        // Mod-Shift-; = steer: pop a modal for a one-line direction
+        // note, then run the same completion/rewrite with that nudge
+        // injected as a <direction> block. Bind both ";" and its
+        // shifted form ":" since browsers/OS report the shifted key
+        // inconsistently.
+        key: "Mod-Shift-;",
+        run: () => {
+          openSteer();
+          return true;
+        },
+      },
+      {
+        key: "Mod-Shift-:",
+        run: () => {
+          openSteer();
           return true;
         },
       },
@@ -1746,6 +1790,34 @@
 {/if}
 <div bind:this={container} class="editor"></div>
 
+{#if steerOpen}
+  <div class="steer-backdrop" role="presentation" onclick={cancelSteer}>
+    <div
+      class="steer-panel"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Steer the generation"
+      onclick={(e) => e.stopPropagation()}
+    >
+      <div class="steer-label">steer the generation</div>
+      <input
+        class="steer-input"
+        type="text"
+        placeholder="e.g. make it darker · pivot to the counterargument · shorter, punchier"
+        bind:this={steerInputEl}
+        bind:value={steerText}
+        onkeydown={(e) => {
+          if (e.key === "Enter") { e.preventDefault(); submitSteer(); }
+          else if (e.key === "Escape") { e.preventDefault(); cancelSteer(); }
+        }}
+      />
+      <div class="steer-hint">
+        A one-time nudge for the AI generation at your cursor (or your selection). Enter to generate · Esc to cancel.
+      </div>
+    </div>
+  </div>
+{/if}
+
 {#if linkSuggestionsOpen}
   <div
     class="link-modal-backdrop"
@@ -2019,6 +2091,51 @@
   .pill-menu-item .op {
     font-family: "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
     color: #97b8d8;
+  }
+  .steer-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    z-index: 250;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding-top: 22vh;
+  }
+  .steer-panel {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-top: 2px solid #d6b06a;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+    width: min(560px, 90%);
+    padding: 14px 16px;
+  }
+  .steer-label {
+    color: #d6b06a;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-bottom: 8px;
+  }
+  .steer-input {
+    width: 100%;
+    box-sizing: border-box;
+    background: #0f0f0f;
+    border: 1px solid #333;
+    color: #e0e0e0;
+    font: inherit;
+    font-size: 14px;
+    padding: 8px 10px;
+    outline: 0;
+  }
+  .steer-input:focus {
+    border-color: #d6b06a;
+  }
+  .steer-hint {
+    color: #666;
+    font-size: 11px;
+    margin-top: 8px;
+    line-height: 1.4;
   }
   .link-modal-backdrop {
     position: fixed;
