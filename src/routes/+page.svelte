@@ -41,6 +41,10 @@
 
   type TagCount = { name: string; count: number };
 
+  /** Per-tag visual flair (icon glyph + accent color) applied to note
+   * cards in the sidebar. Loaded from config; managed in Settings. */
+  type TagStyle = { tag: string; icon: string; color: string };
+
   function escapeHtml(s: string): string {
     return s
       .replace(/&/g, "&amp;")
@@ -256,6 +260,35 @@
   let tagVocabulary = $state<string[]>([]);
   let allTagCounts = $state<TagCount[]>([]);
   let allTagNames = $derived(allTagCounts.map((t) => t.name));
+
+  // Per-tag flair (icon + accent color) for note cards. Lookup map is
+  // keyed by lowercase tag for case-insensitive matching against a note's
+  // (already-canonical) tags.
+  let tagStyles = $state<TagStyle[]>([]);
+  let tagStyleMap = $derived(
+    new Map(tagStyles.map((s) => [s.tag.toLowerCase(), s])),
+  );
+  /** Styles that apply to a note, in tagStyles (priority) order. */
+  function stylesForNote(note: Note): TagStyle[] {
+    const tags = note.tags;
+    if (!tags || tags.length === 0 || tagStyleMap.size === 0) return [];
+    const out: TagStyle[] = [];
+    for (const s of tagStyles) {
+      if (tags.some((t) => t.toLowerCase() === s.tag.toLowerCase())) out.push(s);
+    }
+    return out;
+  }
+  /** Icons to show on a card (capped so a heavily-tagged note stays tidy). */
+  function flairIcons(note: Note): string[] {
+    return stylesForNote(note)
+      .map((s) => s.icon)
+      .filter((i) => i.length > 0)
+      .slice(0, 3);
+  }
+  /** First matching style's color = the card's accent (or "" for none). */
+  function flairAccent(note: Note): string {
+    return stylesForNote(note).find((s) => s.color.length > 0)?.color ?? "";
+  }
 
   // ─── Per-note encryption ──────────────────────────────────────────
   //
@@ -1561,12 +1594,14 @@
 
   async function refreshTagMeta() {
     try {
-      const [vocab, all] = await Promise.all([
+      const [vocab, all, styles] = await Promise.all([
         invoke<string[]>("get_tag_vocabulary"),
         invoke<TagCount[]>("list_all_tags"),
+        invoke<TagStyle[]>("get_tag_styles"),
       ]);
       tagVocabulary = vocab;
       allTagCounts = all;
+      tagStyles = styles;
     } catch {
       /* keep stale */
     }
@@ -2357,6 +2392,11 @@
       const detail = (e as CustomEvent<{ enabled: boolean }>).detail;
       if (detail) dailyNoteTag = detail.enabled;
     }) as EventListener);
+    // Live-apply tag flair edits from Settings without a re-query.
+    window.addEventListener("malt:tag-styles-changed", ((e: Event) => {
+      const detail = (e as CustomEvent<{ styles: TagStyle[] }>).detail;
+      if (detail) tagStyles = detail.styles;
+    }) as EventListener);
     // Splash + tip prep. Record the mount time so we can enforce a
     // minimum 1 second on-screen duration even on fast boots — without
     // it, instant boots flash the splash for a frame or two before the
@@ -2566,6 +2606,8 @@
           class:conflict={note.is_conflict}
           class:empty-note={note.is_empty}
           class:encrypted={note.is_encrypted}
+          class:flaired={flairAccent(note) !== ""}
+          style={flairAccent(note) ? `--flair-accent: ${flairAccent(note)}` : ""}
           onclick={(e) => handleNoteClick(e, note.path)}
           ondblclick={(e) => {
             // Double-click pops the full actions menu (Rename / Encrypt /
@@ -2581,6 +2623,7 @@
           <span class="note-title">
             {#if note.is_conflict}<span class="conflict-badge" title="Sync conflict — manually merge with the original">⚠</span>{/if}
             {#if note.is_encrypted}<span class="encrypted-badge" title={unlockedPasswords.has(note.path) ? "Unlocked this session" : "Encrypted — click to unlock"}>{unlockedPasswords.has(note.path) ? "🔓" : "🔒"}</span>{/if}
+            {#each flairIcons(note) as ic}<span class="flair-icon" style={flairAccent(note) ? `color: ${flairAccent(note)}` : ""}>{ic}</span>{/each}
             {@html highlight(note.title, note.title_matches)}
           </span>
           <span class="snippet">{@html highlight(note.snippet, note.snippet_matches)}</span>
@@ -4071,6 +4114,27 @@
   }
   .note.selected .modified {
     color: #7a8b9c;
+  }
+  /* ── Per-tag flair (note cards only; editor left alone) ──────────────
+     A styled tag tints its note cards and colors the title + icon with
+     an accent (--flair-accent, set inline from config). Selection and
+     secondary-pane states still win the left stripe and background;
+     flair survives as the colored icon so you never lose the selection
+     cue. color-mix degrades gracefully (no tint) on old webviews — the
+     colored title carries the signal regardless. */
+  .flair-icon {
+    font-size: 11px;
+    margin-right: 5px;
+    opacity: 0.92;
+  }
+  .note.flaired:not(.selected):not(.secondary) {
+    background: color-mix(in srgb, var(--flair-accent) 9%, transparent);
+  }
+  .note.flaired:not(.selected):not(.secondary):hover {
+    background: color-mix(in srgb, var(--flair-accent) 15%, #232323);
+  }
+  .note.flaired:not(.selected) .note-title {
+    color: var(--flair-accent);
   }
   .note-title {
     color: #e0e0e0;

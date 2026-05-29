@@ -43,6 +43,26 @@ pub struct Config {
     /// the daily note blank.
     #[serde(default = "default_true")]
     pub daily_note_tag: bool,
+    /// Per-tag visual flair applied to note cards in the sidebar (an
+    /// icon glyph + an accent color). Purely presentational — lets a
+    /// flat folder that mixes content types (e.g. #element / #pitch /
+    /// #story) read at a glance. The editor is deliberately left alone.
+    #[serde(default)]
+    pub tag_styles: Vec<TagStyle>,
+}
+
+/// A single tag → flair mapping. `tag` is the canonical tag name (no
+/// leading `#`). `icon` is an optional short glyph/emoji shown before the
+/// title on matching cards. `color` is an optional CSS color (hex) used
+/// as the card's accent. Empty `icon`/`color` means "don't apply that
+/// part," so a style can be icon-only, color-only, or both.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TagStyle {
+    pub tag: String,
+    #[serde(default)]
+    pub icon: String,
+    #[serde(default)]
+    pub color: String,
 }
 
 fn default_true() -> bool {
@@ -64,6 +84,7 @@ impl Default for Config {
             active_provider: default_provider(),
             provider_models: HashMap::new(),
             daily_note_tag: true,
+            tag_styles: Vec::new(),
         }
     }
 }

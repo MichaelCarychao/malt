@@ -1152,6 +1152,44 @@ fn next_free_search_slot() -> Option<u8> {
 }
 
 #[tauri::command]
+fn get_tag_styles() -> Vec<config::TagStyle> {
+    config::load().tag_styles
+}
+
+/// Persist per-tag flair. Tag names are canonicalized (so "#Element",
+/// "Element", and "element" collapse to one style) and entries with an
+/// empty tag — or no icon AND no color — are dropped as no-ops.
+#[tauri::command]
+fn set_tag_styles(styles: Vec<config::TagStyle>) -> Result<Vec<config::TagStyle>, String> {
+    let mut cleaned: Vec<config::TagStyle> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for s in styles {
+        let tag = tags::canonicalize(&s.tag);
+        if tag.is_empty() {
+            continue;
+        }
+        if s.icon.trim().is_empty() && s.color.trim().is_empty() {
+            continue;
+        }
+        // First style wins for a given tag (preserves user ordering as
+        // priority — the frontend applies the first matching style's
+        // color as the card accent).
+        if !seen.insert(tag.clone()) {
+            continue;
+        }
+        cleaned.push(config::TagStyle {
+            tag,
+            icon: s.icon.trim().to_string(),
+            color: s.color.trim().to_string(),
+        });
+    }
+    let mut cfg = config::load();
+    cfg.tag_styles = cleaned.clone();
+    config::save(&cfg).map_err(|e| e.to_string())?;
+    Ok(cleaned)
+}
+
+#[tauri::command]
 fn get_tag_vocabulary() -> Vec<String> {
     config::load().tag_vocabulary
 }
@@ -1325,6 +1363,8 @@ pub fn run() {
             next_free_search_slot,
             get_tag_vocabulary,
             set_tag_vocabulary,
+            get_tag_styles,
+            set_tag_styles,
             list_all_tags,
             tag_cooccurrence,
             complete_text_streaming,

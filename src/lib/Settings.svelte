@@ -152,6 +152,23 @@
   let tagVocabularyLoaded = $state(false);
   let tagVocabularyError = $state<string | null>(null);
   let tagVocabularySaved = $state(false);
+
+  // ── Tag flair (per-tag icon + accent color on note cards) ──────────
+  type TagStyle = { tag: string; icon: string; color: string };
+  let tagStyles = $state<TagStyle[]>([]);
+  let tagStylesLoaded = $state(false);
+  let tagStylesError = $state<string | null>(null);
+  let tagStylesSaved = $state(false);
+  // Curated palettes. Icons are single glyphs/emoji (free text also
+  // allowed); colors are muted tones that read on the dark theme.
+  const FLAIR_ICONS = [
+    "◆", "●", "▲", "■", "★", "✦", "❡", "✎", "⚑", "♦",
+    "◐", "☾", "♻", "✓", "✗", "◷", "⬡", "❖",
+  ];
+  const FLAIR_COLORS = [
+    "#d8b86a", "#7fb0d8", "#8fc99a", "#d88a8a", "#b89ad8",
+    "#7fd8c9", "#d8a070", "#9aa0a8",
+  ];
   let appVersion = $state("");
   type SettingsTab =
     | "general"
@@ -573,7 +590,58 @@
     if (open && !tagVocabularyLoaded) {
       void loadTagVocabulary();
     }
+    if (open && !tagStylesLoaded) {
+      void loadTagStyles();
+    }
   });
+
+  async function loadTagStyles() {
+    try {
+      tagStyles = await invoke<TagStyle[]>("get_tag_styles");
+    } catch {
+      tagStyles = [];
+    } finally {
+      tagStylesLoaded = true;
+    }
+  }
+
+  function addTagStyle() {
+    tagStyles = [...tagStyles, { tag: "", icon: FLAIR_ICONS[0], color: FLAIR_COLORS[0] }];
+    tagStylesSaved = false;
+  }
+  function removeTagStyle(i: number) {
+    tagStyles = tagStyles.filter((_, idx) => idx !== i);
+    tagStylesSaved = false;
+    void saveTagStyles();
+  }
+  function setStyleField(i: number, field: keyof TagStyle, value: string) {
+    tagStyles = tagStyles.map((s, idx) => (idx === i ? { ...s, [field]: value } : s));
+    tagStylesSaved = false;
+  }
+
+  async function saveTagStyles() {
+    tagStylesError = null;
+    tagStylesSaved = false;
+    // Canonicalize tag names client-side too (the backend re-canonicalizes
+    // + drops no-ops, but this keeps the visible list tidy on save).
+    const styles = tagStyles
+      .map((s) => ({
+        tag: s.tag.trim().replace(/^#/, "").toLowerCase(),
+        icon: s.icon.trim(),
+        color: s.color.trim(),
+      }));
+    try {
+      const saved = await invoke<TagStyle[]>("set_tag_styles", { styles });
+      tagStyles = saved;
+      tagStylesSaved = true;
+      // Live-apply on the page without a full reload.
+      window.dispatchEvent(
+        new CustomEvent("malt:tag-styles-changed", { detail: { styles: saved } }),
+      );
+    } catch (e) {
+      tagStylesError = String(e);
+    }
+  }
 
   async function loadTagVocabulary() {
     try {
@@ -1195,6 +1263,95 @@
               </td>
               <td class="status"></td>
             </tr>
+            <tr>
+              <td class="keys">tag flair</td>
+              <td class="action">
+                <div class="flair-list">
+                  {#each tagStyles as s, i (i)}
+                    <div class="flair-row">
+                      <input
+                        class="flair-tag"
+                        placeholder="tag"
+                        value={s.tag}
+                        oninput={(e) => setStyleField(i, "tag", (e.target as HTMLInputElement).value)}
+                        onchange={() => void saveTagStyles()}
+                        spellcheck="false"
+                      />
+                      <div class="flair-icons" role="group" aria-label="icon">
+                        {#each FLAIR_ICONS as ic}
+                          <button
+                            type="button"
+                            class="flair-pick"
+                            class:on={s.icon === ic}
+                            title={`icon ${ic}`}
+                            onclick={() => { setStyleField(i, "icon", ic); void saveTagStyles(); }}
+                          >{ic}</button>
+                        {/each}
+                        <input
+                          class="flair-icon-input"
+                          maxlength="2"
+                          placeholder="·"
+                          value={s.icon}
+                          oninput={(e) => setStyleField(i, "icon", (e.target as HTMLInputElement).value)}
+                          onchange={() => void saveTagStyles()}
+                          title="Or type/paste any glyph or emoji"
+                        />
+                      </div>
+                      <div class="flair-colors" role="group" aria-label="color">
+                        {#each FLAIR_COLORS as c}
+                          <button
+                            type="button"
+                            class="flair-swatch"
+                            class:on={s.color.toLowerCase() === c}
+                            style={`background:${c}`}
+                            title={c}
+                            aria-label={`color ${c}`}
+                            onclick={() => { setStyleField(i, "color", c); void saveTagStyles(); }}
+                          ></button>
+                        {/each}
+                        <button
+                          type="button"
+                          class="flair-swatch none"
+                          class:on={!s.color}
+                          title="no color"
+                          aria-label="no color"
+                          onclick={() => { setStyleField(i, "color", ""); void saveTagStyles(); }}
+                        >∅</button>
+                      </div>
+                      <span class="flair-preview" style={s.color ? `color:${s.color}` : ""}>
+                        {#if s.icon}{s.icon} {/if}{s.tag || "tag"}
+                      </span>
+                      <button
+                        type="button"
+                        class="flair-remove"
+                        title="remove this flair"
+                        aria-label="remove"
+                        onclick={() => removeTagStyle(i)}
+                      >×</button>
+                    </div>
+                  {/each}
+                </div>
+                <div class="vocab-actions">
+                  <button class="ai-btn" onclick={addTagStyle}>+ add flair</button>
+                  <button class="ai-btn" onclick={() => void saveTagStyles()}>save</button>
+                  {#if tagStylesSaved}
+                    <span class="vocab-status">saved</span>
+                  {/if}
+                  {#if tagStylesError}
+                    <span class="vocab-status err">{tagStylesError}</span>
+                  {/if}
+                </div>
+                <div class="vocab-hint">
+                  Give a tag an icon and accent color — it shows on every note
+                  card carrying that tag (the editor is left untouched). Handy
+                  for telling content types apart at a glance in a mixed folder
+                  (e.g. <span class="op">#element</span>, <span class="op">#pitch</span>,
+                  <span class="op">#story</span>). When a note has several styled
+                  tags, the first listed wins the card color.
+                </div>
+              </td>
+              <td class="status"></td>
+            </tr>
           </tbody>
         </table>
       </section>
@@ -1622,6 +1779,120 @@
     font-size: 10px;
     margin-top: 4px;
     line-height: 1.4;
+  }
+  /* ── Tag flair editor ───────────────────────────────────────────── */
+  .flair-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+  .flair-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    padding: 6px;
+    border: 1px solid #2a2a2a;
+    border-radius: 4px;
+    background: #141414;
+  }
+  .flair-tag {
+    width: 110px;
+    background: #0f0f0f;
+    border: 1px solid #333;
+    color: #e0e0e0;
+    font: inherit;
+    font-size: 12px;
+    padding: 3px 6px;
+    outline: 0;
+    font-family: "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+  }
+  .flair-tag:focus {
+    border-color: #555;
+  }
+  .flair-icons,
+  .flair-colors {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    align-items: center;
+  }
+  .flair-pick {
+    width: 20px;
+    height: 20px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: #1c1c1c;
+    border: 1px solid #2e2e2e;
+    color: #b0b0b0;
+    font-size: 12px;
+    cursor: pointer;
+    border-radius: 3px;
+    padding: 0;
+    line-height: 1;
+  }
+  .flair-pick:hover {
+    border-color: #555;
+    color: #e0e0e0;
+  }
+  .flair-pick.on {
+    border-color: #6cb6ff;
+    color: #fff;
+    background: #233;
+  }
+  .flair-icon-input {
+    width: 24px;
+    text-align: center;
+    background: #0f0f0f;
+    border: 1px solid #333;
+    color: #e0e0e0;
+    font-size: 12px;
+    padding: 2px;
+    outline: 0;
+  }
+  .flair-swatch {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    cursor: pointer;
+    padding: 0;
+    box-shadow: 0 0 0 1px #2e2e2e;
+  }
+  .flair-swatch.on {
+    border-color: #e0e0e0;
+  }
+  .flair-swatch.none {
+    background: #1c1c1c;
+    color: #777;
+    font-size: 11px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+  }
+  .flair-preview {
+    flex: 1 1 auto;
+    min-width: 60px;
+    font-size: 12px;
+    color: #888;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .flair-remove {
+    background: transparent;
+    border: 0;
+    color: #777;
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 4px;
+  }
+  .flair-remove:hover {
+    color: #c66;
   }
   .query-ops {
     width: 100%;

@@ -242,6 +242,13 @@ export const TIPS: Tip[] = [
     story:
       "Click a tag pill in the editor to filter the sidebar to every note carrying it. Right-click a pill to add or remove from your starter vocabulary.",
   },
+  {
+    id: "t-flair",
+    category: "tags",
+    headline: "Give a tag its own color and icon",
+    story:
+      "Settings → Tags & queries → tag flair lets you give any tag an icon and accent color. Every note card with that tag wears it — so a folder mixing #element, #pitch, and #story reads at a glance. The editor stays untouched.",
+  },
 
   // ── ai ──────────────────────────────────────────────────────────
   {

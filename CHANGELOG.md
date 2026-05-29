@@ -4,6 +4,26 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.3 — 2026-05-29
+
+Tag flair + a frontmatter-safety fix that makes malt a trustworthy editor
+over a folder another tool also writes to.
+
+- **Tag flair.** Give any tag an icon and an accent color in Settings →
+  Tags & queries → tag flair. Every note *card* carrying that tag wears
+  it — colored title, subtle tint, and a glyph before the name — so a
+  flat folder mixing content types (e.g. `#element` / `#pitch` /
+  `#story`) reads at a glance. When a note has several styled tags, the
+  first listed wins the card color. The editor is deliberately left
+  untouched. Stored per-install in config; applies across all vaults.
+- **Frontmatter is now preserved verbatim.** Previously malt's YAML
+  model only understood `tags`, so the rename, link-mention, and
+  auto-tag paths — which rebuild a file from that model — silently
+  dropped any other frontmatter key. Now every unknown key (`id`,
+  `status`, image refs, anything an external system stores) round-trips
+  intact. This makes malt safe to use as the prose editor over a
+  Markdown folder that some other tool treats as a source of truth.
+
 ## 0.4.2 — 2026-05-29
 
 Discovery reports + serendipity batch. Four new lenses for finding the
