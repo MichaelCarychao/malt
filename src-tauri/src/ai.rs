@@ -76,6 +76,19 @@ fn client() -> reqwest::Client {
         .unwrap_or_else(|_| reqwest::Client::new())
 }
 
+/// Client for STREAMING calls. `reqwest`'s `.timeout()` is a *total*
+/// request deadline — applying it to a stream kills the whole request
+/// at the deadline even while tokens are still flowing, truncating long
+/// brews / completions mid-sentence. Streaming gets a connect timeout
+/// (fail fast on a dead endpoint) but no overall cap; the stream ends
+/// when the model is done or the connection drops.
+fn streaming_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 async fn send(req: MessagesRequest<'_>, api_key: &str) -> Result<String, String> {
     let resp = client()
         .post(API_URL)
@@ -160,7 +173,7 @@ where
         }],
     };
 
-    let mut resp = client()
+    let mut resp = streaming_client()
         .post(API_URL)
         .header("x-api-key", api_key)
         .header("anthropic-version", ANTHROPIC_VERSION)
@@ -238,7 +251,7 @@ where
         }],
     };
 
-    let mut resp = client()
+    let mut resp = streaming_client()
         .post(API_URL)
         .header("x-api-key", api_key)
         .header("anthropic-version", ANTHROPIC_VERSION)
@@ -399,7 +412,7 @@ where
         }],
     };
 
-    let mut resp = client()
+    let mut resp = streaming_client()
         .post(API_URL)
         .header("x-api-key", api_key)
         .header("anthropic-version", ANTHROPIC_VERSION)

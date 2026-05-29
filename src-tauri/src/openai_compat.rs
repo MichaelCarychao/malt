@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 
-const ANTHROPIC_TIMEOUT_SECS: u64 = 30;
+const ONESHOT_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Serialize)]
 struct ChatCompletionRequest<'a> {
@@ -73,9 +73,21 @@ struct ApiErrorBody {
     message: String,
 }
 
+/// Bounded client for one-shot calls (test, tags, entities). A total
+/// request deadline is correct here — these should finish fast.
 fn client() -> reqwest::Client {
     reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(ANTHROPIC_TIMEOUT_SECS))
+        .timeout(std::time::Duration::from_secs(ONESHOT_TIMEOUT_SECS))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// Client for streaming. No total deadline — `.timeout()` would abort
+/// the whole request mid-stream and truncate a long brew. Connect
+/// timeout only, so a dead endpoint still fails fast.
+fn streaming_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 }
@@ -155,7 +167,7 @@ where
         stream: Some(true),
     };
 
-    let mut resp = client()
+    let mut resp = streaming_client()
         .post(&url)
         .header("Authorization", format!("Bearer {api_key}"))
         .header("Content-Type", "application/json")
