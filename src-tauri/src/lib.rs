@@ -359,6 +359,51 @@ fn semantic_search(
         .collect())
 }
 
+/// "The Orphanage" — notes adrift from the link graph: no resolving
+/// outgoing wikilinks and no backlinks. Powers the `is:orphan` report.
+/// Returned in modified-descending order (same as the default listing).
+#[tauri::command]
+fn list_orphans() -> Vec<notes::NoteSummary> {
+    let orphans: std::collections::HashSet<String> =
+        backlinks::orphan_paths().into_iter().collect();
+    notes::list_notes()
+        .into_iter()
+        .filter(|n| orphans.contains(&n.path))
+        .collect()
+}
+
+/// "Near-duplicates" — notes that have at least one other note within
+/// ~0.9 cosine similarity. Powers the `is:duplicate` report. The KNN
+/// probe runs on a blocking worker so a large vault never stalls the UI.
+/// Returned tightest-duplicate first (not modified order).
+#[tauri::command]
+async fn list_near_duplicates(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<notes::NoteSummary>, String> {
+    let embeddings = state.embeddings.clone();
+    let dupe_paths = tauri::async_runtime::spawn_blocking(move || {
+        // 0.9 cosine ≈ "basically the same note". High enough to avoid
+        // flagging merely-related notes (those live in the Linkbacks
+        // "related" panel at a lower floor).
+        embeddings.near_duplicate_paths(0.9)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Map paths → summaries, preserving the similarity ranking.
+    let order: std::collections::HashMap<String, usize> = dupe_paths
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.clone(), i))
+        .collect();
+    let mut out: Vec<notes::NoteSummary> = notes::list_notes()
+        .into_iter()
+        .filter(|n| order.contains_key(&n.path))
+        .collect();
+    out.sort_by_key(|n| *order.get(&n.path).unwrap_or(&usize::MAX));
+    Ok(out)
+}
+
 #[tauri::command]
 fn delete_note(path: String, state: tauri::State<AppState>) -> Result<(), String> {
     let dir = notes::notes_dir();
@@ -1237,6 +1282,8 @@ pub fn run() {
             find_backlinks,
             find_related,
             semantic_search,
+            list_orphans,
+            list_near_duplicates,
             find_unlinked_mentions,
             link_unlinked_mention,
             suggest_wikilinks,

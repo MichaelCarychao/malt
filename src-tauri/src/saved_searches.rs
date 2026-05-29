@@ -15,11 +15,15 @@ use std::path::PathBuf;
 
 const MAX_SLOTS: usize = 9;
 
-/// Stable id for the built-in "Empty Notes" saved search. We seed this on
-/// every load() so the user always has at least one example present;
-/// they can rename it, reorder it, or unbind its slot, but they can't
-/// delete it.
+/// Stable ids for the built-in saved searches. We seed any that are
+/// missing on every load() so the user always has these "report" lenses
+/// present; they can rename, reorder, or unbind a slot, but they can't
+/// delete a builtin. Each maps to a special query the search bar knows
+/// how to route (empty:true, is:orphan, is:onthisday, is:duplicate).
 const EMPTY_NOTES_ID: &str = "_builtin_empty_notes";
+const ORPHANAGE_ID: &str = "_builtin_orphanage";
+const ON_THIS_DAY_ID: &str = "_builtin_on_this_day";
+const NEAR_DUPES_ID: &str = "_builtin_near_dupes";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedSearch {
@@ -36,14 +40,23 @@ pub struct SavedSearch {
     pub is_builtin: bool,
 }
 
-fn builtin_empty_notes() -> SavedSearch {
-    SavedSearch {
-        id: EMPTY_NOTES_ID.to_string(),
-        name: "Empty Notes".to_string(),
-        query: "empty:true".to_string(),
+/// The built-in saved searches, in seed order. `load()` ensures each is
+/// present (appending any that are missing) so upgrades pick up new
+/// reports without disturbing a user's existing slot bindings.
+fn builtins() -> Vec<SavedSearch> {
+    let mk = |id: &str, name: &str, query: &str| SavedSearch {
+        id: id.to_string(),
+        name: name.to_string(),
+        query: query.to_string(),
         slot: None, // filled in by assign_slots
         is_builtin: true,
-    }
+    };
+    vec![
+        mk(EMPTY_NOTES_ID, "Empty Notes", "empty:true"),
+        mk(ORPHANAGE_ID, "The Orphanage", "is:orphan"),
+        mk(ON_THIS_DAY_ID, "On This Day", "is:onthisday"),
+        mk(NEAR_DUPES_ID, "Near-duplicates", "is:duplicate"),
+    ]
 }
 
 fn path() -> PathBuf {
@@ -68,17 +81,14 @@ pub fn load() -> Vec<SavedSearch> {
     // their existing array order. Stable sort means ties (e.g. two unbound)
     // preserve insertion order.
     items.sort_by_key(|x| x.slot.unwrap_or(u8::MAX));
-    // Seed the Empty Notes builtin if missing. New users land with it at
-    // position 1 (slot ⌘1). Existing users get it appended; they can
-    // reorder to taste.
-    if !items.iter().any(|x| x.id == EMPTY_NOTES_ID) {
-        if items.is_empty() {
-            items.push(builtin_empty_notes());
-        } else {
-            // Insert at the front but only for first-time seeding. Use
-            // append-style placement so we don't bump someone's hard-won
-            // slot 1 binding on upgrade.
-            items.push(builtin_empty_notes());
+    // Seed any missing builtins. Fresh installs land with all four at
+    // positions 1-4 (⌘1-⌘4) — a guided tour of malt's report lenses.
+    // Existing users get newly-added builtins appended at the end, so we
+    // never bump a hard-won slot binding on upgrade. They can reorder or
+    // unbind from Settings → saved searches.
+    for b in builtins() {
+        if !items.iter().any(|x| x.id == b.id) {
+            items.push(b);
         }
     }
     assign_slots(&mut items);

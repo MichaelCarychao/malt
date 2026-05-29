@@ -572,6 +572,54 @@
   // meant, not the words I used." Everything after the ~ is the concept.
   let semanticMode = $derived(query.trimStart().startsWith("~"));
 
+  // Special "report" queries — computed lenses over the vault rather than
+  // text search. Each is an exact directive; `reportFor` maps the raw
+  // query to a report kind (or null). Used to route performSearch, guard
+  // note-creation in tryEnter, and label the status bar.
+  type ReportKind = "orphan" | "onthisday" | "duplicate";
+  function reportFor(q: string): ReportKind | null {
+    const t = q.trim().toLowerCase();
+    if (t === "is:orphan" || t === "is:orphans") return "orphan";
+    if (t === "is:onthisday") return "onthisday";
+    if (t === "is:duplicate" || t === "is:duplicates" || t === "is:dupe" || t === "is:dupes")
+      return "duplicate";
+    return null;
+  }
+  let specialReport = $derived(reportFor(query));
+
+  /** Same calendar day (month + day) as today, in a prior year — by an
+   * explicit YYYY-MM-DD title date when present, else the file's modified
+   * date. Today itself is excluded. Local time throughout (matches how
+   * daily notes are titled). Most-recent occurrence first. */
+  function sameLocalDay(a: Date, b: Date): boolean {
+    return (
+      a.getFullYear() === b.getFullYear() &&
+      a.getMonth() === b.getMonth() &&
+      a.getDate() === b.getDate()
+    );
+  }
+  function computeOnThisDay(items: Note[]): Note[] {
+    const now = new Date();
+    const month = now.getMonth();
+    const day = now.getDate();
+    const matched: { note: Note; key: number }[] = [];
+    for (const n of items) {
+      let when: Date | null = null;
+      const tm = n.title.match(/^(\d{4})-(\d{2})-(\d{2})\b/);
+      if (tm) {
+        const dt = new Date(+tm[1], +tm[2] - 1, +tm[3]);
+        if (!isNaN(dt.getTime())) when = dt;
+      }
+      if (!when && n.modified) when = new Date(n.modified * 1000);
+      if (!when) continue;
+      if (when.getMonth() !== month || when.getDate() !== day) continue;
+      if (sameLocalDay(when, now)) continue; // exclude today
+      matched.push({ note: n, key: when.getTime() });
+    }
+    matched.sort((a, b) => b.key - a.key);
+    return matched.map((x) => x.note);
+  }
+
   // When the query is exactly one `tag:foo` filter (no other terms), we
   // surface co-occurring tags as "often with" chips. This regex pulls
   // the bare tag out of that single-filter case; anything more complex
@@ -623,6 +671,36 @@
         console.error("semantic_search failed", e);
         if (myGen === queryGen) rawResults = [];
       }
+      return;
+    }
+    // Special report lenses (exact directives like `is:orphan`).
+    const report = reportFor(q);
+    if (report === "orphan") {
+      try {
+        const results = await invoke<Note[]>("list_orphans");
+        if (myGen === queryGen) rawResults = results;
+      } catch (e) {
+        console.error("list_orphans failed", e);
+        if (myGen === queryGen) rawResults = [];
+      }
+      return;
+    }
+    if (report === "duplicate") {
+      try {
+        const results = await invoke<Note[]>("list_near_duplicates");
+        if (myGen === queryGen) rawResults = results;
+      } catch (e) {
+        console.error("list_near_duplicates failed", e);
+        if (myGen === queryGen) rawResults = [];
+      }
+      return;
+    }
+    if (report === "onthisday") {
+      // Computed client-side from the in-memory note list so the
+      // date math uses *local* time (matching how daily notes are
+      // titled) and needs no backend round-trip.
+      const results = computeOnThisDay(allNotes);
+      if (myGen === queryGen) rawResults = results;
       return;
     }
     const results = await invoke<Note[]>("search_notes", { query: q });
@@ -808,6 +886,13 @@
         e.preventDefault();
         e.stopPropagation();
         void openVaultPicker();
+      }
+      if (sKey === "r") {
+        // Cmd/Ctrl+Shift+R jumps to a random note. (Plain Cmd+R is
+        // rename; this is a page-level action, not an editor one.)
+        e.preventDefault();
+        e.stopPropagation();
+        void openRandomNote();
       }
       return;
     }
@@ -1150,10 +1235,11 @@
       if (selectedPath) focusEditor();
       return;
     }
-    // Semantic mode (~concept): Enter never *creates* a note named "~…".
+    // Semantic mode (~concept) and report lenses (is:orphan, is:onthisday,
+    // is:duplicate): Enter never *creates* a note named after the directive.
     // It opens the top-ranked / selected result, or no-ops if there are
-    // none. Creating happens only in lexical mode.
-    if (semanticMode) {
+    // none. Creating happens only in plain lexical mode.
+    if (semanticMode || specialReport) {
       if (selectedPath) focusEditor();
       return;
     }
@@ -2041,6 +2127,26 @@
     }
   }
 
+  /** Jump to a random note in the active vault — a serendipity tool for
+   * rediscovering what you've forgotten. Picks from the whole vault (not
+   * the current filter) and clears the query so the pick is selectable.
+   * Avoids re-landing on the note you're already reading when possible. */
+  async function openRandomNote() {
+    const pool =
+      allNotes.length > 1 && selectedPath
+        ? allNotes.filter((n) => n.path !== selectedPath)
+        : allNotes;
+    if (pool.length === 0) return;
+    const pick = pool[Math.floor(Math.random() * pool.length)];
+    query = "";
+    await performSearch("");
+    pushToHistory("primary", pick.path);
+    selectedPath = pick.path;
+    focusedPane = "primary";
+    void scrollSelectedIntoView("nearest");
+    void tick().then(() => focusEditor());
+  }
+
   // ─── Vault management ────────────────────────────────────────────
 
   async function refreshVaults() {
@@ -2378,6 +2484,18 @@
         <span class="semantic-badge" title="Semantic search — ranked by meaning, not keywords">~ semantic</span>
         <span class="sep">·</span>
         {notes.length} near
+      {:else if specialReport === "orphan"}
+        <span class="semantic-badge" title="The Orphanage — notes with no links in or out">orphanage</span>
+        <span class="sep">·</span>
+        {notes.length} adrift
+      {:else if specialReport === "onthisday"}
+        <span class="semantic-badge" title="On This Day — notes from this calendar day in years past">on this day</span>
+        <span class="sep">·</span>
+        {notes.length} from the past
+      {:else if specialReport === "duplicate"}
+        <span class="semantic-badge" title="Near-duplicates — notes with a near-identical twin (~0.9+ similarity)">near-dupes</span>
+        <span class="sep">·</span>
+        {notes.length} flagged
       {:else if query}
         {notes.length} match{notes.length === 1 ? "" : "es"}
       {:else}
@@ -2471,6 +2589,12 @@
       {/each}
       {#if notes.length === 0 && query && semanticMode}
         <li class="empty">No semantically-similar notes. (Needs the embedding model + at least a couple of indexed notes.)</li>
+      {:else if notes.length === 0 && specialReport === "orphan"}
+        <li class="empty">No orphans — every note is woven into your web of links.</li>
+      {:else if notes.length === 0 && specialReport === "onthisday"}
+        <li class="empty">Nothing from this calendar day in years past — yet. Check back as your archive grows.</li>
+      {:else if notes.length === 0 && specialReport === "duplicate"}
+        <li class="empty">No near-duplicates. (Needs the embedding model + a couple of indexed notes; very similar notes show up here.)</li>
       {:else if notes.length === 0 && query}
         <li class="empty">No matches. Press Enter to create "{query}".</li>
       {/if}

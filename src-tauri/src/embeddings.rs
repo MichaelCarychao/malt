@@ -271,6 +271,74 @@ impl EmbedIndex {
             .collect())
     }
 
+    /// Paths of notes that have at least one **near-duplicate** — another
+    /// note within `sim_floor` cosine similarity (≈0.9 = "basically the
+    /// same note"). Surfaces accidental copies, re-typed notes, and
+    /// heavily-overlapping drafts. Probes each note's nearest neighbor via
+    /// sqlite-vec KNN; that's N small queries, so callers run it off-thread
+    /// (spawn_blocking) and only on explicit request. Returned tightest-
+    /// duplicate first.
+    pub fn near_duplicate_paths(&self, sim_floor: f32) -> Vec<String> {
+        let conn = self.db.lock().expect("db lock");
+
+        // Snapshot (path, rowid) for every embedded note. Bind the
+        // collected Vec to a name before the block ends so the MappedRows
+        // temporary drops before `stmt` does (avoids an E0597 borrow).
+        let rows: Vec<(String, i64)> = {
+            let mut stmt = match conn.prepare("SELECT path, vec_rowid FROM embed_meta") {
+                Ok(s) => s,
+                Err(_) => return Vec::new(),
+            };
+            let collected: Vec<(String, i64)> = match stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            {
+                Ok(it) => it.filter_map(Result::ok).collect(),
+                Err(_) => return Vec::new(),
+            };
+            collected
+        };
+
+        // Reused KNN probe: nearest 2 (self + best other).
+        let mut probe = match conn.prepare(
+            "SELECT m.path, v.distance
+             FROM vec_notes v
+             JOIN embed_meta m ON v.rowid = m.vec_rowid
+             WHERE v.embedding MATCH ?1 AND k = 2
+             ORDER BY v.distance",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut scored: Vec<(String, f32)> = Vec::new();
+        for (path, rowid) in &rows {
+            let blob: Vec<u8> = match conn.query_row(
+                "SELECT embedding FROM vec_notes WHERE rowid = ?1",
+                params![rowid],
+                |r| r.get(0),
+            ) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let hits: Vec<(String, f32)> = match probe.query_map(params![blob], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, f32>(1)?))
+            }) {
+                Ok(it) => it.filter_map(Result::ok).collect(),
+                Err(_) => continue,
+            };
+            // Best neighbor that isn't the note itself.
+            if let Some((_, dist)) = hits.into_iter().find(|(p, _)| p != path) {
+                let sim = 1.0 - (dist / 2.0);
+                if sim >= sim_floor {
+                    scored.push((path.clone(), sim));
+                }
+            }
+        }
+
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.into_iter().map(|(p, _)| p).collect()
+    }
+
     fn load_model(&self, app_handle: &AppHandle) -> bool {
         let mut m = self.model.lock().expect("model lock");
         if m.is_some() {

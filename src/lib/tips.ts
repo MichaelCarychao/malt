@@ -140,6 +140,13 @@ export const TIPS: Tip[] = [
     story:
       "Esc almost always means \"clear the query and put me back in the search bar.\" Exception: in the editor it declines a ghost completion.",
   },
+  {
+    id: "s-random-note",
+    category: "shortcuts",
+    headline: "Surprise me with a forgotten note",
+    story:
+      "⌘⇧R jumps to a random note in the vault — a serendipity engine for rediscovering what you've buried. (Plain ⌘R renames; add Shift for roulette.)",
+  },
 
   // ── saved searches ──────────────────────────────────────────────
   {
@@ -183,6 +190,27 @@ export const TIPS: Tip[] = [
     headline: "Stack query operators for power filters",
     story:
       "Queries compose: \"tag:meeting modified:<7d\" finds meetings from the last week. \"empty:true tag:draft\" finds drafts you haven't filled in.",
+  },
+  {
+    id: "ss-orphanage",
+    category: "searches",
+    headline: "Find the notes adrift from everything",
+    story:
+      "The Orphanage (is:orphan, or its saved-search chip) lists notes with no links in and none out — stranded thoughts waiting to be connected or pruned.",
+  },
+  {
+    id: "ss-on-this-day",
+    category: "searches",
+    headline: "Re-read what I wrote a year ago today",
+    story:
+      "On This Day (is:onthisday) surfaces notes from this calendar day in years past — by dated title or last-edited date. A quiet window onto your own archive.",
+  },
+  {
+    id: "ss-near-dupes",
+    category: "searches",
+    headline: "Catch the note I accidentally wrote twice",
+    story:
+      "Near-duplicates (is:duplicate) flags notes with a near-identical twin — re-typed captures, forked drafts, double-pasted clippings. Runs on the local embedding model.",
   },
 
   // ── tags ────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 {
   "name": "malt",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "A cross-platform AI-augmented nvalt successor. Plain .md files, instant search, AI-assisted tagging and linking.",
   "type": "module",
   "scripts": {

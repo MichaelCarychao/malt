@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
 #[derive(Serialize, Clone, Debug)]
@@ -96,6 +96,56 @@ pub fn resolved_targets_in(body: &str) -> Vec<(String, String)> {
         }
     }
     out
+}
+
+/// Paths of "orphan" notes — adrift from the link graph. A note is an
+/// orphan when it has **no** outgoing wikilink that resolves to an
+/// existing note **and** is the target of no backlinks from any other
+/// note. These are the notes most in need of being woven into your web
+/// (or pruned). Result is in the same order as `list_notes` (modified
+/// descending).
+///
+/// Encrypted notes are skipped: their bodies are ciphertext, so their
+/// outgoing links are unknowable and we'd wrongly flag them as orphans.
+/// A side effect is that links *from* an encrypted note can't credit
+/// their targets — an acceptable blind spot, since encryption hides the
+/// graph by design.
+pub fn orphan_paths() -> Vec<String> {
+    let notes = crate::notes::list_notes();
+
+    let mut by_title: HashMap<String, String> = HashMap::new();
+    let mut by_slug: HashMap<String, String> = HashMap::new();
+    for n in &notes {
+        by_title.insert(n.title.to_lowercase(), n.path.clone());
+        by_slug.insert(slugify(&n.title), n.path.clone());
+    }
+
+    // One pass over readable notes: who links out, and who gets linked to.
+    let mut has_outgoing: HashSet<String> = HashSet::new();
+    let mut is_target: HashSet<String> = HashSet::new();
+    for note in &notes {
+        if note.is_encrypted {
+            continue;
+        }
+        let content = std::fs::read_to_string(&note.path).unwrap_or_default();
+        let (_fm, body) = crate::frontmatter::split(&content);
+        for (link_text, _, _) in scan_wikilinks(body) {
+            if let Some(target) = resolve(&link_text, &by_title, &by_slug) {
+                // A note linking to itself doesn't count as being woven in.
+                if target != note.path {
+                    has_outgoing.insert(note.path.clone());
+                    is_target.insert(target);
+                }
+            }
+        }
+    }
+
+    notes
+        .iter()
+        .filter(|n| !n.is_encrypted)
+        .filter(|n| !has_outgoing.contains(&n.path) && !is_target.contains(&n.path))
+        .map(|n| n.path.clone())
+        .collect()
 }
 
 /// Rewrite every `[[link]]` in `body` whose target normalizes to `old_title`

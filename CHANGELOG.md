@@ -4,6 +4,35 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.2 — 2026-05-29
+
+Discovery reports + serendipity batch. Four new lenses for finding the
+notes that normal search never surfaces.
+
+- **The Orphanage (`is:orphan`).** Lists notes adrift from the link
+  graph — no resolving `[[wikilink]]` out *and* no backlinks in. The
+  stranded thoughts most in need of being woven in (or pruned). Skips
+  encrypted notes, whose link structure is unknowable by design.
+- **On This Day (`is:onthisday`).** Surfaces notes from this calendar
+  day in years past — by an explicit `YYYY-MM-DD` title date when
+  present, else the file's last-modified date. Today is excluded;
+  most-recent-first. Computed in local time so it matches how daily
+  notes are dated.
+- **Near-duplicates (`is:duplicate`).** Flags notes with a near-
+  identical twin (~0.9+ cosine similarity) — re-typed captures, forked
+  drafts, double-pasted clippings. Runs the embedding KNN on a
+  background worker so even a huge vault never stalls the UI.
+- **Random note (Cmd/Ctrl+Shift+R).** Jumps to a random note in the
+  vault — a serendipity engine for rediscovering what you've buried.
+  Avoids re-landing on the note you're already reading.
+- **Three new built-in saved searches.** The Orphanage, On This Day,
+  and Near-duplicates join Empty Notes as built-in, reorderable,
+  un-deletable saved-search chips — fresh installs land with all four
+  bound to Cmd/Ctrl+1–4 as a guided tour of the report lenses.
+- **Fix: Cmd/Ctrl+D now moves the editor to the new daily note.** The
+  daily-note command cleared selection but an active search filter
+  could snap it back to a visible row; the query is now cleared first.
+
 ## 0.4.1 — 2026-05-29
 
 Refinement batch.
