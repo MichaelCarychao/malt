@@ -345,6 +345,21 @@
     return 0.5;
   }
   let splitFraction = $state(readInitialSplitFraction());
+  // Left sidebar (note list) width in px — drag-resizable, persisted.
+  function readInitialSidebarWidth(): number {
+    if (typeof localStorage !== "undefined") {
+      const s = localStorage.getItem("malt.sidebarWidth");
+      if (s) {
+        const n = parseFloat(s);
+        if (!isNaN(n) && n >= 200 && n <= 700) return n;
+      }
+    }
+    return 300;
+  }
+  let sidebarWidth = $state(readInitialSidebarWidth());
+  // Zen mode (Cmd/Ctrl+Shift+F): hide the note list so the editor fills
+  // the window. Toggled; nothing is lost, the sidebar just collapses.
+  let zenMode = $state(false);
   let countMode = $state<"words" | "chars">(
     typeof localStorage !== "undefined" && localStorage.getItem("malt.countMode") === "chars"
       ? "chars"
@@ -389,6 +404,9 @@
     vaultsState.vaults[vaultsState.active_index]?.name ?? "vault",
   );
   let vaultMenuOpen = $state(false);
+  // True while a vault switch/attach is reindexing — drives an "indexing…"
+  // notice instead of the misleading "No notes yet" empty state.
+  let vaultSwitching = $state(false);
   let vaultPickerOpen = $state(false); // Cmd+Shift+V switcher modal
   let vaultPickerInputEl: HTMLInputElement | null = $state(null);
   let vaultPickerQuery = $state("");
@@ -934,6 +952,13 @@
         e.stopPropagation();
         void openRandomNote();
       }
+      if (sKey === "f") {
+        // Cmd/Ctrl+Shift+F toggles zen mode (collapse the note list so
+        // the editor fills the window). Plain Cmd+F is find-in-note.
+        e.preventDefault();
+        e.stopPropagation();
+        zenMode = !zenMode;
+      }
       return;
     }
     const key = e.key.toLowerCase();
@@ -1175,6 +1200,38 @@
     window.removeEventListener("mousemove", onSplitResize);
     window.removeEventListener("mouseup", endSplitResize);
   }
+
+  // Left sidebar (note list) width resize.
+  let resizingSidebar = false;
+  let sidebarStartX = 0;
+  let sidebarStartWidth = 300;
+  function startSidebarResize(e: MouseEvent) {
+    resizingSidebar = true;
+    sidebarStartX = e.clientX;
+    sidebarStartWidth = sidebarWidth;
+    window.addEventListener("mousemove", onSidebarResize);
+    window.addEventListener("mouseup", endSidebarResize);
+    e.preventDefault();
+  }
+  function onSidebarResize(e: MouseEvent) {
+    if (!resizingSidebar) return;
+    let next = sidebarStartWidth + (e.clientX - sidebarStartX);
+    if (next < 200) next = 200;
+    if (next > 700) next = 700;
+    sidebarWidth = next;
+  }
+  function endSidebarResize() {
+    resizingSidebar = false;
+    window.removeEventListener("mousemove", onSidebarResize);
+    window.removeEventListener("mouseup", endSidebarResize);
+  }
+  // Persist sidebar width.
+  $effect(() => {
+    const w = sidebarWidth;
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("malt.sidebarWidth", String(w));
+    }
+  });
 
   function requestDelete() {
     if (!selectedPath) return;
@@ -2185,6 +2242,7 @@
     vaultMenuOpen = false;
     vaultPickerOpen = false;
     if (index === vaultsState.active_index) return;
+    vaultSwitching = true;
     try {
       // Flush any pending edits before swapping out from under the editor.
       await flushAllEditors();
@@ -2212,6 +2270,8 @@
       await Promise.all([refreshAllNotes(), performSearch(query)]);
     } catch (e) {
       console.error("switch_vault failed", e);
+    } finally {
+      vaultSwitching = false;
     }
   }
   async function openVaultPicker() {
@@ -2258,6 +2318,7 @@
       addVaultError = "pick a folder first";
       return;
     }
+    vaultSwitching = true;
     try {
       await flushAllEditors();
       // Same staleness fix as switchVault: clear UI state BEFORE the
@@ -2279,6 +2340,8 @@
       await Promise.all([refreshAllNotes(), performSearch(query)]);
     } catch (e) {
       addVaultError = String(e);
+    } finally {
+      vaultSwitching = false;
     }
   }
 
@@ -2439,7 +2502,7 @@
   });
 </script>
 
-<main>
+<main class:zen={zenMode}>
   <header>
     <input
       bind:this={searchInput}
@@ -2591,7 +2654,7 @@
       {/each}
     </span>
   </div>
-  <div class="body">
+  <div class="body" style:grid-template-columns={zenMode ? "minmax(0, 1fr)" : `${sidebarWidth}px 5px minmax(0, 1fr)`}>
     <ul class="notes">
       {#each notes as note (note.path)}
         <li
@@ -2625,7 +2688,9 @@
           <span class="modified">{formatModified(note.modified)}</span>
         </li>
       {/each}
-      {#if notes.length === 0 && query && semanticMode}
+      {#if notes.length === 0 && vaultSwitching}
+        <li class="empty">opening vault — indexing…</li>
+      {:else if notes.length === 0 && query && semanticMode}
         <li class="empty">No semantically-similar notes. (Needs the embedding model + at least a couple of indexed notes.)</li>
       {:else if notes.length === 0 && specialReport === "orphan"}
         <li class="empty">No orphans — every note is woven into your web of links.</li>
@@ -2638,7 +2703,7 @@
       {:else if notes.length === 0 && query}
         <li class="empty">No matches. Press Enter to create "{query}".</li>
       {/if}
-      {#if notes.length === 0 && !query}
+      {#if notes.length === 0 && !query && !vaultSwitching}
         <li class="empty empty-cta">
           <div class="empty-cta-title">No notes yet</div>
           <div class="empty-cta-desc">
@@ -2652,6 +2717,13 @@
         </li>
       {/if}
     </ul>
+    <div
+      class="sidebar-resize-handle"
+      onmousedown={startSidebarResize}
+      role="separator"
+      aria-orientation="vertical"
+      title="Drag to resize the note list"
+    ></div>
     <div class="editor-pane">
       {#if selectedPath}
         <div class="editors-row" bind:this={editorsRowEl}>
@@ -4079,6 +4151,22 @@
     margin: 0;
     overflow-y: auto;
     border-right: 1px solid #2a2a2a;
+  }
+  /* Grab strip just right of the list↔editor divider. */
+  .sidebar-resize-handle {
+    cursor: col-resize;
+    background: transparent;
+    transition: background 0.12s;
+  }
+  .sidebar-resize-handle:hover {
+    background: rgba(108, 182, 255, 0.35);
+  }
+  /* Zen mode (Cmd/Ctrl+Shift+F): collapse the note list so the editor
+     fills the window. display:none removes them as grid items, leaving
+     the editor-pane as the lone column. */
+  main.zen .notes,
+  main.zen .sidebar-resize-handle {
+    display: none;
   }
   .note {
     display: grid;

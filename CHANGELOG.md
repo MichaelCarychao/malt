@@ -4,6 +4,18 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.8 — 2026-05-31
+
+To-do list, batch 2 (layout + a vault-attach fix).
+
+- **Resizable note list.** Drag the divider between the note list and the
+  editor to set the sidebar width (200–700px); persisted across launches.
+- **Zen mode (Cmd/Ctrl+Shift+F).** Collapse the note list so the editor
+  fills the window. Toggle to bring it back — nothing is lost.
+- **Attaching/switching a vault no longer flashes "No notes yet."** While
+  the new vault reindexes, the sidebar shows "opening vault — indexing…"
+  instead of the misleading empty-state CTA.
+
 ## 0.4.7 — 2026-05-31
 
 - **A plain click on a note always opens it single-pane in the primary

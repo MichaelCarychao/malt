@@ -71,6 +71,7 @@
     { keys: `${mod}+N`,                action: "New note (clear & focus search)",             status: "live" },
     { keys: `${mod}+D`,                action: "Daily note — open/create today's dated note",  status: "live" },
     { keys: `${mod}+${shift}+R`,       action: "Random note — jump somewhere in the vault",   status: "live" },
+    { keys: `${mod}+${shift}+F`,       action: "Zen mode — hide the note list, editor fills the window", status: "live" },
     { keys: `↑ / ↓`,                   action: "Move selection (in search field)",            status: "live" },
     { keys: `${mod}+↓ / ${mod}+;`,     action: "Next note (from anywhere)",                   status: "live" },
     { keys: `${mod}+↑ / ${mod}+K`,     action: "Previous note (from anywhere)",               status: "live" },
