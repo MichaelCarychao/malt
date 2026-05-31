@@ -111,7 +111,7 @@ impl Tagger {
         // canonical tag line at the bottom of the body. The user's editor
         // will hide that line and surface the tags as pills.
         let new_content = crate::tags::merge_tags_into_file(&content, &new_tags);
-        std::fs::write(&path, &new_content).map_err(|e| e.to_string())?;
+        crate::notes::write_atomic(&path, &new_content).map_err(|e| e.to_string())?;
 
         {
             let mut hashes = self.last_tagged_hash.lock().expect("tagger lock");

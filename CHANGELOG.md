@@ -4,6 +4,28 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.5 — 2026-05-31
+
+Integration hardening — making malt safe to share a folder with another
+program writing it concurrently (surfaced by a pre-integration review).
+
+- **Atomic writes everywhere.** Every note write (save, encrypt/decrypt,
+  password change, create, the rename cascade, auto-tag, link-mention)
+  now stages a temp file and atomically renames it into place. A
+  concurrent external reader never catches a truncated or half-written
+  note — it sees the old complete file or the new one, never garbage.
+- **No more echo writes.** Merely *viewing* a note another tool just
+  edited no longer relocates its tags and writes malt's version back
+  over it. Internal reloads + the tag-relocation pass are excluded from
+  autosave; only real user edits write.
+- **Rename detection won't mispair duplicates.** The external-rename
+  cascade now fires only when the moved file's content is globally
+  unique on both sides, so templates/stubs/boilerplate with identical
+  content can't be misread as a rename and rewrite the wrong links.
+- **Conflict-reload race guard.** Overlapping external-change handlers
+  (sync storms) now carry a generation token, so a slow earlier disk
+  read can't apply its result after a newer one.
+
 ## 0.4.4 — 2026-05-29
 
 "Plays nice with other tools" batch — making malt safe as the editor over

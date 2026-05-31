@@ -100,7 +100,7 @@ fn save_note(
     content: String,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
-    std::fs::write(&path, content).map_err(|e| e.to_string())?;
+    notes::write_atomic(&path, &content).map_err(|e| e.to_string())?;
     // Re-embed the changed file. Hash check inside the worker skips no-ops.
     state
         .embeddings
@@ -146,7 +146,7 @@ fn save_encrypted_note(
     // pass instead of a fresh Argon2id run. Fresh nonce every time.
     let prior = std::fs::read_to_string(&path).unwrap_or_default();
     let envelope = encryption::encrypt_reusing_salt(&content, &password, &prior)?;
-    std::fs::write(&path, envelope).map_err(|e| e.to_string())?;
+    notes::write_atomic(&path, &envelope).map_err(|e| e.to_string())?;
     // Re-enqueue for embedding so the index drops the prior body
     // representation (embedding worker will see encrypted content + skip
     // it via the per-path is-encrypted check it inherits from the
@@ -167,7 +167,7 @@ fn decrypt_existing_note(
 ) -> Result<(), String> {
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let plaintext = encryption::decrypt(&content, &password)?;
-    std::fs::write(&path, plaintext).map_err(|e| e.to_string())?;
+    notes::write_atomic(&path, &plaintext).map_err(|e| e.to_string())?;
     state
         .embeddings
         .enqueue_path(std::path::PathBuf::from(&path));
@@ -193,7 +193,7 @@ fn change_note_password(
         content
     };
     let envelope = encryption::encrypt(&plaintext, &new_password)?;
-    std::fs::write(&path, envelope).map_err(|e| e.to_string())?;
+    notes::write_atomic(&path, &envelope).map_err(|e| e.to_string())?;
     state
         .embeddings
         .enqueue_path(std::path::PathBuf::from(&path));
@@ -506,7 +506,7 @@ fn create_note(title: String) -> Result<String, String> {
             return Err("too many filename collisions".to_string());
         }
     }
-    std::fs::write(&path, "").map_err(|e| e.to_string())?;
+    notes::write_atomic(&path, "").map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().to_string())
 }
 

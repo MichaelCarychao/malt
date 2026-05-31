@@ -2,10 +2,37 @@ use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tauri::{AppHandle, Emitter};
+
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Write `contents` to `path` atomically: stage a sibling temp file, then
+/// rename it over the target. Rename is atomic on the same volume (Windows
+/// and Unix both), so a concurrent reader — e.g. an external tool sharing
+/// the notes folder — never observes a truncated or half-written note; it
+/// sees either the old complete file or the new complete file. The temp
+/// name is unique per call so racing writers don't collide, and it's
+/// cleaned up on rename failure. The `.malt-tmp-*` suffix is ignored by the
+/// watcher + listing (see `should_ignore`).
+pub fn write_atomic<P: AsRef<Path>>(path: P, contents: &str) -> std::io::Result<()> {
+    let path = path.as_ref();
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let mut tmp_name = path.as_os_str().to_os_string();
+    tmp_name.push(format!(".malt-tmp-{seq}"));
+    let tmp = PathBuf::from(tmp_name);
+    std::fs::write(&tmp, contents)?;
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
 
 use crate::backlinks::BacklinkIndex;
 use crate::embeddings::EmbedIndex;
@@ -482,6 +509,19 @@ fn detect_renames(
     prev: &HashMap<PathBuf, u64>,
     curr: &HashMap<PathBuf, u64>,
 ) -> Vec<(PathBuf, PathBuf)> {
+    // Count each content hash across the FULL snapshots. We only treat a
+    // disappear+reappear as a rename when the content is globally unique on
+    // both sides — otherwise duplicate content (templates, stubs, repeated
+    // boilerplate) could mis-pair and rewrite the wrong [[links]].
+    let mut prev_counts: HashMap<u64, usize> = HashMap::new();
+    for h in prev.values() {
+        *prev_counts.entry(*h).or_default() += 1;
+    }
+    let mut curr_counts: HashMap<u64, usize> = HashMap::new();
+    for h in curr.values() {
+        *curr_counts.entry(*h).or_default() += 1;
+    }
+
     let mut removed_by_hash: HashMap<u64, Vec<&PathBuf>> = HashMap::new();
     for (p, h) in prev {
         if !curr.contains_key(p) {
@@ -497,6 +537,10 @@ fn detect_renames(
     let mut out = Vec::new();
     for (h, removed) in &removed_by_hash {
         if removed.len() != 1 {
+            continue;
+        }
+        // Content must be unique across both snapshots — no ambiguity.
+        if prev_counts.get(h) != Some(&1) || curr_counts.get(h) != Some(&1) {
             continue;
         }
         if let Some(added) = added_by_hash.get(h) {

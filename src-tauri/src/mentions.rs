@@ -215,6 +215,6 @@ pub fn link_first(source_path: &str, target_title: &str) -> Result<(), String> {
     let matched = &body[idx..end]; // preserve original casing
     let new_body = format!("{}[[{}]]{}", &body[..idx], matched, &body[end..]);
     let new_content = crate::frontmatter::merge(&fm, &new_body);
-    std::fs::write(source_path, new_content).map_err(|e| e.to_string())?;
+    crate::notes::write_atomic(source_path, &new_content).map_err(|e| e.to_string())?;
     Ok(())
 }

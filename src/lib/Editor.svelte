@@ -463,6 +463,9 @@
   let currentPath: string | null = null;
   let lastSavedContent = "";
   let fetchGen = 0;
+  // Monotonic guard so overlapping external-change handlers can't race:
+  // only the most recent disk read is allowed to act on its result.
+  let externalChangeGen = 0;
   let currentHighlightQuery = "";
   let currentAllNotes: NoteRef[] = [];
 
@@ -1681,7 +1684,16 @@
       tagLineAtomic,
       EditorView.updateListener.of((u) => {
         if (u.docChanged) {
-          scheduleSave();
+          // Our own internal doc rewrites — external-change reloads and the
+          // tag-relocation pass — must NOT schedule a save. Otherwise merely
+          // *viewing* a note another tool just edited would relocate its
+          // tags and write malt's version back over that tool's file (an
+          // echo write). Real user edits carry no such annotation and
+          // autosave normally.
+          const internal = u.transactions.some(
+            (tr) => !!tr.annotation(internalDocRewrite),
+          );
+          if (!internal) scheduleSave();
           emitCount(u.state.doc.toString());
         }
         // Open wikilink completion whenever the cursor sits inside an open
@@ -1740,6 +1752,9 @@
 
   async function handleExternalChange() {
     if (!currentPath || !view) return;
+    // Burst events (sync storms) fire this repeatedly; tag each run so a
+    // slower earlier read can't apply its result after a newer one.
+    const myGen = ++externalChangeGen;
     let fresh = "";
     try {
       if (isEncrypted && password) {
@@ -1756,6 +1771,9 @@
     } catch {
       return;
     }
+    // A newer external-change handler started while we awaited the read —
+    // let it win; acting on our now-stale `fresh` could clobber.
+    if (myGen !== externalChangeGen) return;
     // Disk already matches what we last wrote — nothing external happened
     // (this is also how our own autosave echoes back via the watcher).
     if (fresh === lastSavedContent) return;

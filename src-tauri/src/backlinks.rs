@@ -247,7 +247,7 @@ pub fn cascade_wikilink_rename(
         let (new_body, count) = rewrite_wikilinks_in_body(body, old_title, new_title);
         if count > 0 {
             let full = crate::frontmatter::merge(&fm, &new_body);
-            if std::fs::write(&p, full).is_ok() {
+            if crate::notes::write_atomic(&p, &full).is_ok() {
                 changed += 1;
             }
         }
