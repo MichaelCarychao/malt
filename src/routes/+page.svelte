@@ -1069,47 +1069,30 @@
     pushToHistory("primary", path);
     selectedPath = path;
     focusedPane = "primary";
+    // A plain "open this note" means single-pane focus. Collapse any open
+    // secondary NOTE pane so you can't get stuck in a split you didn't
+    // ask for. (Cmd/Ctrl+click still opens a second pane deliberately; the
+    // Brew pane is an explicit AI session, so leave it alone.)
+    if (secondaryPath && !brewActive) {
+      secondaryPath = null;
+      secondaryHistory = { stack: [], idx: -1 };
+    }
     void scrollSelectedIntoView("nearest");
   }
 
-  // Strip Dropbox/Syncthing conflict suffixes from a stem to recover the
-  // canonical filename. Returns null if the name doesn't look like a
-  // conflict. Mirrors `is_conflict_filename` in notes.rs.
-  function canonicalNameFromConflict(path: string): string | null {
-    const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-    const dir = slash >= 0 ? path.slice(0, slash + 1) : "";
-    const base = slash >= 0 ? path.slice(slash + 1) : path;
-    if (!base.toLowerCase().endsWith(".md")) return null;
-    const stem = base.slice(0, -3);
-
-    // Syncthing: "name.sync-conflict-YYYYMMDD-HHMMSS-XXXXXXX"
-    const sync = stem.match(/^(.+?)\.sync-conflict-/i);
-    if (sync) return dir + sync[1] + ".md";
-
-    // Dropbox / generic parenthesized conflict marker near the end
-    const paren = stem.match(/^(.+?)\s*\([^)]*conflict[^)]*\)\s*$/i);
-    if (paren) return dir + paren[1] + ".md";
-
-    return null;
-  }
-
-  // List row click — bare opens in primary. Cmd/Ctrl+click opens in
-  // secondary. Bare click on a conflict file ALSO opens the canonical
-  // original in the secondary pane (if it exists) for side-by-side merge.
+  // List row click — a plain click ALWAYS opens the note in the primary
+  // editor, single-pane (openNote collapses any stray secondary split).
+  // Cmd/Ctrl+click is the deliberate gesture to open in the secondary pane.
+  // (We used to auto-open a sync-conflict file's original in the secondary
+  // pane here; that surprised people — a plain click would unexpectedly
+  // split the view for certain notes — so it's gone. The ⚠ badge still
+  // flags conflicts; Cmd+click the original to compare.)
   function handleNoteClick(e: MouseEvent, path: string) {
     if (e.metaKey || e.ctrlKey) {
       openInSecondary(path);
       return;
     }
     openNote(path);
-    const note = allNotes.find((n) => n.path === path);
-    if (note?.is_conflict) {
-      const canonical = canonicalNameFromConflict(path);
-      if (canonical && allNotes.some((n) => n.path === canonical) && canonical !== path) {
-        openInSecondary(canonical);
-        focusedPane = "primary"; // keep focus on the conflict for editing
-      }
-    }
   }
 
   function handleNoteContextMenu(e: MouseEvent, path: string) {

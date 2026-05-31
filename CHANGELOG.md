@@ -4,6 +4,16 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.7 — 2026-05-31
+
+- **A plain click on a note always opens it single-pane in the primary
+  editor.** Removed the surprise auto-split: clicking a sync-conflict file
+  used to auto-open its original in the second pane (no modifier needed,
+  only for some notes — so it read as an intermittent bug that split the
+  view). Gone. A plain click now also collapses any stray secondary pane,
+  so you can't get stuck in a split. Cmd/Ctrl+click still opens a second
+  pane deliberately; the ⚠ conflict badge still flags conflict files.
+
 ## 0.4.6 — 2026-05-31
 
 To-do list, batch 1 (quick wins).
