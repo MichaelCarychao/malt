@@ -13,7 +13,7 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
 const TICK: Duration = Duration::from_millis(500);
@@ -26,7 +26,15 @@ pub struct EmbedIndex {
     queue: Mutex<HashSet<PathBuf>>,
     db: Mutex<Connection>,
     model: Mutex<Option<TextEmbedding>>,
+    /// When the last model-load attempt failed. Used to back off retries
+    /// so a broken/offline model download doesn't re-attempt — and re-emit
+    /// the "indexing…" status — on every single enqueue (which made the
+    /// status pill flash on every keystroke via autosave re-embeds).
+    last_load_fail: Mutex<Option<Instant>>,
 }
+
+/// Don't re-attempt a failed model load more than once per this window.
+const LOAD_RETRY_BACKOFF: Duration = Duration::from_secs(120);
 
 #[derive(Serialize, Clone, Debug)]
 pub struct RelatedNote {
@@ -73,6 +81,7 @@ impl EmbedIndex {
             queue: Mutex::new(HashSet::new()),
             db: Mutex::new(conn),
             model: Mutex::new(None),
+            last_load_fail: Mutex::new(None),
         }))
     }
 
@@ -344,6 +353,18 @@ impl EmbedIndex {
         if m.is_some() {
             return true;
         }
+        // Back off after a recent failure. Without this, a broken/offline
+        // model download re-attempts on *every* enqueue — and every autosave
+        // enqueues — so the "indexing…" status pill flashed on each
+        // keystroke. Skip silently (no emit) until the backoff elapses.
+        {
+            let fail = self.last_load_fail.lock().expect("load-fail lock");
+            if let Some(t) = *fail {
+                if t.elapsed() < LOAD_RETRY_BACKOFF {
+                    return false;
+                }
+            }
+        }
         // Frontend listens for this — drives the "preparing semantic index…"
         // banner. Emit before the (potentially slow) first-call download.
         let _ = app_handle.emit("embedding_status", "loading");
@@ -352,11 +373,13 @@ impl EmbedIndex {
         ) {
             Ok(model) => {
                 *m = Some(model);
+                *self.last_load_fail.lock().expect("load-fail lock") = None;
                 let _ = app_handle.emit("embedding_status", "ready");
                 true
             }
             Err(e) => {
                 eprintln!("embeddings: model load failed: {e:?}");
+                *self.last_load_fail.lock().expect("load-fail lock") = Some(Instant::now());
                 let _ = app_handle.emit("embedding_status", "error");
                 false
             }

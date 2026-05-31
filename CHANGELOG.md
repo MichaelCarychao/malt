@@ -4,6 +4,22 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.6 — 2026-05-31
+
+To-do list, batch 1 (quick wins).
+
+- **`is:encrypted` report.** Lists every password-locked note (mirrors
+  the other `is:` lenses). Status badge + empty state + docs.
+- **Double-click a saved-search chip to edit it.** Same rename / delete /
+  reorder menu as right-click — handy on trackpads.
+- **No more "indexing…" flicker on every keystroke.** The embedding model
+  re-attempted loading on every autosave-triggered re-embed; if the model
+  couldn't load (offline / download not finished), that flashed the status
+  pill on each keystroke. Failed loads now back off (retry at most once
+  every 2 min) so a broken model stays quiet. (If you see this a lot, your
+  local embedding model isn't loading — semantic search / related /
+  near-dupes won't work until it does.)
+
 ## 0.4.5 — 2026-05-31
 
 Integration hardening — making malt safe to share a folder with another

@@ -609,13 +609,14 @@
   // text search. Each is an exact directive; `reportFor` maps the raw
   // query to a report kind (or null). Used to route performSearch, guard
   // note-creation in tryEnter, and label the status bar.
-  type ReportKind = "orphan" | "onthisday" | "duplicate";
+  type ReportKind = "orphan" | "onthisday" | "duplicate" | "encrypted";
   function reportFor(q: string): ReportKind | null {
     const t = q.trim().toLowerCase();
     if (t === "is:orphan" || t === "is:orphans") return "orphan";
     if (t === "is:onthisday") return "onthisday";
     if (t === "is:duplicate" || t === "is:duplicates" || t === "is:dupe" || t === "is:dupes")
       return "duplicate";
+    if (t === "is:encrypted" || t === "is:locked") return "encrypted";
     return null;
   }
   let specialReport = $derived(reportFor(query));
@@ -733,6 +734,12 @@
       // date math uses *local* time (matching how daily notes are
       // titled) and needs no backend round-trip.
       const results = computeOnThisDay(allNotes);
+      if (myGen === queryGen) rawResults = results;
+      return;
+    }
+    if (report === "encrypted") {
+      // The listing already knows which notes are encrypted; just filter.
+      const results = allNotes.filter((n) => n.is_encrypted);
       if (myGen === queryGen) rawResults = results;
       return;
     }
@@ -2483,13 +2490,14 @@
           class:drag-over={savedDragOverId === s.id && savedDragId !== s.id}
           onclick={() => activateSavedSearch(s)}
           oncontextmenu={(e) => openSavedSearchMenu(e, s)}
+          ondblclick={(e) => openSavedSearchMenu(e, s)}
           draggable={true}
           ondragstart={(e) => savedDragStart(e, s.id)}
           ondragover={(e) => savedDragOver(e, s.id)}
           ondragleave={() => savedDragLeave(s.id)}
           ondrop={(e) => void savedDrop(e, s.id)}
           ondragend={savedDragEnd}
-          title={`${s.query}${s.slot ? ` — Ctrl+${s.slot} · right-click for options · drag to reorder` : ""}`}
+          title={`${s.query}${s.slot ? ` — Ctrl+${s.slot} · double- or right-click to edit · drag to reorder` : ""}`}
           tabindex="-1"
         >
           <span class="saved-name">{s.name}</span>
@@ -2536,6 +2544,10 @@
         <span class="semantic-badge" title="Near-duplicates — notes with a near-identical twin (~0.9+ similarity)">near-dupes</span>
         <span class="sep">·</span>
         {notes.length} flagged
+      {:else if specialReport === "encrypted"}
+        <span class="semantic-badge" title="Encrypted notes — password-protected (AES-256-GCM)">🔒 encrypted</span>
+        <span class="sep">·</span>
+        {notes.length} locked
       {:else if query}
         {notes.length} match{notes.length === 1 ? "" : "es"}
       {:else}
@@ -2638,6 +2650,8 @@
         <li class="empty">Nothing from this calendar day in years past — yet. Check back as your archive grows.</li>
       {:else if notes.length === 0 && specialReport === "duplicate"}
         <li class="empty">No near-duplicates. (Needs the embedding model + a couple of indexed notes; very similar notes show up here.)</li>
+      {:else if notes.length === 0 && specialReport === "encrypted"}
+        <li class="empty">No encrypted notes. Right-click any note → Encrypt… to lock one.</li>
       {:else if notes.length === 0 && query}
         <li class="empty">No matches. Press Enter to create "{query}".</li>
       {/if}

@@ -95,6 +95,7 @@
     { keys: `is:orphan`,                action: "Report: notes with no links in or out (The Orphanage)", status: "live" },
     { keys: `is:onthisday`,             action: "Report: notes from this calendar day in years past",    status: "live" },
     { keys: `is:duplicate`,             action: "Report: notes with a near-identical twin (embeddings)",  status: "live" },
+    { keys: `is:encrypted`,             action: "Report: password-locked notes",                          status: "live" },
     { keys: `Enter (in search)`,       action: "Exact title → open; arrowed → open; else create new note", status: "live" },
     { keys: `Esc`,                     action: "Clear query + focus search (except in editor / modals)", status: "live" },
     { keys: `Tab (in search)`,         action: "Jump to editor",                              status: "live" },
