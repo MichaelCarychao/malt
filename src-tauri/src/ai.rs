@@ -460,6 +460,78 @@ where
     Ok(())
 }
 
+/// Raw streaming: send `prompt` as the sole user message with NO system
+/// prompt and NO scaffolding. Powers two-pane prompting, where the user's
+/// own notes ARE the prompt. Generous max_tokens since the prompt is a
+/// full instruction, not a short continuation.
+pub async fn stream_raw<F>(
+    api_key: &str,
+    model: &str,
+    prompt: &str,
+    mut on_text: F,
+) -> Result<(), String>
+where
+    F: FnMut(&str),
+{
+    let req = MessagesRequest {
+        model,
+        max_tokens: 2048,
+        system: None,
+        stream: Some(true),
+        messages: vec![Message {
+            role: "user",
+            content: prompt,
+        }],
+    };
+
+    let mut resp = streaming_client()
+        .post(API_URL)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .header("content-type", "application/json")
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| format!("network error: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body_text = resp.text().await.unwrap_or_default();
+        if let Ok(api_err) = serde_json::from_str::<ApiError>(&body_text) {
+            return Err(format!("{} ({})", api_err.error.message, status));
+        }
+        return Err(format!("HTTP {}: {}", status, body_text));
+    }
+
+    let mut buffer = String::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("chunk error: {e}"))?
+    {
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(end) = buffer.find("\n\n") {
+            let event = buffer[..end].to_string();
+            buffer.drain(..end + 2);
+            for line in event.lines() {
+                let Some(data) = line.strip_prefix("data: ") else {
+                    continue;
+                };
+                let Ok(parsed) = serde_json::from_str::<StreamEvent>(data) else {
+                    continue;
+                };
+                if let Some(delta) = parsed.delta {
+                    if let Some(text) = delta.text {
+                        on_text(&text);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 // ─── Multi-provider dispatch ────────────────────────────────────────
 //
 // All the functions above were originally hardwired to Anthropic.
@@ -571,6 +643,33 @@ where
         Some(&system_prompt),
         body,
         Some(1024),
+        |t| on_text(t),
+    )
+    .await
+}
+
+/// Multi-provider raw prompt streaming (no system / no scaffolding).
+pub async fn dispatch_stream_raw<F>(
+    provider: Provider,
+    api_key: &str,
+    model: &str,
+    prompt: &str,
+    mut on_text: F,
+) -> Result<(), String>
+where
+    F: FnMut(&str),
+{
+    if provider == Provider::Anthropic {
+        return stream_raw(api_key, model, prompt, on_text).await;
+    }
+    let base_url = provider.openai_base_url().ok_or("provider lacks base URL")?;
+    openai_compat::stream(
+        base_url,
+        api_key,
+        model,
+        None, // no system prompt — the notes are the whole prompt
+        prompt,
+        Some(2048),
         |t| on_text(t),
     )
     .await

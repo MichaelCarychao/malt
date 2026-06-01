@@ -92,6 +92,7 @@
     password = null,
     isEncrypted = false,
     onBrew,
+    getPrePrompt,
   }: {
     path: string | null;
     query?: string;
@@ -134,6 +135,11 @@
      * secondary pane in brew mode with the note body passed back to
      * the AI stream). */
     onBrew?: (noteBody: string) => void;
+    /** Two-pane prompting (Cmd/Ctrl+Shift+'). Returns the OTHER pane's
+     * content to prepend as a raw pre-prompt, or null when there's no
+     * second note pane open (feature no-ops). The parent supplies a
+     * pane-specific implementation. */
+    getPrePrompt?: () => Promise<string | null>;
   } = $props();
 
   // Right-click pill menu: floating div anchored at cursor.
@@ -693,6 +699,52 @@
     }
   }
 
+  // Two-pane prompting (Cmd/Ctrl+Shift+'): the OTHER pane's content is a
+  // raw pre-prompt prepended to THIS pane's content; the whole concatenation
+  // is sent with no scaffolding (see prompt_streaming). The response streams
+  // as ghost text appended at the end of this note. No-ops when no second
+  // note pane is open (getPrePrompt returns null).
+  async function runTwoPanePrompt(v: EditorView) {
+    if (!getPrePrompt) return;
+    let prePrompt: string | null = null;
+    try {
+      prePrompt = await getPrePrompt();
+    } catch {
+      return;
+    }
+    if (prePrompt == null || !view) return;
+    const myGen = ++fetchGen;
+    const focused = v.state.doc.toString();
+    const prompt = `${prePrompt}\n\n${focused}`.trim();
+    if (!prompt) return;
+    const pos = v.state.doc.length; // append the response at the end
+    v.dispatch({ effects: setGhost.of({ mode: "insert", text: "…", pos }) });
+
+    let accumulated = "";
+    let started = false;
+    const channel = new Channel<string>();
+    channel.onmessage = (chunk: string) => {
+      if (myGen !== fetchGen || !view) return;
+      accumulated += chunk;
+      const display = accumulated.replace(/\r/g, "").replace(/^\s+|\s+$/g, "");
+      if (display) {
+        started = true;
+        v.dispatch({ effects: setGhost.of({ mode: "insert", text: display, pos }) });
+      }
+    };
+    try {
+      await invoke("prompt_streaming", { prompt, onChunk: channel });
+      if (myGen === fetchGen && !started && view) {
+        v.dispatch({ effects: setGhost.of(null) });
+      }
+    } catch (e) {
+      if (myGen === fetchGen && view) {
+        v.dispatch({ effects: setGhost.of(null) });
+      }
+      console.error("prompt_streaming failed", e);
+    }
+  }
+
   // Strip wrappers some models add despite the prompt's "no fences / no
   // quotes" instruction. Runs once at accept-time (not per stream chunk),
   // so it works regardless of provider. Only unwraps when the ENTIRE
@@ -874,6 +926,24 @@
         key: "Mod-Shift-:",
         run: () => {
           openSteer();
+          return true;
+        },
+      },
+      {
+        // Mod-Shift-' = two-pane prompt: prepend the OTHER pane's content
+        // as a raw pre-prompt and stream the response here. Bind both the
+        // apostrophe and its shifted double-quote form (reported
+        // inconsistently across OS/browser).
+        key: "Mod-Shift-'",
+        run: (v) => {
+          void runTwoPanePrompt(v);
+          return true;
+        },
+      },
+      {
+        key: 'Mod-Shift-"',
+        run: (v) => {
+          void runTwoPanePrompt(v);
           return true;
         },
       },

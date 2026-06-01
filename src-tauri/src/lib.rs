@@ -784,6 +784,29 @@ async fn brew_streaming(
     .await
 }
 
+/// Two-pane prompting: stream a completion for a RAW prompt — the
+/// caller-concatenated editor contents — with no system prompt and no
+/// scaffolding. The frontend builds `prompt` as [other pane] + [focused
+/// pane], so notes act as reusable pre-prompts.
+#[tauri::command]
+async fn prompt_streaming(
+    prompt: String,
+    on_chunk: tauri::ipc::Channel<String>,
+) -> Result<(), String> {
+    if prompt.trim().is_empty() {
+        return Ok(());
+    }
+    let cfg = config::load();
+    let provider = cfg.active_provider;
+    let key = secrets::get_api_key_for(provider.id())
+        .map_err(|e| format!("no API key for {}: {e:?}", provider.label()))?;
+    let model = cfg.model_for(provider);
+    ai::dispatch_stream_raw(provider, &key, &model, &prompt, |text| {
+        let _ = on_chunk.send(text.to_string());
+    })
+    .await
+}
+
 // ─── Prompts management ────────────────────────────────────────────
 
 #[tauri::command]
@@ -1413,6 +1436,7 @@ pub fn run() {
             complete_text_streaming,
             rewrite_text_streaming,
             brew_streaming,
+            prompt_streaming,
             list_prompts,
             set_prompt,
             reset_prompt,

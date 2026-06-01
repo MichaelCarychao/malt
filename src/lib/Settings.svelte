@@ -110,6 +110,7 @@
     { keys: `${mod}+; (with selection)`,     action: "AI rewrite selection — unpack, avoid clichés",    status: "live" },
     { keys: `${mod}+; (re-press)`,           action: "Re-roll the current ghost suggestion",             status: "live" },
     { keys: `${mod}+${shift}+; (in editor)`, action: "Steer the AI — add a one-line direction note",     status: "live" },
+    { keys: `${mod}+${shift}+' (split)`,     action: "Two-pane prompt — other pane is a raw pre-prompt for this one", status: "live" },
     { keys: `${mod}+Enter / Tab / Arrows / Click`, action: "Accept ghost completion",                    status: "live" },
     { keys: `Esc (in editor)`,               action: "Decline completion (or vim normal mode)",          status: "live" },
   ];

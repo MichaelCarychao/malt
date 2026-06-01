@@ -4,6 +4,16 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.12 — 2026-05-31
+
+- **Two-pane prompting (Cmd/Ctrl+Shift+').** With the split open, this
+  sends the OTHER pane's content as a raw pre-prompt *before* the focused
+  pane's content — concatenated, with **no system prompt or scaffolding**,
+  just the two editors' text — and streams the reply as ghost text into
+  the focused note (Tab/Enter to keep, Esc to drop). Notes become reusable
+  pre-prompts: keep instructions in one pane, your material in the other.
+  Works across all AI providers; no-ops when there's no second note pane.
+
 ## 0.4.11 — 2026-05-31
 
 - **First-line `# H1` becomes the note's display name.** When a note

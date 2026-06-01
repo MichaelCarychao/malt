@@ -1337,6 +1337,28 @@
     return found?.display_title || found?.title || path.split(/[\\/]/).pop() || path;
   }
 
+  /** Two-pane prompting: the "pre-prompt" for a pane is the OTHER pane's
+   * note content (flushed to disk, read back live). Null when there's no
+   * second NOTE pane open (no split, or the other pane is the Brew pane,
+   * or it's an encrypted note we can't read). The Editor prepends this to
+   * its own content and sends the lot raw. */
+  async function getPrePromptFor(pane: "primary" | "secondary"): Promise<string | null> {
+    if (brewActive) return null;
+    const otherPath = pane === "primary" ? secondaryPath : selectedPath;
+    if (!otherPath) return null;
+    try {
+      await flushAllEditors();
+      if (allNotes.find((n) => n.path === otherPath)?.is_encrypted) {
+        const pw = unlockedPasswords.get(otherPath);
+        if (!pw) return null; // locked — can't use as a pre-prompt
+        return await invoke<string>("read_encrypted_note", { path: otherPath, password: pw });
+      }
+      return await invoke<string>("read_note", { path: otherPath });
+    } catch {
+      return null;
+    }
+  }
+
   function handleEditorCount(words: number, chars: number) {
     editorWords = words;
     editorChars = chars;
@@ -2807,6 +2829,7 @@
               isEncrypted={selectedPath ? !!allNotes.find((n) => n.path === selectedPath)?.is_encrypted : false}
               password={selectedPath ? unlockedPasswords.get(selectedPath) ?? null : null}
               onBrew={openBrewForPrimary}
+              getPrePrompt={() => getPrePromptFor("primary")}
             />
           </div>
           {#if secondaryPath || brewActive}
@@ -2867,6 +2890,7 @@
                   isEncrypted={secondaryPath ? !!allNotes.find((n) => n.path === secondaryPath)?.is_encrypted : false}
                   password={secondaryPath ? unlockedPasswords.get(secondaryPath) ?? null : null}
                   onBrew={openBrewForSecondary}
+                  getPrePrompt={() => getPrePromptFor("secondary")}
                 />
               {/if}
             </div>

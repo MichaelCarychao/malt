@@ -141,6 +141,13 @@ export const TIPS: Tip[] = [
       "⌘; in the editor continues from your cursor. Select text first and ⌘; rewrites that selection. Re-press to re-roll.",
   },
   {
+    id: "ai-two-pane-prompt",
+    category: "ai",
+    headline: "Turn a note into a reusable AI pre-prompt",
+    story:
+      "Open a second pane (⌘-click a note), put instructions in one pane and your material in the other, then ⌘⇧'. malt sends the OTHER pane + this one as the whole prompt — no scaffolding — and streams the reply here. Notes become pre-prompts.",
+  },
+  {
     id: "ai-steer",
     category: "ai",
     headline: "Aim the AI before it writes",
