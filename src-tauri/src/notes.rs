@@ -43,6 +43,12 @@ use crate::tagger::Tagger;
 pub struct NoteSummary {
     pub path: String,
     pub title: String,
+    /// Display name for the sidebar + pane title bars: the note's first-line
+    /// `# H1` heading when present, else the filename (`title`). The
+    /// filename is still the note's identity (wikilinks, rename, history) —
+    /// this is purely what's shown.
+    #[serde(default)]
+    pub display_title: String,
     pub snippet: String,
     pub modified: u64,
     #[serde(default)]
@@ -122,6 +128,27 @@ fn snippet_from(body: &str) -> String {
         .chars()
         .take(80)
         .collect()
+}
+
+/// The note's display name: the text of a first-line `# H1` heading when
+/// the first non-empty body line is one, else None (caller falls back to
+/// the filename). Requires `# ` (single hash + space) so an inline `#tag`
+/// or an `## H2` doesn't count. Strips an optional ATX closing `#`.
+fn h1_title(body: &str) -> Option<String> {
+    for line in body.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let rest = t.strip_prefix("# ")?; // first non-empty line must be H1
+        let title = rest.trim().trim_end_matches('#').trim();
+        return if title.is_empty() {
+            None
+        } else {
+            Some(title.to_string())
+        };
+    }
+    None
 }
 
 fn is_word_char(c: char) -> bool {
@@ -362,8 +389,8 @@ pub fn list_notes() -> Vec<NoteSummary> {
         // Encrypted notes contribute only filename to the listing. No
         // snippet, no tags, no emptiness signal — none of that is
         // meaningful (or knowable) without the password.
-        let (snippet, tags, is_empty) = if is_encrypted {
-            (String::from("(encrypted)"), Vec::new(), false)
+        let (snippet, tags, is_empty, display_title) = if is_encrypted {
+            (String::from("(encrypted)"), Vec::new(), false, title.clone())
         } else {
             let (_fm, body) = crate::frontmatter::split(&content);
             let snip = snippet_from(body);
@@ -373,7 +400,9 @@ pub fn list_notes() -> Vec<NoteSummary> {
             // content-wise.
             let stripped = crate::tags::strip_tags_for_ai(body);
             let empty = stripped.trim().is_empty();
-            (snip, t, empty)
+            // First-line `# H1` becomes the display name; else the filename.
+            let disp = h1_title(body).unwrap_or_else(|| title.clone());
+            (snip, t, empty, disp)
         };
         let modified = entry
             .metadata()
@@ -386,6 +415,7 @@ pub fn list_notes() -> Vec<NoteSummary> {
         notes.push(NoteSummary {
             path: path.to_string_lossy().to_string(),
             title,
+            display_title,
             snippet,
             modified,
             tags,

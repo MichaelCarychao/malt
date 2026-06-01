@@ -73,8 +73,8 @@ fn search_notes(
         .into_iter()
         .filter_map(|p| {
             let mut base = by_path.get(&p).cloned()?;
-            // Title matches use the existing title text.
-            base.title_matches = notes::find_matches(&base.title, &terms);
+            // Title matches highlight the *displayed* name (H1 or filename).
+            base.title_matches = notes::find_matches(&base.display_title, &terms);
             // Re-read body to build a match-context snippet.
             let content = std::fs::read_to_string(&p).unwrap_or_default();
             let (_fm, body) = frontmatter::split(&content);

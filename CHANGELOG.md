@@ -4,6 +4,15 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.11 — 2026-05-31
+
+- **First-line `# H1` becomes the note's display name.** When a note
+  starts with a top-level heading, the sidebar card, the split-pane title
+  bars, and the window title show that heading instead of the filename.
+  Search-match highlighting follows the displayed name. The filename is
+  still the note's identity — wikilinks, rename, and history are
+  unchanged — so this is purely what you read.
+
 ## 0.4.10 — 2026-05-31
 
 To-do list, batch 4 (the last two) — finishes the list.

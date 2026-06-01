@@ -20,6 +20,9 @@
   type Note = {
     path: string;
     title: string;
+    /** Display name: first-line `# H1` if present, else the filename
+     * (`title`). Identity (wikilinks, rename, history) still uses `title`. */
+    display_title?: string;
     snippet: string;
     modified: number;
     tags?: string[];
@@ -1324,6 +1327,16 @@
     return found?.title ?? path.split(/[\\/]/).pop() ?? path;
   }
 
+  /** Like getTitleForPath but prefers the note's display name (first-line
+   * `# H1`). Use for what the user *reads* — pane titles, window title.
+   * Identity-bound callers (rename, wikilinks, history) keep using
+   * getTitleForPath (the filename). */
+  function getDisplayTitle(path: string | null): string {
+    if (!path) return "";
+    const found = allNotes.find((n) => n.path === path) ?? notes.find((n) => n.path === path);
+    return found?.display_title || found?.title || path.split(/[\\/]/).pop() || path;
+  }
+
   function handleEditorCount(words: number, chars: number) {
     editorWords = words;
     editorChars = chars;
@@ -2462,7 +2475,7 @@
   $effect(() => {
     const p = selectedPath;
     persistLastOpen(p);
-    void setWindowTitle(p ? getTitleForPath(p) : null);
+    void setWindowTitle(p ? getDisplayTitle(p) : null);
   });
 
   let unlistenEmbedStatus: UnlistenFn | null = null;
@@ -2712,7 +2725,7 @@
             {#if note.is_conflict}<span class="conflict-badge" title="Sync conflict — manually merge with the original">⚠</span>{/if}
             {#if note.is_encrypted}<span class="encrypted-badge" title={unlockedPasswords.has(note.path) ? "Unlocked this session" : "Encrypted — click to unlock"}>{unlockedPasswords.has(note.path) ? "🔓" : "🔒"}</span>{/if}
             {#each flairIcons(note) as ic}<span class="flair-icon" style={flairAccent(note) ? `color: ${flairAccent(note)}` : ""}>{ic}</span>{/each}
-            {@html highlight(note.title, note.title_matches)}
+            {@html highlight(note.display_title ?? note.title, note.title_matches)}
           </span>
           <span class="snippet">{@html highlight(note.snippet, note.snippet_matches)}</span>
           <span class="modified">{formatModified(note.modified)}</span>
@@ -2772,7 +2785,7 @@
                     e.stopPropagation();
                     if (selectedPath) void openRename(selectedPath);
                   }}
-                >{getTitleForPath(selectedPath)}</span>
+                >{getDisplayTitle(selectedPath)}</span>
               </div>
             {/if}
             <Editor
@@ -2819,7 +2832,7 @@
                       e.stopPropagation();
                       if (secondaryPath) void openRename(secondaryPath);
                     }}
-                  >{getTitleForPath(secondaryPath)}</span>
+                  >{getDisplayTitle(secondaryPath)}</span>
                   <button
                     class="pane-close"
                     onclick={closeSecondary}
