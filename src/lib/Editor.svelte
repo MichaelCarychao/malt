@@ -714,8 +714,12 @@
     }
     if (prePrompt == null || !view) return;
     const myGen = ++fetchGen;
-    const focused = v.state.doc.toString();
-    const prompt = `${prePrompt}\n\n${focused}`.trim();
+    // Strip hashtags (+ the canonical tag line and wikilink brackets) from
+    // BOTH panes — same hygiene as the other AI paths — so the model never
+    // sees our #tag markup and can't echo or invent tags in the reply.
+    const focused = stripTagsForAI(v.state.doc.toString());
+    const pre = stripTagsForAI(prePrompt);
+    const prompt = `${pre}\n\n${focused}`.trim();
     if (!prompt) return;
     const pos = v.state.doc.length; // append the response at the end
     v.dispatch({ effects: setGhost.of({ mode: "insert", text: "…", pos }) });

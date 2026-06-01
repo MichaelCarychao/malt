@@ -4,6 +4,14 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.13 — 2026-05-31
+
+- **Two-pane prompting now strips tag markup before sending.** Both panes
+  are run through the same AI-hygiene pass as every other AI path
+  (drops `#hashtags` + the canonical tag line, unwraps `[[wikilinks]]`),
+  so the model never sees malt's markup and can't echo or hallucinate
+  `#tags` into the inserted reply. Still no prompt scaffolding otherwise.
+
 ## 0.4.12 — 2026-05-31
 
 - **Two-pane prompting (Cmd/Ctrl+Shift+').** With the split open, this
