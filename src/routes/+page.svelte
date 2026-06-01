@@ -2658,19 +2658,6 @@
           {/if}
         </button>
       {/if}
-      <span class="sep">·</span>
-      <span
-        class="status-dot api-dot"
-        class:on={hasApiKey}
-        title={hasApiKey ? "Anthropic API key configured" : "No Anthropic API key — click to set up"}
-        onclick={() => (settingsOpen = true)}
-        role="button"
-        tabindex="-1"
-      ></span>
-      {#if embedStatus === "loading"}
-        <span class="sep">·</span>
-        <span class="status-pill" title="Downloading semantic-search model (one-time, ~33MB)">indexing…</span>
-      {/if}
       {#if conflictCount > 0}
         <span class="sep">·</span>
         <button
@@ -2678,9 +2665,6 @@
           onclick={() => (query = "")}
           title={`${conflictCount} sync-conflict file${conflictCount === 1 ? "" : "s"} in your notes folder — open each to merge manually`}
         >⚠ {conflictCount} conflict{conflictCount === 1 ? "" : "s"}</button>
-      {/if}
-      {#if justSaved}
-        <span class="saved-flash" title="Note autosaved">saved</span>
       {/if}
     </span>
     <span class="sort">
@@ -2897,6 +2881,23 @@
         <div class="hint">Select a note on the left to open it. Edits autosave.</div>
       {/if}
     </div>
+  </div>
+  <div class="bottom-bar">
+    <span
+      class="status-dot api-dot"
+      class:on={hasApiKey}
+      title={hasApiKey ? "Anthropic API key configured — click for settings" : "No Anthropic API key — click to set up"}
+      onclick={() => (settingsOpen = true)}
+      role="button"
+      tabindex="-1"
+    ></span>
+    {#if embedStatus === "loading"}
+      <span class="status-pill" title="Downloading semantic-search model (one-time, ~33MB)">indexing…</span>
+    {/if}
+    <span class="bottom-bar-spacer"></span>
+    {#if justSaved}
+      <span class="saved-flash" title="Note autosaved">saved</span>
+    {/if}
   </div>
 </main>
 
@@ -3935,6 +3936,22 @@
   }
   .status-dot:hover {
     filter: brightness(1.3);
+  }
+  /* Slim bottom status bar: AI-key dot, indexing pill, saved flash. */
+  .bottom-bar {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 10px;
+    border-top: 1px solid #2a2a2a;
+    background: #161616;
+    min-height: 20px;
+    font-size: 11px;
+    color: #6a6a6a;
+  }
+  .bottom-bar-spacer {
+    flex: 1 1 auto;
   }
   .saved-flash {
     color: #6c6;

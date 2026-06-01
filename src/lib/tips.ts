@@ -257,6 +257,13 @@ export const TIPS: Tip[] = [
       "Click a tag pill in the editor to filter the sidebar to every note carrying it. Right-click a pill to add or remove from your starter vocabulary.",
   },
   {
+    id: "g-checkboxes",
+    category: "general",
+    headline: "Tick off a to-do without touching the keyboard",
+    story:
+      "Type `- [ ] thing` and malt renders a clickable checkbox; click it to toggle done. It's still plain markdown underneath (`- [x]`), so your lists travel with the file.",
+  },
+  {
     id: "t-flair",
     category: "tags",
     headline: "Give a tag its own color and icon",

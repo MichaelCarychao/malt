@@ -4,6 +4,18 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.10 — 2026-05-31
+
+To-do list, batch 4 (the last two) — finishes the list.
+
+- **Clickable task checkboxes.** `- [ ]` / `- [x]` markers (also `*`, `+`,
+  `1.` lists) render as checkboxes you can click to toggle. The cursor
+  reveals the raw `[ ]` when you're editing that line, and it's plain
+  markdown underneath — your task lists stay in the file.
+- **Bottom status bar.** The AI-key dot, "indexing…" pill, and "saved"
+  flash moved out of the top toolbar into a slim bar along the bottom of
+  the window, out of the way of the note count + sort controls.
+
 ## 0.4.9 — 2026-05-31
 
 To-do list, batch 3 (pinning + cross-vault move — shared right-click menu).

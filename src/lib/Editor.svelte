@@ -503,6 +503,49 @@
     }
   }
 
+  // Clickable markdown task checkbox. Replaces the `[ ]` / `[x]` marker
+  // (3 chars at `pos`) with a glyph; clicking flips the inner char in the
+  // doc — the raw markdown stays the source of truth. Self-contained: the
+  // widget wires its own mousedown so we don't have to thread events
+  // through the editor's other handlers.
+  class TaskCheckWidget extends WidgetType {
+    readonly checked: boolean;
+    readonly pos: number;
+    readonly view: EditorView;
+    constructor(checked: boolean, pos: number, view: EditorView) {
+      super();
+      this.checked = checked;
+      this.pos = pos;
+      this.view = view;
+    }
+    eq(other: TaskCheckWidget): boolean {
+      // View is stable per editor; only checked/pos affect rendering.
+      return other.checked === this.checked && other.pos === this.pos;
+    }
+    toDOM(): HTMLElement {
+      const span = document.createElement("span");
+      span.className = this.checked ? "cm-task-check checked" : "cm-task-check";
+      span.textContent = this.checked ? "☑" : "☐";
+      span.setAttribute("aria-hidden", "true");
+      span.title = "Toggle to-do";
+      span.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const cur = this.view.state.doc.sliceString(this.pos, this.pos + 3);
+        if (!/^\[[ xX]\]$/.test(cur)) return; // stale — bail rather than corrupt
+        const isChecked = /\[[xX]\]/.test(cur);
+        this.view.dispatch({
+          changes: { from: this.pos + 1, to: this.pos + 2, insert: isChecked ? " " : "x" },
+        });
+      });
+      return span;
+    }
+    ignoreEvent(): boolean {
+      // We handle our own mousedown; keep CM from also acting on it.
+      return true;
+    }
+  }
+
   function ghostStablePos(g: Ghost): number {
     return g.mode === "rewrite" ? g.from : g.pos;
   }
@@ -1226,6 +1269,60 @@
     if (view) view.dispatch({ effects: mdInlineRedraw.of() });
   }
 
+  // ----- Task checkboxes ------------------------------------------------
+  // Render markdown task markers (`- [ ]` / `- [x]`, also `*`/`+`/`1.`)
+  // as clickable checkboxes. The cursor-inside check keeps the raw `[ ]`
+  // editable when you're typing on that line.
+  const TASK_LINE_RE = /^(\s*(?:[-*+]|\d+\.)\s+)\[([ xX])\]/;
+  const taskCheckboxPlugin = ViewPlugin.fromClass(
+    class {
+      decorations: DecorationSet;
+      constructor(view: EditorView) {
+        this.decorations = this.compute(view);
+      }
+      update(u: ViewUpdate) {
+        if (u.docChanged || u.viewportChanged || u.selectionSet) {
+          this.decorations = this.compute(u.view);
+        }
+      }
+      compute(view: EditorView): DecorationSet {
+        const adds: { from: number; to: number; dec: Decoration }[] = [];
+        const sel = view.state.selection.main;
+        for (const { from, to } of view.visibleRanges) {
+          let pos = from;
+          while (pos <= to) {
+            const line = view.state.doc.lineAt(pos);
+            const m = TASK_LINE_RE.exec(line.text);
+            if (m) {
+              const bracketStart = line.from + m[1].length;
+              const bracketEnd = bracketStart + 3;
+              const checked = m[2].toLowerCase() === "x";
+              // Leave the raw marker visible/editable while the cursor is
+              // in it; otherwise swap in the checkbox widget.
+              const cursorInside = sel.from <= bracketEnd && sel.to >= bracketStart;
+              if (!cursorInside) {
+                adds.push({
+                  from: bracketStart,
+                  to: bracketEnd,
+                  dec: Decoration.replace({
+                    widget: new TaskCheckWidget(checked, bracketStart, view),
+                  }),
+                });
+              }
+            }
+            pos = line.to + 1;
+          }
+        }
+        const builder = new RangeSetBuilder<Decoration>();
+        for (const a of adds) builder.add(a.from, a.to, a.dec);
+        return builder.finish();
+      }
+    },
+    {
+      decorations: (p) => p.decorations,
+    },
+  );
+
   // ----- Hashtag plumbing ----------------------------------------------
   // Three ViewPlugins:
   //   - tagWatcher: extract current tags whenever the doc changes
@@ -1677,6 +1774,7 @@
       // already styles strong/em ranges, but we want our font-weight/style
       // and marker-hiding to win, so we hoist precedence.
       Prec.highest(mdInlinePlugin),
+      taskCheckboxPlugin,
       tagWatcher,
       tagPillPlugin,
       tagLineHider,
@@ -2170,6 +2268,18 @@
     color: #97b8d8 !important;
     padding: 0 3px;
     font-size: 92%;
+  }
+  /* Clickable task checkbox (replaces the `[ ]` / `[x]` marker). */
+  :global(.cm-task-check) {
+    cursor: pointer;
+    color: #7a8694;
+    user-select: none;
+  }
+  :global(.cm-task-check:hover) {
+    color: #aab4c0;
+  }
+  :global(.cm-task-check.checked) {
+    color: #7ed29b;
   }
   :global(.cm-hashtag-inline.cm-hashtag-adhoc) {
     background: rgba(220, 180, 100, 0.07);
