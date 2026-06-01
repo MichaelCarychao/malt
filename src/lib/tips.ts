@@ -96,6 +96,20 @@ export const TIPS: Tip[] = [
     story:
       "Double-click a note row to open the actions menu; pick Rename. All [[wikilinks]] pointing at the old name get rewritten atomically.",
   },
+  {
+    id: "g-pin",
+    category: "general",
+    headline: "Keep a note at the top no matter what",
+    story:
+      "Right-click a note → Pin to top. Pinned notes stay at the top of the list and stay visible even while a search filters everything else. Right-click → Unpin to release.",
+  },
+  {
+    id: "g-zen",
+    category: "general",
+    headline: "Hide everything but what I'm writing",
+    story:
+      "⌘⇧F toggles zen mode — the note list collapses so the editor fills the window. Press it again to bring the list back. Drag the list↔editor divider any time to resize.",
+  },
 
   // ── shortcuts ───────────────────────────────────────────────────
   {

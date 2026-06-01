@@ -4,6 +4,20 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.9 — 2026-05-31
+
+To-do list, batch 3 (pinning + cross-vault move — shared right-click menu).
+
+- **Pinned notes.** Right-click → *Pin to top*. Pinned notes bubble to the
+  top of the list and stay visible even when a text search would filter
+  them out (they're skipped in `~`/`is:` report result sets, where they'd
+  be noise). Subtle amber card tint + 📌 badge. Pins persist in config,
+  follow renames, and clear on delete.
+- **Move to another vault.** Right-click → *Move to vault → …* relocates
+  the `.md` file into another vault's folder (collision-safe). The note's
+  embedding is dropped from this vault and any pin cleared. Note: links
+  don't follow across vaults — they're siloed by design.
+
 ## 0.4.8 — 2026-05-31
 
 To-do list, batch 2 (layout + a vault-attach fix).

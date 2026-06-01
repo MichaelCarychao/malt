@@ -360,6 +360,10 @@
   // Zen mode (Cmd/Ctrl+Shift+F): hide the note list so the editor fills
   // the window. Toggled; nothing is lost, the sidebar just collapses.
   let zenMode = $state(false);
+  // Pinned note paths (absolute). Pinned notes bubble to the top of the
+  // list and stay visible during text searches.
+  let pinnedPaths = $state<string[]>([]);
+  let pinnedSet = $derived(new Set(pinnedPaths));
   let countMode = $state<"words" | "chars">(
     typeof localStorage !== "undefined" && localStorage.getItem("malt.countMode") === "chars"
       ? "chars"
@@ -617,7 +621,17 @@
     }
   }
 
-  let notes = $derived(applySort(rawResults, sortMode));
+  let notes = $derived.by(() => {
+    const sorted = applySort(rawResults, sortMode);
+    // Pinned notes bubble to the top — and stay visible even when a text
+    // search would filter them out. We DON'T inject pins into computed
+    // answer sets (semantic `~` / `is:` reports), where they'd be noise.
+    if (semanticMode || specialReport || pinnedPaths.length === 0) return sorted;
+    const pin = pinnedSet;
+    const top = applySort(allNotes.filter((n) => pin.has(n.path)), sortMode);
+    const rest = sorted.filter((n) => !pin.has(n.path));
+    return [...top, ...rest];
+  });
 
   // A leading ~ switches to semantic (embedding) search: "find what I
   // meant, not the words I used." Everything after the ~ is the concept.
@@ -1156,6 +1170,35 @@
   function rowMenuRename(path: string) {
     rowMenu = null;
     void openRename(path);
+  }
+
+  async function refreshPinned() {
+    try {
+      pinnedPaths = await invoke<string[]>("get_pinned");
+    } catch {
+      /* keep stale */
+    }
+  }
+  async function rowMenuTogglePin(path: string) {
+    rowMenu = null;
+    try {
+      pinnedPaths = await invoke<string[]>("toggle_pin", { path });
+    } catch (e) {
+      console.error("toggle_pin failed", e);
+    }
+  }
+  async function rowMenuMoveToVault(path: string, targetIndex: number) {
+    rowMenu = null;
+    try {
+      await flushAllEditors();
+      await invoke<string>("move_note_to_vault", { path, targetIndex });
+      // The note left this vault — drop it from the open panes, then refresh.
+      if (selectedPath === path) selectedPath = null;
+      if (secondaryPath === path) secondaryPath = null;
+      await Promise.all([refreshAllNotes(), performSearch(query), refreshPinned()]);
+    } catch (e) {
+      console.error("move_note_to_vault failed", e);
+    }
   }
 
   function rowMenuDelete(path: string) {
@@ -2426,7 +2469,7 @@
 
   onMount(async () => {
     unlisten = await listen("notes_changed", async () => {
-      await Promise.all([performSearch(query), refreshAllNotes(), refreshTagMeta()]);
+      await Promise.all([performSearch(query), refreshAllNotes(), refreshTagMeta(), refreshPinned()]);
     });
     unlistenEmbedStatus = await listen<string>("embedding_status", (e) => {
       const p = e.payload;
@@ -2469,6 +2512,7 @@
       refreshSecurityConfig(),
       refreshGeneralConfig(),
       refreshVaults(),
+      refreshPinned(),
     ]);
     // After list loads, try to restore the last-open note. The auto-select
     // effect would otherwise jump to whatever's first.
@@ -2665,6 +2709,7 @@
           class:empty-note={note.is_empty}
           class:encrypted={note.is_encrypted}
           class:flaired={flairAccent(note) !== ""}
+          class:pinned={pinnedSet.has(note.path)}
           style={flairAccent(note) ? `--flair-accent: ${flairAccent(note)}` : ""}
           onclick={(e) => handleNoteClick(e, note.path)}
           ondblclick={(e) => {
@@ -2679,6 +2724,7 @@
           oncontextmenu={(e) => handleNoteContextMenu(e, note.path)}
         >
           <span class="note-title">
+            {#if pinnedSet.has(note.path)}<span class="pin-badge" title="Pinned to top — right-click to unpin">📌</span>{/if}
             {#if note.is_conflict}<span class="conflict-badge" title="Sync conflict — manually merge with the original">⚠</span>{/if}
             {#if note.is_encrypted}<span class="encrypted-badge" title={unlockedPasswords.has(note.path) ? "Unlocked this session" : "Encrypted — click to unlock"}>{unlockedPasswords.has(note.path) ? "🔓" : "🔒"}</span>{/if}
             {#each flairIcons(note) as ic}<span class="flair-icon" style={flairAccent(note) ? `color: ${flairAccent(note)}` : ""}>{ic}</span>{/each}
@@ -2910,6 +2956,9 @@
   >
     <button class="row-menu-item" onclick={() => openNote(rowMenu!.path)}>Open</button>
     <button class="row-menu-item" onclick={() => openInSecondary(rowMenu!.path)}>Open in second pane</button>
+    <button class="row-menu-item" onclick={() => void rowMenuTogglePin(rowMenu!.path)}>
+      {pinnedSet.has(rowMenu!.path) ? "Unpin" : "Pin to top"}
+    </button>
     <div class="row-menu-sep"></div>
     <button class="row-menu-item" onclick={() => rowMenuRename(rowMenu!.path)}>Rename…</button>
     <button class="row-menu-item" onclick={() => void rowMenuDuplicate(rowMenu!.path)}>Duplicate</button>
@@ -2920,6 +2969,15 @@
       <button class="row-menu-item" onclick={() => rowMenuDecrypt(rowMenu!.path)}>Decrypt (remove password)…</button>
     {:else}
       <button class="row-menu-item" onclick={() => rowMenuEncrypt(rowMenu!.path)}>Encrypt…</button>
+    {/if}
+    {#if vaultsState.vaults.length > 1}
+      <div class="row-menu-sep"></div>
+      <div class="row-menu-label">Move to vault</div>
+      {#each vaultsState.vaults as v, i (v.path)}
+        {#if i !== vaultsState.active_index}
+          <button class="row-menu-item" onclick={() => void rowMenuMoveToVault(rowMenu!.path, i)}>→ {v.name}</button>
+        {/if}
+      {/each}
     {/if}
     <div class="row-menu-sep"></div>
     <button class="row-menu-item danger" onclick={() => rowMenuDelete(rowMenu!.path)}>Delete…</button>
@@ -3932,6 +3990,13 @@
     background: #2a2a2a;
     margin: 4px 0;
   }
+  .row-menu-label {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #6a6a6a;
+    padding: 2px 12px;
+  }
   .boot-splash {
     position: fixed;
     inset: 0;
@@ -4220,6 +4285,19 @@
   }
   .note.flaired:not(.selected) .note-title {
     color: var(--flair-accent);
+  }
+  /* Pinned notes: a subtle amber card tint + a 📌 badge. (Placed after the
+     flair rules so a pinned+flaired note reads as pinned.) */
+  .pin-badge {
+    font-size: 10px;
+    margin-right: 4px;
+    opacity: 0.85;
+  }
+  .note.pinned:not(.selected):not(.secondary) {
+    background: rgba(216, 184, 106, 0.08);
+  }
+  .note.pinned:not(.selected):not(.secondary):hover {
+    background: rgba(216, 184, 106, 0.14);
   }
   .note-title {
     color: #e0e0e0;

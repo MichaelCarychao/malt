@@ -49,6 +49,12 @@ pub struct Config {
     /// #story) read at a glance. The editor is deliberately left alone.
     #[serde(default)]
     pub tag_styles: Vec<TagStyle>,
+    /// Absolute paths of pinned notes. Pinned notes sort to the top of
+    /// the list and stay visible during text searches. Paths are unique
+    /// per vault, so a single global list is naturally vault-scoped (only
+    /// the active vault's paths match its notes).
+    #[serde(default)]
+    pub pinned_paths: Vec<String>,
 }
 
 /// A single tag → flair mapping. `tag` is the canonical tag name (no
@@ -85,7 +91,45 @@ impl Default for Config {
             provider_models: HashMap::new(),
             daily_note_tag: true,
             tag_styles: Vec::new(),
+            pinned_paths: Vec::new(),
         }
+    }
+}
+
+/// Toggle a note's pinned state; returns the new pinned list.
+pub fn toggle_pin(path: &str) -> std::io::Result<Vec<String>> {
+    let mut cfg = load();
+    if let Some(i) = cfg.pinned_paths.iter().position(|p| p == path) {
+        cfg.pinned_paths.remove(i);
+    } else {
+        cfg.pinned_paths.push(path.to_string());
+    }
+    save(&cfg)?;
+    Ok(cfg.pinned_paths)
+}
+
+/// Repoint a pin after a rename (keeps the pin on the renamed file).
+pub fn repoint_pin(old: &str, new: &str) {
+    let mut cfg = load();
+    let mut changed = false;
+    for p in cfg.pinned_paths.iter_mut() {
+        if p == old {
+            *p = new.to_string();
+            changed = true;
+        }
+    }
+    if changed {
+        let _ = save(&cfg);
+    }
+}
+
+/// Drop a pin (after delete or move-out-of-vault).
+pub fn remove_pin(path: &str) {
+    let mut cfg = load();
+    let before = cfg.pinned_paths.len();
+    cfg.pinned_paths.retain(|p| p != path);
+    if cfg.pinned_paths.len() != before {
+        let _ = save(&cfg);
     }
 }
 

@@ -417,6 +417,7 @@ fn delete_note(path: String, state: tauri::State<AppState>) -> Result<(), String
     }
     std::fs::remove_file(&p).map_err(|e| e.to_string())?;
     state.embeddings.forget_path(&path);
+    config::remove_pin(&path);
     Ok(())
 }
 
@@ -482,6 +483,8 @@ fn rename_note(
 
     // Rewire embeddings: same content, different path. Cheap point update.
     state.embeddings.rename_path(&path, &new_path_str);
+    // Keep a pin attached to the renamed file.
+    config::repoint_pin(&path, &new_path_str);
 
     // Notify the frontend immediately so it doesn't have to wait for the
     // debounced watcher event (file watcher fires too, but coalesces).
@@ -1162,6 +1165,71 @@ fn set_tag_styles(styles: Vec<config::TagStyle>) -> Result<Vec<config::TagStyle>
 }
 
 #[tauri::command]
+fn get_pinned() -> Vec<String> {
+    config::load().pinned_paths
+}
+
+#[tauri::command]
+fn toggle_pin(path: String) -> Result<Vec<String>, String> {
+    config::toggle_pin(&path).map_err(|e| e.to_string())
+}
+
+/// Move a note's `.md` file into another vault's folder. Cross-vault
+/// moves are inherently lossy for links (vaults are siloed by design), so
+/// this just relocates the file, drops the note's embedding from this
+/// vault, and clears any pin. Returns the new absolute path.
+#[tauri::command]
+fn move_note_to_vault(
+    path: String,
+    target_index: u32,
+    state: tauri::State<AppState>,
+) -> Result<String, String> {
+    let src = std::path::PathBuf::from(&path);
+    if !src.is_file() {
+        return Err(format!("file not found: {}", src.display()));
+    }
+    let cur_dir = notes::notes_dir();
+    if !src.starts_with(&cur_dir) {
+        return Err("refusing to move a file outside the active vault".into());
+    }
+    let vaults = vaults::load();
+    let target = vaults
+        .vaults
+        .get(target_index as usize)
+        .ok_or("target vault not found")?;
+    let target_dir = std::path::PathBuf::from(&target.path);
+    if target_dir == cur_dir {
+        return Err("that's the current vault".into());
+    }
+    std::fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
+    let file_name = src.file_name().ok_or("bad filename")?;
+    let stem = src
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("untitled")
+        .to_string();
+    // Collision-safe destination in the target vault.
+    let mut dest = target_dir.join(file_name);
+    let mut counter = 2;
+    while dest.exists() {
+        dest = target_dir.join(format!("{}-{}.md", stem, counter));
+        counter += 1;
+        if counter > 1000 {
+            return Err("too many name collisions in target vault".into());
+        }
+    }
+    // Move: atomic rename on the same volume, else copy + remove.
+    if std::fs::rename(&src, &dest).is_err() {
+        std::fs::copy(&src, &dest).map_err(|e| e.to_string())?;
+        std::fs::remove_file(&src).map_err(|e| e.to_string())?;
+    }
+    // The note left the active vault — drop its embedding + any pin.
+    state.embeddings.forget_path(&path);
+    config::remove_pin(&path);
+    Ok(dest.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 fn get_tag_vocabulary() -> Vec<String> {
     config::load().tag_vocabulary
 }
@@ -1337,6 +1405,9 @@ pub fn run() {
             set_tag_vocabulary,
             get_tag_styles,
             set_tag_styles,
+            get_pinned,
+            toggle_pin,
+            move_note_to_vault,
             list_all_tags,
             tag_cooccurrence,
             complete_text_streaming,
