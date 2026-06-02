@@ -1,0 +1,14 @@
+# malt is an unsupported personal project. We disable blank issues so people
+# are funneled to Discussions (for questions/ideas) or the bug-report form
+# (for reproducible bugs only). See SUPPORT.md.
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Questions, ideas & show-and-tell
+    url: https://github.com/MichaelCarychao/malt/discussions
+    about: malt is unsupported — ask questions and share setups in Discussions, not Issues. Other users (and sometimes me) help here.
+  - name: 📄 Read SUPPORT first
+    url: https://github.com/MichaelCarychao/malt/blob/main/SUPPORT.md
+    about: How this project is (and isn't) supported. Please read before filing anything.
+  - name: 🔒 Report a security vulnerability (private)
+    url: https://github.com/MichaelCarychao/malt/security/advisories/new
+    about: Disclose security issues privately here — never in a public issue.

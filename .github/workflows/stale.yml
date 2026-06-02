@@ -1,0 +1,42 @@
+name: Close stale issues and PRs
+
+# malt is an unsupported personal project. This bot keeps the issue/PR backlog
+# from accumulating obligations: inactive items get a "stale" label and are
+# then closed automatically. No offense meant — anyone can comment to reopen,
+# and forking is always welcome. Add the "keep" label to exempt an item.
+
+on:
+  schedule:
+    - cron: "0 12 * * *" # daily at noon UTC
+  workflow_dispatch: # allow a manual run from the Actions tab
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@v9
+        with:
+          days-before-stale: 30
+          days-before-close: 7
+          stale-issue-label: stale
+          stale-pr-label: stale
+          exempt-issue-labels: "keep,pinned,security"
+          exempt-pr-labels: "keep,pinned"
+          stale-issue-message: >
+            This issue has been inactive for 30 days. malt is an unsupported
+            personal project (see SUPPORT.md), so quiet issues are closed
+            automatically to keep the tracker honest. Comment to keep it open —
+            no offense meant.
+          close-issue-message: >
+            Closing due to inactivity. Comment to reopen, or carry the
+            conversation over to Discussions.
+          stale-pr-message: >
+            This pull request has been inactive for 30 days and will be closed
+            soon. Comment to keep it open. Forking is always welcome.
+          close-pr-message: >
+            Closing due to inactivity. Thanks for the contribution — reopen any
+            time if you pick it back up.

@@ -78,7 +78,12 @@ jobs:
           releaseName: "malt ${{ github.ref_name }}"
           releaseBody: "See CHANGELOG.md for what's in this release. Unsigned builds — Windows users may see a SmartScreen warning, macOS users right-click + Open the first time."
           releaseDraft: true
-          prerelease: true
+          # Must stay false: the in-app updater fetches /releases/latest/...,
+          # and GitHub's "latest" endpoint skips anything flagged prerelease,
+          # so a prerelease would 404 the updater even after you publish it.
+          # Releases are still unpublished until you manually publish the draft
+          # (releaseDraft: true above), so this does not make anything public.
+          prerelease: false
           # Emits latest.json next to the binaries — the manifest the in-app
           # updater fetches to detect new versions.
           includeUpdaterJson: true

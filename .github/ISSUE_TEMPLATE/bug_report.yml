@@ -1,0 +1,58 @@
+name: Bug report
+description: Report something broken (reproducible bugs only)
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Heads up:** malt is an unsupported personal project. Bug reports are
+        welcome, but a fix — or even a reply — isn't guaranteed (see
+        [SUPPORT.md](https://github.com/MichaelCarychao/malt/blob/main/SUPPORT.md)).
+        For **questions, ideas, or help**, please use
+        [Discussions](https://github.com/MichaelCarychao/malt/discussions) instead.
+  - type: input
+    id: version
+    attributes:
+      label: malt version
+      description: Settings → About
+      placeholder: "0.4.14"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux (built from source)
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Exact steps. A bug that can't be reproduced usually can't be fixed.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Expected vs. actual
+      description: What you expected to happen, and what actually happened.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and Discussions for this.
+          required: true
+        - label: I understand malt is unsupported and this may go unanswered.
+          required: true
