@@ -4,6 +4,17 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.18 — 2026-06-02
+
+- **"Reveal in file manager" now reliably opens the right vault's folder.**
+  Both the note row's *Reveal in file manager* and Settings' notes-folder
+  *reveal* button were spawning `explorer.exe` / `open` directly from the app
+  process, which was unreliable (often nothing appeared, especially for vaults
+  outside the default location). They now route through the opener plugin's
+  native shell APIs (Windows `SHOpenFolderAndSelectItems`, macOS Finder
+  reveal), so reveal lands you in the active vault's folder — with the note
+  selected — every time.
+
 ## 0.4.17 — 2026-06-02
 
 - **Losing focus also finalizes an in-progress tag.** Extends 0.4.16: a

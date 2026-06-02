@@ -857,44 +857,29 @@ fn set_notes_dir(path: Option<String>) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn reveal_notes_dir() -> Result<(), String> {
+fn reveal_notes_dir(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    // Open the active vault's folder in the OS file manager (showing the .md
+    // files inside). Routed through the opener plugin, which uses the native
+    // shell APIs rather than spawning `explorer.exe` / `open` from inside the
+    // app process — the latter was unreliable (the folder often never
+    // appeared, especially for vaults outside the default location).
     let dir = notes::notes_dir();
-    open_path_in_explorer(&dir).map_err(|e| e.to_string())
+    app.opener()
+        .open_path(dir.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn reveal_note(path: String) -> Result<(), String> {
-    // On Windows, `explorer /select,<path>` highlights the file in its
-    // parent folder. On macOS, `open -R <path>` does the same ("reveal in
-    // Finder"). On Linux there's no portable equivalent; we fall back to
-    // opening the parent dir.
-    let p = std::path::PathBuf::from(&path);
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("explorer")
-            .arg(format!("/select,{}", p.display()))
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg("-R")
-            .arg(&p)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let parent = p.parent().unwrap_or(&p);
-        std::process::Command::new("xdg-open")
-            .arg(parent)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        Ok(())
-    }
+fn reveal_note(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    // Reveal the note in its containing folder, selected. The opener plugin
+    // uses each platform's native reveal-and-select (Windows Shell COM
+    // SHOpenFolderAndSelectItems, macOS Finder reveal, Linux file-manager
+    // D-Bus) instead of a flaky `explorer /select,` / `open -R` spawn.
+    app.opener()
+        .reveal_item_in_dir(&path)
+        .map_err(|e| e.to_string())
 }
 
 // ── Vaults ────────────────────────────────────────────────────────
@@ -1318,22 +1303,6 @@ fn tag_cooccurrence(tag: String) -> Vec<TagCount> {
     out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
     out.truncate(8);
     out
-}
-
-fn open_path_in_explorer(path: &std::path::Path) -> std::io::Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("explorer").arg(path).spawn()?;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open").arg(path).spawn()?;
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        std::process::Command::new("xdg-open").arg(path).spawn()?;
-    }
-    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
