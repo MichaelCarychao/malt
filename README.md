@@ -10,7 +10,9 @@ without ever blocking the writer.
 malt is for people who want the speed of nvalt with the connective tissue of
 Roam/Obsidian/Tana, without locking their notes into a proprietary database.
 
-<!-- Drop a screenshot or GIF here — e.g. ![malt](docs/screenshot.png) -->
+![malt showing a sample worldbuilding vault — the note list, the editor with wikilinks and tags, and the backlinks / related-notes panel](docs/screenshot.png)
+
+<sub>*A sample vault with invented notes — your notes stay plain `.md` files in a folder you choose.*</sub>
 
 ---
 
