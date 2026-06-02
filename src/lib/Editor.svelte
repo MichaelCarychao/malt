@@ -413,7 +413,14 @@
         changes.push({ from: m.from, to: m.to, insert: "" });
       }
     }
-    view.dispatch({ changes });
+    // Bypass protectTagLine: removing a tag legitimately edits the hidden
+    // canonical line (where finalized tags live). Without the annotation the
+    // filter drops the change and the × button silently does nothing.
+    view.dispatch({ changes, annotations: internalDocRewrite.of(true) });
+    // That annotation also makes the autosave listener treat this as an
+    // internal echo and skip it, so schedule the save ourselves to persist
+    // the removal (the debounced pass also tidies the canonical line).
+    scheduleSave();
     pillMenu = null;
   }
 
@@ -1517,12 +1524,14 @@
     const range = canonicalTagLineRange(doc);
     if (!range) return true;
     const line = tr.startState.doc.lineAt(range.from);
-    // Protect the tag CHARACTERS only — not the separator newline before
-    // them, and never position 0. That fully prevents backspacing into
-    // the hidden tags from the end of the file, while leaving an
-    // editable anchor on a note whose only content is the tag line (a
-    // fresh daily note). Insertions adjacent are always fine.
-    return [line.from, line.to];
+    // Protect the tag line AND the separator newline before it — the exact
+    // span tagLineHider hides. Protecting only the tag chars left a gap: a
+    // backspace at that boundary deleted the (hidden) separator and collapsed
+    // the canonical line up into visible, editable text. canonicalTagLineRange
+    // already returns null when there's no content above, so a tag-only note
+    // still has an editable anchor and never reaches here.
+    const from = line.from > 0 ? line.from - 1 : line.from;
+    return [from, line.to];
   });
 
   // Make the hidden tag region atomic so arrow keys / word-motion skip
@@ -1730,7 +1739,15 @@
       const oldContent = view.state.doc.toString();
       const { body: newContent } = relocateTagsToBottom(oldContent);
       if (newContent !== oldContent) {
-        const cursor = Math.min(view.state.selection.main.head, newContent.length);
+        // Clamp the caret to the end of the VISIBLE body — never into or past
+        // the now-hidden canonical tag line. If it lands inside that region the
+        // next keystroke merges into a tag (#foo + #bar -> #foo#bar) and the
+        // broken line stops being recognized as canonical, re-exposing it.
+        const range = canonicalTagLineRange(newContent);
+        const maxCaret = range
+          ? newContent.slice(0, range.from).replace(/\s+$/, "").length
+          : newContent.length;
+        const cursor = Math.min(view.state.selection.main.head, maxCaret);
         view.dispatch({
           changes: { from: 0, to: oldContent.length, insert: newContent },
           selection: { anchor: cursor },

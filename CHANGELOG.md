@@ -4,6 +4,25 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.15 — 2026-06-02
+
+- **Finalized tags can no longer be corrupted by typing.** Three leaks in
+  the hidden canonical-tag-line machinery are fixed:
+  - Adding a second tag at the end of a note no longer merges it into the
+    first (`#foo` + `#bar` → `#foo#bar`). After tags relocate to the hidden
+    bottom line, the caret is now parked at the end of the *visible* body
+    instead of inside the hidden line, so the next keystroke can't land in
+    a tag.
+  - Backspacing at the end of a note can no longer "re-open" a finalized
+    tag into editable text. The protected span now covers the tag line *and*
+    its separator newline (matching exactly what's hidden), closing the
+    one-character gap that let a deletion collapse the line back into view.
+  - The pill's **×** remove button now works on tags that have already been
+    filed to the bottom line (previously the edit was silently dropped by
+    the tag-line guard). Removing a tag persists immediately.
+  - Net effect: once a tag exists it's only editable/removable via its pill,
+    never by editing the note text — as intended.
+
 ## 0.4.14 — 2026-05-31
 
 - **"Check for Updates" stops crying wolf.** When no GitHub release is
