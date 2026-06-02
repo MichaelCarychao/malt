@@ -4,6 +4,16 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.17 — 2026-06-02
+
+- **Losing focus also finalizes an in-progress tag.** Extends 0.4.16: a
+  half-typed `#tag` is now committed (filed to the canonical line, shown as a
+  pill, and saved) the moment the editor loses focus — whether you click to
+  another part of the app (search bar, a pill, a modal, the other pane) or
+  switch to a different application window entirely. So a tag finalizes on any
+  of: a following boundary, the caret moving off it, **or** focus leaving the
+  editor.
+
 ## 0.4.16 — 2026-06-02
 
 - **Hashtag pills stop forming mid-word.** A `#tag` is no longer finalized

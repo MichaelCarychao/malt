@@ -1736,6 +1736,49 @@
     }
   }
 
+  // Relocate inline #tags to the hidden canonical line at the bottom, then
+  // clamp the caret to the end of the visible body. When `force` is false a
+  // tag the caret is still inside is left in place (the user is mid-type — see
+  // v0.4.16); `force` finalizes every tag regardless, used on focus loss where
+  // the user is clearly done with it.
+  function relocateTags(force: boolean) {
+    if (!view) return;
+    const oldContent = view.state.doc.toString();
+    const caret = view.state.selection.main.head;
+    const typingTag =
+      !force && findInlineTags(oldContent).some((m) => isCaretInTag(m, caret));
+    const { body: newContent } = typingTag
+      ? { body: oldContent }
+      : relocateTagsToBottom(oldContent);
+    if (newContent === oldContent) return;
+    // Clamp the caret to the end of the VISIBLE body — never into or past the
+    // now-hidden canonical tag line, or the next keystroke could merge into a
+    // tag (#foo + #bar -> #foo#bar) and re-expose it.
+    const range = canonicalTagLineRange(newContent);
+    const maxCaret = range
+      ? newContent.slice(0, range.from).replace(/\s+$/, "").length
+      : newContent.length;
+    const cursor = Math.min(caret, maxCaret);
+    view.dispatch({
+      changes: { from: 0, to: oldContent.length, insert: newContent },
+      selection: { anchor: cursor },
+      // Legitimately rebuilds the canonical tag line, so bypass protectTagLine.
+      annotations: internalDocRewrite.of(true),
+    });
+  }
+
+  // Finalize any in-progress tag when the editor loses focus — whether to
+  // another part of the app or another window entirely. Deferred a microtask
+  // so we never dispatch into a view that navigation is tearing down (loadPath
+  // nulls `view` synchronously before this would run).
+  function finalizeTagsOnBlur() {
+    queueMicrotask(() => {
+      if (!view || !currentPath || externalConflict !== null) return;
+      relocateTags(true);
+      void flushSave(currentPath, view.state.doc.toString());
+    });
+  }
+
   function scheduleSave() {
     if (saveTimer) clearTimeout(saveTimer);
     if (!currentPath || !view) return;
@@ -1748,38 +1791,8 @@
         saveTimer = null;
         return;
       }
-      // Run the tag relocation transform before saving. If it changes the doc,
-      // dispatch a single replace so the user sees their inline hashtags
-      // migrate to the canonical bottom line (which is then hidden by the
-      // tagLineHider decoration). Cursor clamps to the new doc length.
-      const oldContent = view.state.doc.toString();
-      // Don't finalize a tag the user is still typing. If the caret is inside
-      // an inline hashtag, defer the whole relocate to a later save cycle (once
-      // they add a boundary or move off it) — otherwise autosave would file a
-      // half-typed tag to the hidden line mid-word and strand the rest.
-      const caret = view.state.selection.main.head;
-      const typingTag = findInlineTags(oldContent).some((m) => isCaretInTag(m, caret));
-      const { body: newContent } = typingTag
-        ? { body: oldContent }
-        : relocateTagsToBottom(oldContent);
-      if (newContent !== oldContent) {
-        // Clamp the caret to the end of the VISIBLE body — never into or past
-        // the now-hidden canonical tag line. If it lands inside that region the
-        // next keystroke merges into a tag (#foo + #bar -> #foo#bar) and the
-        // broken line stops being recognized as canonical, re-exposing it.
-        const range = canonicalTagLineRange(newContent);
-        const maxCaret = range
-          ? newContent.slice(0, range.from).replace(/\s+$/, "").length
-          : newContent.length;
-        const cursor = Math.min(view.state.selection.main.head, maxCaret);
-        view.dispatch({
-          changes: { from: 0, to: oldContent.length, insert: newContent },
-          selection: { anchor: cursor },
-          // This rewrite legitimately rebuilds the canonical tag line, so
-          // it must bypass the protect filter.
-          annotations: internalDocRewrite.of(true),
-        });
-      }
+      // Migrate inline hashtags to the hidden canonical line, then save.
+      relocateTags(false);
       void flushSave(p, view.state.doc.toString());
       saveTimer = null;
     }, SAVE_DEBOUNCE_MS) as unknown as number;
@@ -1833,6 +1846,14 @@
     const extensions = [
       completionKeymap,
       completionMouseHandlers,
+      // Editor lost focus (to another app pane, a pill, a modal, or another
+      // window) → finalize any tag the user was mid-typing.
+      EditorView.domEventHandlers({
+        blur: () => {
+          finalizeTagsOnBlur();
+          return false;
+        },
+      }),
       lineNumbers(),
       highlightActiveLineGutter(),
       highlightSpecialChars(),
@@ -2051,6 +2072,9 @@
     // Esc-clears-search behavior in +page.svelte.
     window.addEventListener("keydown", handlePillMenuEsc, true);
     window.addEventListener("keydown", handleLinkSuggestionsKey, true);
+    // App window lost focus (alt-tab to another application) → finalize any
+    // in-progress tag, same as an in-app blur.
+    window.addEventListener("blur", finalizeTagsOnBlur);
     unlistenNotes = await listen("notes_changed", handleExternalChange);
     // Allow the parent to await all pending saves before a rename / other
     // path-mutating op so we don't write stale content to a renamed file.
@@ -2068,6 +2092,7 @@
     window.removeEventListener("malt:markdown-toggle-changed", handleMdToggle);
     window.removeEventListener("keydown", handlePillMenuEsc, true);
     window.removeEventListener("keydown", handleLinkSuggestionsKey, true);
+    window.removeEventListener("blur", finalizeTagsOnBlur);
     unlistenNotes?.();
     unregisterFlusher?.();
     if (saveTimer && currentPath && view) {
