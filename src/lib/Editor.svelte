@@ -1411,21 +1411,37 @@
   //   - tagLineHider: hide the canonical tag line at the bottom (replace
   //     decoration so the cursor can't enter it either)
 
+  // A hashtag is "in progress" while the caret sits inside it or at its
+  // trailing edge — the user is still typing or editing it. An in-progress
+  // tag is NOT finalized (no pill in the row, no relocation to the canonical
+  // line) until a boundary follows it or the caret moves off it. `m` offsets
+  // and `caret` are both doc-absolute.
+  function isCaretInTag(m: { from: number; to: number }, caret: number): boolean {
+    return caret > m.from && caret <= m.to;
+  }
+
   const tagWatcher = ViewPlugin.fromClass(
     class {
       constructor(view: EditorView) {
         this.refresh(view);
       }
       update(u: ViewUpdate) {
-        if (u.docChanged) this.refresh(u.view);
+        // Refresh on selection moves too: leaving a half-typed tag should make
+        // its pill appear, and entering one should hide it again.
+        if (u.docChanged || u.selectionSet) this.refresh(u.view);
       }
       refresh(view: EditorView) {
         const doc = view.state.doc.toString();
+        const caret = view.state.selection.main.head;
         const canonical = findCanonicalTagLine(doc);
         const aboveText = canonical
           ? doc.split("\n").slice(0, canonical.lineIdx).join("\n")
           : doc;
-        const inline = findInlineTags(aboveText).map((m) => m.tag);
+        // Skip the tag the caret is still inside — no pill for a half-typed
+        // hashtag; it appears once a boundary follows or the caret moves away.
+        const inline = findInlineTags(aboveText)
+          .filter((m) => !isCaretInTag(m, caret))
+          .map((m) => m.tag);
         const set = new Set<string>([...(canonical?.tags ?? []), ...inline]);
         const next = [...set].sort();
         // Only assign if changed so we don't trigger unnecessary reactivity.
@@ -1737,7 +1753,15 @@
       // migrate to the canonical bottom line (which is then hidden by the
       // tagLineHider decoration). Cursor clamps to the new doc length.
       const oldContent = view.state.doc.toString();
-      const { body: newContent } = relocateTagsToBottom(oldContent);
+      // Don't finalize a tag the user is still typing. If the caret is inside
+      // an inline hashtag, defer the whole relocate to a later save cycle (once
+      // they add a boundary or move off it) — otherwise autosave would file a
+      // half-typed tag to the hidden line mid-word and strand the rest.
+      const caret = view.state.selection.main.head;
+      const typingTag = findInlineTags(oldContent).some((m) => isCaretInTag(m, caret));
+      const { body: newContent } = typingTag
+        ? { body: oldContent }
+        : relocateTagsToBottom(oldContent);
       if (newContent !== oldContent) {
         // Clamp the caret to the end of the VISIBLE body — never into or past
         // the now-hidden canonical tag line. If it lands inside that region the

@@ -4,6 +4,17 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.16 — 2026-06-02
+
+- **Hashtag pills stop forming mid-word.** A `#tag` is no longer finalized
+  while you're still typing it. The pill row and the relocate-to-bottom pass
+  now treat a hashtag as "in progress" whenever the caret is inside it or at
+  its trailing edge, and only commit it once a boundary follows (a space,
+  newline) **or the caret moves off it**. Previously a well-timed autosave
+  could file a half-typed tag (`#app`) to the hidden line, jump the caret to
+  the body, and strand the rest of the word. Inline tag coloring still updates
+  live as typing feedback.
+
 ## 0.4.15 — 2026-06-02
 
 - **Finalized tags can no longer be corrupted by typing.** Three leaks in
