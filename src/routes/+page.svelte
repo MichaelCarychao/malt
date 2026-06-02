@@ -461,6 +461,10 @@
     | { kind: "idle" }
     | { kind: "checking" }
     | { kind: "up_to_date" }
+    // No GitHub release is published yet (only drafts), so /releases/latest
+    // 404s and there's no manifest to fetch. Benign — distinct from a real
+    // error so we can say so calmly instead of flashing a failure.
+    | { kind: "no_release" }
     | { kind: "available"; version: string; notes: string }
     | { kind: "downloading"; progress: number }
     | { kind: "installing" }
@@ -2149,7 +2153,21 @@
         }
       }
     } catch (e) {
-      updateState = { kind: "error", message: String(e) };
+      const msg = String(e);
+      // The most common "failure" is benign: no published GitHub release
+      // yet (drafts only), so `/releases/latest` 404s and the plugin can't
+      // fetch a valid release manifest. Surface that calmly, not as a red
+      // error. Genuine failures (offline, GitHub down) still show as errors.
+      if (/valid release json|releases\/latest|404|not found/i.test(msg)) {
+        updateState = { kind: "no_release" };
+        if (opts.silent) {
+          setTimeout(() => {
+            if (updateState.kind === "no_release") updateState = { kind: "idle" };
+          }, 4000);
+        }
+        return;
+      }
+      updateState = { kind: "error", message: msg };
       // Don't pester on background failures (offline, GitHub down, etc.).
       if (opts.silent) {
         setTimeout(() => {
@@ -2944,6 +2962,7 @@
   updateStatusLabel={
     updateState.kind === "checking" ? "checking…" :
     updateState.kind === "up_to_date" ? "you're on the latest version" :
+    updateState.kind === "no_release" ? "no published release yet — you're on the newest build" :
     updateState.kind === "available" ? `v${updateState.version} available — see toast` :
     updateState.kind === "downloading" ? `downloading… ${updateState.progress}%` :
     updateState.kind === "installing" ? "installing — restart imminent" :

@@ -4,6 +4,15 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.14 — 2026-05-31
+
+- **"Check for Updates" stops crying wolf.** When no GitHub release is
+  published yet (drafts only) the updater can't fetch a manifest — that's
+  expected, not a failure. It now reports *"no published release yet —
+  you're on the newest build"* instead of a red "Could not fetch a valid
+  release JSON" error. Real failures (offline, GitHub down) still show as
+  errors. Updates will work normally once a release is published.
+
 ## 0.4.13 — 2026-05-31
 
 - **Two-pane prompting now strips tag markup before sending.** Both panes
