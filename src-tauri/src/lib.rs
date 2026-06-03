@@ -43,50 +43,60 @@ fn get_notes_dir() -> String {
 }
 
 #[tauri::command]
-fn search_notes(
+async fn search_notes(
     query: String,
-    state: tauri::State<AppState>,
+    state: tauri::State<'_, AppState>,
 ) -> Result<Vec<notes::NoteSummary>, String> {
     if query.trim().is_empty() {
-        return Ok(notes::list_notes());
+        // Still a full-vault disk read; keep it off the IPC thread too.
+        return tauri::async_runtime::spawn_blocking(notes::list_notes)
+            .await
+            .map_err(|e| e.to_string());
     }
-    let paths = state
-        .index
-        .search(&query, 500)
-        .map_err(|e| e.to_string())?;
-    let by_path: HashMap<String, notes::NoteSummary> = notes::list_notes()
-        .into_iter()
-        .map(|n| (n.path.clone(), n))
-        .collect();
+    // The query reads the whole vault from disk twice (list_notes + per-hit
+    // body re-read) plus runs the tantivy search. That's all blocking I/O —
+    // move it onto a blocking worker so the IPC thread never stalls. State
+    // can't cross into the closure, so clone the Arc the work needs first.
+    let index = state.index.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = index.search(&query, 500).map_err(|e| e.to_string())?;
+        let by_path: HashMap<String, notes::NoteSummary> = notes::list_notes()
+            .into_iter()
+            .map(|n| (n.path.clone(), n))
+            .collect();
 
-    // Highlight only bare text terms — operator tokens (tag:foo, modified:<7d)
-    // shouldn't try to match against note bodies as substrings.
-    let terms: Vec<String> = query
-        .split_whitespace()
-        .filter(|t| !t.is_empty())
-        .map(|t| t.trim_start_matches('-'))
-        .filter(|t| !t.contains(':'))
-        .map(|t| t.to_lowercase())
-        .collect();
+        // Highlight only bare text terms — operator tokens (tag:foo,
+        // modified:<7d) shouldn't try to match against note bodies as
+        // substrings.
+        let terms: Vec<String> = query
+            .split_whitespace()
+            .filter(|t| !t.is_empty())
+            .map(|t| t.trim_start_matches('-'))
+            .filter(|t| !t.contains(':'))
+            .map(|t| t.to_lowercase())
+            .collect();
 
-    Ok(paths
-        .into_iter()
-        .filter_map(|p| {
-            let mut base = by_path.get(&p).cloned()?;
-            // Title matches highlight the *displayed* name (H1 or filename).
-            base.title_matches = notes::find_matches(&base.display_title, &terms);
-            // Re-read body to build a match-context snippet.
-            let content = std::fs::read_to_string(&p).unwrap_or_default();
-            let (_fm, body) = frontmatter::split(&content);
-            let (snippet, snippet_matches) = notes::snippet_around_match(body, &terms, 100);
-            // If no match found in body, keep the original first-line snippet.
-            if !snippet_matches.is_empty() {
-                base.snippet = snippet;
-                base.snippet_matches = snippet_matches;
-            }
-            Some(base)
-        })
-        .collect())
+        Ok(paths
+            .into_iter()
+            .filter_map(|p| {
+                let mut base = by_path.get(&p).cloned()?;
+                // Title matches highlight the *displayed* name (H1 or filename).
+                base.title_matches = notes::find_matches(&base.display_title, &terms);
+                // Re-read body to build a match-context snippet.
+                let content = std::fs::read_to_string(&p).unwrap_or_default();
+                let (_fm, body) = frontmatter::split(&content);
+                let (snippet, snippet_matches) = notes::snippet_around_match(body, &terms, 100);
+                // If no match found in body, keep the original first-line snippet.
+                if !snippet_matches.is_empty() {
+                    base.snippet = snippet;
+                    base.snippet_matches = snippet_matches;
+                }
+                Some(base)
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -101,6 +111,14 @@ fn save_note(
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
     notes::write_atomic(&path, &content).map_err(|e| e.to_string())?;
+    // Update the search index synchronously so the edit is searchable
+    // immediately and doesn't depend on the debounced watcher (which can
+    // drop or coalesce events). Log on failure rather than failing the save
+    // — the note is already safely on disk, and the watcher rebuild is a
+    // backstop.
+    if let Err(e) = state.index.upsert(&path) {
+        eprintln!("save_note: index upsert failed for {path}: {e}");
+    }
     // Re-embed the changed file. Hash check inside the worker skips no-ops.
     state
         .embeddings
@@ -147,6 +165,12 @@ fn save_encrypted_note(
     let prior = std::fs::read_to_string(&path).unwrap_or_default();
     let envelope = encryption::encrypt_reusing_salt(&content, &password, &prior)?;
     notes::write_atomic(&path, &envelope).map_err(|e| e.to_string())?;
+    // Reindex now: upsert re-reads the file, sees the MALT-ENC envelope, and
+    // reindexes title-only — dropping the prior plaintext body from search
+    // immediately rather than leaving it exposed until the watcher fires.
+    if let Err(e) = state.index.upsert(&path) {
+        eprintln!("save_encrypted_note: index upsert failed for {path}: {e}");
+    }
     // Re-enqueue for embedding so the index drops the prior body
     // representation (embedding worker will see encrypted content + skip
     // it via the per-path is-encrypted check it inherits from the
@@ -168,6 +192,10 @@ fn decrypt_existing_note(
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let plaintext = encryption::decrypt(&content, &password)?;
     notes::write_atomic(&path, &plaintext).map_err(|e| e.to_string())?;
+    // Now plaintext on disk — reindex so the body becomes searchable again.
+    if let Err(e) = state.index.upsert(&path) {
+        eprintln!("decrypt_existing_note: index upsert failed for {path}: {e}");
+    }
     state
         .embeddings
         .enqueue_path(std::path::PathBuf::from(&path));
@@ -194,6 +222,12 @@ fn change_note_password(
     };
     let envelope = encryption::encrypt(&plaintext, &new_password)?;
     notes::write_atomic(&path, &envelope).map_err(|e| e.to_string())?;
+    // Result is an encrypted envelope; reindex so the search index reflects
+    // encrypted (title-only) state — important when setting a password on a
+    // previously-plain note, so its body stops showing up in results.
+    if let Err(e) = state.index.upsert(&path) {
+        eprintln!("change_note_password: index upsert failed for {path}: {e}");
+    }
     state
         .embeddings
         .enqueue_path(std::path::PathBuf::from(&path));
@@ -323,14 +357,22 @@ async fn suggest_wikilinks_ai(
 }
 
 #[tauri::command]
-fn find_related(
+async fn find_related(
     path: String,
-    state: tauri::State<AppState>,
-) -> Vec<embeddings::RelatedNote> {
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<embeddings::RelatedNote>, String> {
     // Top 5 above 0.55 cosine similarity. Threshold trades recall for
     // noise: too low and you get unrelated notes, too high and "related"
     // is empty for most notes.
-    state.embeddings.find_related(&path, 5, 0.55)
+    //
+    // The KNN probe hits the per-vault sqlite DB (blocking) — run it on a
+    // worker so the IPC thread stays free. State can't move into the
+    // closure; clone the Arc first. Frontend still receives the same
+    // RelatedNote list (Result is transparent: Ok unwraps to the array).
+    let embeddings = state.embeddings.clone();
+    tauri::async_runtime::spawn_blocking(move || embeddings.find_related(&path, 5, 0.55))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Semantic search over the active vault — powers the `~concept` search
@@ -339,24 +381,31 @@ fn find_related(
 /// to an empty list (handled as "no matches") on any error so a missing
 /// API/model never breaks the search bar.
 #[tauri::command]
-fn semantic_search(
+async fn semantic_search(
     query: String,
-    state: tauri::State<AppState>,
+    state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<Vec<notes::NoteSummary>, String> {
-    let hits = state
-        .embeddings
-        .search_text(&query, 50, &app_handle)?;
-    let by_path: HashMap<String, notes::NoteSummary> = notes::list_notes()
-        .into_iter()
-        .map(|n| (n.path.clone(), n))
-        .collect();
-    // Preserve KNN rank order; drop hits whose file vanished since
-    // indexing (handles a just-deleted note still lingering in the DB).
-    Ok(hits
-        .into_iter()
-        .filter_map(|h| by_path.get(&h.path).cloned())
-        .collect())
+    // search_text embeds the query (model inference) + runs a sqlite KNN
+    // probe, then we re-read the vault to build summaries — all blocking.
+    // Move it onto a worker. State can't cross the closure boundary; clone
+    // the embeddings Arc, and AppHandle is Clone + Send so it moves too.
+    let embeddings = state.embeddings.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let hits = embeddings.search_text(&query, 50, &app_handle)?;
+        let by_path: HashMap<String, notes::NoteSummary> = notes::list_notes()
+            .into_iter()
+            .map(|n| (n.path.clone(), n))
+            .collect();
+        // Preserve KNN rank order; drop hits whose file vanished since
+        // indexing (handles a just-deleted note still lingering in the DB).
+        Ok(hits
+            .into_iter()
+            .filter_map(|h| by_path.get(&h.path).cloned())
+            .collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// "The Orphanage" — notes adrift from the link graph: no resolving
@@ -416,6 +465,12 @@ fn delete_note(path: String, state: tauri::State<AppState>) -> Result<(), String
         ));
     }
     std::fs::remove_file(&p).map_err(|e| e.to_string())?;
+    // Drop it from the search index now so a deleted note can't surface in
+    // results before the watcher catches up. Log on failure (file is gone
+    // regardless; watcher rebuild is the backstop).
+    if let Err(e) = state.index.remove(&path) {
+        eprintln!("delete_note: index remove failed for {path}: {e}");
+    }
     state.embeddings.forget_path(&path);
     config::remove_pin(&path);
     Ok(())
@@ -483,6 +538,16 @@ fn rename_note(
 
     // Rewire embeddings: same content, different path. Cheap point update.
     state.embeddings.rename_path(&path, &new_path_str);
+    // Move the note in the search index: drop the old path's document and
+    // index it under the new path. (Other notes whose [[links]] the cascade
+    // rewrote are refreshed by the watcher rebuild.) Log on failure — the
+    // rename already succeeded on disk.
+    if let Err(e) = state.index.remove(&path) {
+        eprintln!("rename_note: index remove failed for {path}: {e}");
+    }
+    if let Err(e) = state.index.upsert(&new_path_str) {
+        eprintln!("rename_note: index upsert failed for {new_path_str}: {e}");
+    }
     // Keep a pin attached to the renamed file.
     config::repoint_pin(&path, &new_path_str);
 
@@ -494,7 +559,7 @@ fn rename_note(
 }
 
 #[tauri::command]
-fn create_note(title: String) -> Result<String, String> {
+fn create_note(title: String, state: tauri::State<AppState>) -> Result<String, String> {
     let dir = notes::notes_dir();
     let sanitized = sanitize_filename(&title);
     if sanitized.is_empty() {
@@ -510,7 +575,14 @@ fn create_note(title: String) -> Result<String, String> {
         }
     }
     notes::write_atomic(&path, "").map_err(|e| e.to_string())?;
-    Ok(path.to_string_lossy().to_string())
+    let path_str = path.to_string_lossy().to_string();
+    // Index the new (empty) note immediately so it's searchable — and so
+    // `empty:true` reports surface it — without waiting for the watcher.
+    // Log on failure; the file exists regardless and the watcher backstops.
+    if let Err(e) = state.index.upsert(&path_str) {
+        eprintln!("create_note: index upsert failed for {path_str}: {e}");
+    }
+    Ok(path_str)
 }
 
 fn sanitize_filename(title: &str) -> String {

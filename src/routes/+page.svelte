@@ -111,6 +111,11 @@
   let brewActive = $state(false);
   let brewSourceTitle = $state("");
   let brewSourceBody = $state("");
+  // Bumped on each EXPLICIT brew invocation (Cmd+Shift+B). BrewPane keys
+  // its streaming effect on this nonce alone, so re-firing brew — even on
+  // the same note — re-streams, while live body edits passed via
+  // brewSourceBody never trigger a new LLM call.
+  let brewNonce = $state(0);
   let focusedPane = $state<"primary" | "secondary">("primary");
 
   // Export modal — per-note. Lives at +page.svelte because it operates on
@@ -1510,6 +1515,9 @@
     brewSourceTitle = title;
     brewSourceBody = body;
     brewActive = true;
+    // Explicit invocation — bump the nonce so BrewPane (re)streams even if
+    // it was already open on this same note body.
+    brewNonce++;
     focusedPane = "secondary";
   }
   // Same as above but triggered from the secondary editor — brews on
@@ -1522,20 +1530,51 @@
     brewSourceTitle = title;
     brewSourceBody = body;
     brewActive = true;
+    // Explicit invocation — bump the nonce so BrewPane (re)streams even if
+    // it was already open on this same note body.
+    brewNonce++;
     focusedPane = "secondary";
   }
   // Append the streamed brew to the bottom of the source note. Writes
   // the augmented file to disk; the watcher will reload editors that
-  // happen to be showing it.
-  async function appendBrewToSource(brew: string) {
-    if (!selectedPath) return;
+  // happen to be showing it. Returns an error string the BrewPane can
+  // surface, or null on success.
+  //
+  // Encryption invariant: read_note / save_note operate on RAW bytes. On
+  // an encrypted note read_note hands back the "MALT-ENC-v1:" envelope and
+  // save_note would then persist plaintext-appended-to-ciphertext, leaving
+  // the file permanently undecryptable. So we mirror getPrePromptFor: when
+  // selectedPath is encrypted we round-trip through read_encrypted_note /
+  // save_encrypted_note with the cached password, and if no password is
+  // cached we abort (rather than corrupt the file) and tell the user.
+  async function appendBrewToSource(brew: string): Promise<string | null> {
+    if (!selectedPath) return "No source note to append to.";
+    const path = selectedPath;
+    const encrypted = !!allNotes.find((n) => n.path === path)?.is_encrypted;
+    const password = encrypted ? unlockedPasswords.get(path) : undefined;
+    if (encrypted && !password) {
+      // Locked note with no cached password — refuse rather than write
+      // plaintext over the encrypted envelope.
+      return "That note is locked — unlock it before appending the brew.";
+    }
     try {
-      const current = await invoke<string>("read_note", { path: selectedPath });
+      // Flush pending edits so we append onto the latest on-disk content,
+      // not a stale snapshot.
+      await flushAllEditors();
+      const current = encrypted
+        ? await invoke<string>("read_encrypted_note", { path, password })
+        : await invoke<string>("read_note", { path });
       const stamp = new Date().toLocaleString();
       const augmented = `${current.trimEnd()}\n\n## Brew — ${stamp}\n\n${brew.trim()}\n`;
-      await invoke("save_note", { path: selectedPath, content: augmented });
+      if (encrypted) {
+        await invoke("save_encrypted_note", { path, content: augmented, password });
+      } else {
+        await invoke("save_note", { path, content: augmented });
+      }
+      return null;
     } catch (e) {
       console.error("appendBrewToSource failed", e);
+      return `Couldn't append the brew: ${String(e)}`;
     }
   }
 
@@ -2887,8 +2926,9 @@
                 <BrewPane
                   noteTitle={brewSourceTitle}
                   noteBody={brewSourceBody}
+                  brewNonce={brewNonce}
                   onClose={closeSecondary}
-                  onAppendToSource={(brew) => void appendBrewToSource(brew)}
+                  onAppendToSource={(brew) => appendBrewToSource(brew)}
                   onSaveAsNote={(args) => void saveBrewAsNote(args)}
                 />
               {:else}

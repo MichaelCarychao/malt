@@ -107,8 +107,14 @@ fn assign_slots(items: &mut [SavedSearch]) {
 }
 
 fn save(items: &[SavedSearch]) -> std::io::Result<()> {
-    let json = serde_json::to_string_pretty(items).unwrap_or_default();
-    std::fs::write(path(), json)
+    // Never let a serialization failure truncate the saved-search list:
+    // propagate the error rather than writing an empty string over a valid
+    // file (which would silently drop every saved search + slot binding).
+    let json = serde_json::to_string_pretty(items)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    // Atomic temp-file + rename so a crash mid-write can't leave a
+    // half-written / empty saved_searches.json behind.
+    crate::notes::write_atomic(path(), &json)
 }
 
 /// Insert or replace a saved search by id.

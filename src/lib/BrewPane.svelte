@@ -19,14 +19,22 @@
   let {
     noteTitle = "",
     noteBody = "",
+    brewNonce = 0,
     onClose,
     onAppendToSource,
     onSaveAsNote,
   }: {
     noteTitle?: string;
     noteBody?: string;
+    /** Bumped by the parent each time the user EXPLICITLY invokes brew
+     * (Cmd+Shift+B). Brewing keys on this nonce alone — never on noteBody
+     * — so live editor edits flowing in via noteBody don't fire a fresh
+     * (and costly) brew_streaming call on every keystroke. */
+    brewNonce?: number;
     onClose?: () => void;
-    onAppendToSource?: (brew: string) => void;
+    /** Append the brew to the source note. Resolves to an error string to
+     * show the user (e.g. the note is locked), or null on success. */
+    onAppendToSource?: (brew: string) => void | Promise<string | null>;
     /** Save the brew as a new note. The pane decides whether to add a
      * back-link to the source (the user toggles the checkbox below).
      * Parent handles `create_note` IPC + navigation to the new note. */
@@ -42,9 +50,9 @@
   let error = $state<string | null>(null);
   let scroller: HTMLDivElement | null = $state(null);
   let activeChannel: Channel<string> | null = null;
-  // Hash of (title + body) so we re-stream when the parent swaps in a
-  // different source note without unmounting the pane.
-  let lastSource = "";
+  // The brewNonce we last streamed for. Starts at -1 (no real nonce yet)
+  // so the first explicit trigger always runs.
+  let lastNonce = -1;
 
   // "Save as note" inline form state.
   let saveLinked = $state(true);
@@ -85,14 +93,18 @@
     }
   }
 
-  // Re-run when the source note changes (e.g. user re-fires Cmd+Shift+B
-  // on a different note). Tracks both title and body so a body edit on
-  // the same note also re-streams.
+  // Re-run only on an EXPLICIT trigger: the parent bumps `brewNonce` each
+  // time the user fires Cmd+Shift+B. We deliberately do NOT depend on
+  // noteBody — the parent may stream live editor content into it, and we
+  // must not kick off a brew_streaming call on every keystroke. The body
+  // is captured here (at trigger time) and frozen for this run.
   $effect(() => {
-    const key = `${noteTitle}::${noteBody}`;
-    if (key === lastSource) return;
-    lastSource = key;
-    void runBrew(noteBody);
+    const nonce = brewNonce;
+    if (nonce === lastNonce) return;
+    lastNonce = nonce;
+    // Snapshot the body now so later edits don't mutate the in-flight run.
+    const bodyAtTrigger = noteBody;
+    void runBrew(bodyAtTrigger);
   });
 
   function copyToClipboard() {
@@ -101,9 +113,14 @@
       /* clipboard unavailable — ignore */
     });
   }
-  function appendToSource() {
+  async function appendToSource() {
     if (!output.trim() || !onAppendToSource) return;
-    onAppendToSource(output);
+    // The parent may refuse the append (e.g. the source note is locked and
+    // we'd otherwise overwrite its encrypted envelope with plaintext) and
+    // resolve to an error message. Surface it in the existing error slot
+    // instead of silently doing nothing.
+    const err = await onAppendToSource(output);
+    error = err ?? null;
   }
   function rerun() {
     void runBrew(noteBody);

@@ -475,10 +475,23 @@
   let saveTimer: number | null = null;
   let currentPath: string | null = null;
   let lastSavedContent = "";
+  // Encryption identity captured for the note ACTUALLY loaded into the view —
+  // not the live `isEncrypted`/`password` props. Props update to the INCOMING
+  // note before loadPath flushes the OUTGOING one, so saving against live props
+  // can write note A with note B's codec (plaintext over ciphertext, or A
+  // encrypted under B's password). flushSave reads these instead, and loadPath
+  // sets them at the same point it sets currentPath/lastSavedContent.
+  let currentIsEncrypted = false;
+  let currentPassword: string | null = null;
   let fetchGen = 0;
   // Monotonic guard so overlapping external-change handlers can't race:
   // only the most recent disk read is allowed to act on its result.
   let externalChangeGen = 0;
+  // Monotonic guard for loadPath itself: rapid note switches / a password
+  // change mid-read can re-enter loadPath and mount a second EditorView into
+  // the same container. Only the newest call is allowed to mount (mirrors the
+  // externalChangeGen pattern).
+  let loadGen = 0;
   let currentHighlightQuery = "";
   let currentAllNotes: NoteRef[] = [];
 
@@ -1723,9 +1736,27 @@
 
   async function flushSave(p: string, content: string) {
     if (content === lastSavedContent) return;
+    // Bind the codec to the BUFFER being saved (captured for the loaded note),
+    // never to live props — see currentIsEncrypted/currentPassword above.
     try {
-      if (isEncrypted && password) {
-        await invoke("save_encrypted_note", { path: p, content, password });
+      if (currentIsEncrypted) {
+        // Encrypted note but no captured password (the note is locked, or its
+        // password was cleared on blur). Falling back to save_note here would
+        // write PLAINTEXT over the on-disk ciphertext and silently destroy the
+        // encryption. Dropping one autosave is strictly safer than corrupting
+        // the file — skip and warn rather than save.
+        if (!currentPassword) {
+          console.warn(
+            "malt: skipping autosave of encrypted note with no password (locked?):",
+            p,
+          );
+          return;
+        }
+        await invoke("save_encrypted_note", {
+          path: p,
+          content,
+          password: currentPassword,
+        });
       } else {
         await invoke("save_note", { path: p, content });
       }
@@ -1799,11 +1830,24 @@
   }
 
   async function loadPath(p: string | null) {
+    // Claim this load. Any await below yields to the event loop, so a newer
+    // loadPath (rapid switch / password change) can start; only the newest
+    // myGen is allowed to mount a view (see loadGen).
+    const myGen = ++loadGen;
+    // Capture the codec for the note we're ABOUT to load, before any prop can
+    // shift underneath us. These are the values that read `p`, so they're the
+    // correct values to later write `p` back with (committed to
+    // currentIsEncrypted/currentPassword only once this load wins, below).
+    const encForThisLoad = isEncrypted;
+    const pwForThisLoad = password;
     if (saveTimer) {
       clearTimeout(saveTimer);
       saveTimer = null;
     }
     if (view && currentPath && currentPath !== p) {
+      // Flush the OUTGOING note with ITS still-current captured codec
+      // (currentIsEncrypted/currentPassword aren't reassigned until this load
+      // wins below, so they still describe the note being left here).
       await flushSave(currentPath, view.state.doc.toString());
     }
     if (view) {
@@ -1817,13 +1861,13 @@
 
     let body = "";
     try {
-      if (isEncrypted) {
-        if (!password) {
+      if (encForThisLoad) {
+        if (!pwForThisLoad) {
           // Locked: render an empty editor so the user sees nothing
           // sensitive. Parent will pop the password modal.
           body = "";
         } else {
-          body = await invoke<string>("read_encrypted_note", { path: p, password });
+          body = await invoke<string>("read_encrypted_note", { path: p, password: pwForThisLoad });
         }
       } else {
         body = await invoke<string>("read_note", { path: p });
@@ -1832,7 +1876,15 @@
       console.error("read_note failed", e);
       body = "";
     }
+    // Superseded mid-read by a newer loadPath — bail BEFORE touching the
+    // save-identity globals or mounting, so the stale read can't mount a
+    // duplicate view or leave the wrong codec captured for the live buffer.
+    if (myGen !== loadGen) return;
     lastSavedContent = body;
+    // Commit the captured codec for the now-loaded note. flushSave reads these
+    // (never the live props) so the buffer is always written with its own codec.
+    currentIsEncrypted = encForThisLoad;
+    currentPassword = pwForThisLoad;
 
     // Custom setup — basicSetup includes drawSelection() which conflicts
     // with WebView2's native contenteditable selection. Native selection
@@ -1946,6 +1998,11 @@
       }),
     ];
     const state = EditorState.create({ doc: body, extensions });
+    // Final re-entrancy guard right before we touch the DOM: if a newer
+    // loadPath superseded us, do NOT append a second EditorView to the
+    // container (the orphaned one would leak listeners and fire saves against
+    // the wrong note). `view` is already null here, so bailing is clean.
+    if (myGen !== loadGen) return;
     view = new EditorView({ state, parent: container });
 
     const active = document.activeElement;

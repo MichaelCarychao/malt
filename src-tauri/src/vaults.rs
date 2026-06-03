@@ -90,8 +90,15 @@ pub fn load() -> VaultsState {
 }
 
 fn save(state: &VaultsState) -> std::io::Result<()> {
-    let json = serde_json::to_string_pretty(state).unwrap_or_default();
-    std::fs::write(registry_path(), json)
+    // Never let a serialization failure truncate the vault registry:
+    // propagate the error rather than writing an empty string over the
+    // existing list of vaults. (load()'s self-seed write swallows this
+    // via `let _ = save(..)`, so a failed seed is skipped, not panicked.)
+    let json = serde_json::to_string_pretty(state)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    // Atomic temp-file + rename so a crash mid-write can't leave a
+    // half-written / empty vaults.json behind.
+    crate::notes::write_atomic(registry_path(), &json)
 }
 
 /// Path of the currently-active vault. notes::notes_dir() calls this.

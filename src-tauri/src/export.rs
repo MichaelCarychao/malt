@@ -14,6 +14,12 @@ use crate::{backlinks, frontmatter, tags};
 /// depth 1 only — to keep exports bounded.
 pub fn build_composite_markdown(source_path: &str, append_links: bool) -> Result<String, String> {
     let raw = std::fs::read_to_string(source_path).map_err(|e| e.to_string())?;
+    // Never export ciphertext. An encrypted note is a single "MALT-ENC-v1:"
+    // line; treating it as prose would leak the (unreadable) envelope into a
+    // shareable file — refuse outright so the caller surfaces an error.
+    if crate::encryption::is_encrypted(&raw) {
+        return Err("cannot export an encrypted note".into());
+    }
     let (_fm, body) = frontmatter::split(&raw);
 
     // Capture link targets BEFORE stripping wikilink brackets.
@@ -38,6 +44,12 @@ pub fn build_composite_markdown(source_path: &str, append_links: bool) -> Result
                 Ok(s) => s,
                 Err(_) => continue,
             };
+            // Skip encrypted linked notes — appending their "MALT-ENC-v1:"
+            // ciphertext would embed an unreadable (and private) envelope into
+            // the export. Silently omit rather than refuse the whole export.
+            if crate::encryption::is_encrypted(&linked_raw) {
+                continue;
+            }
             let (_fm, linked_body) = frontmatter::split(&linked_raw);
             let cleaned = tags::strip_tags_for_ai(linked_body);
             if cleaned.trim().is_empty() {
@@ -66,14 +78,28 @@ pub fn build_composite_markdown(source_path: &str, append_links: bool) -> Result
 }
 
 /// Render markdown → HTML body fragment (no <html>/<head> wrapper).
+///
+/// pulldown-cmark passes raw inline/block HTML through verbatim (it writes
+/// Html/InlineHtml events to the output unescaped), so a note containing
+/// `<script>` or `<img onerror=…>` would inject live markup into the
+/// exported HTML/epub. We neutralize this by rewriting every raw-HTML event
+/// to a Text event carrying the same source: push_html escapes Text bodies
+/// (`escape_html_body_text`), so the markup is preserved as visible, inert
+/// text rather than rendered. All other markdown (incl. the enabled GFM
+/// extensions) renders normally.
 pub fn markdown_to_html_body(md: &str) -> String {
-    use pulldown_cmark::{html, Options, Parser};
+    use pulldown_cmark::{html, Event, Options, Parser};
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_FOOTNOTES);
     opts.insert(Options::ENABLE_TASKLISTS);
-    let parser = Parser::new_ext(md, opts);
+    // Re-tag raw HTML as Text so push_html escapes it exactly once instead
+    // of emitting it verbatim. Don't pre-escape here: that would double-escape.
+    let parser = Parser::new_ext(md, opts).map(|event| match event {
+        Event::Html(raw) | Event::InlineHtml(raw) => Event::Text(raw),
+        other => other,
+    });
     let mut out = String::new();
     html::push_html(&mut out, parser);
     out
@@ -154,7 +180,10 @@ pub fn markdown_to_plaintext(md: &str) -> String {
     let mut out = String::new();
     for event in parser {
         match event {
-            Event::Text(t) | Event::Code(t) | Event::Html(t) | Event::InlineHtml(t) => {
+            // Intentionally exclude Html/InlineHtml: emitting raw tag source
+            // as "text" would leak markup like <script>…</script> into the
+            // plaintext export. Those events fall through to the `_` arm.
+            Event::Text(t) | Event::Code(t) => {
                 out.push_str(&t);
             }
             Event::SoftBreak => out.push(' '),
@@ -240,4 +269,50 @@ fn escape_html(s: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn html_body_neutralizes_raw_html() {
+        // Block-level and inline raw HTML must not survive as live markup.
+        let md = "before\n\n<script>alert(1)</script>\n\ntext <img src=x onerror=alert(1)> after";
+        let html = markdown_to_html_body(md);
+        // No live tags: the dangerous source is escaped to entities.
+        assert!(!html.contains("<script>"), "raw <script> leaked: {html}");
+        assert!(
+            !html.contains("<img src=x onerror"),
+            "raw <img onerror> leaked: {html}"
+        );
+        // Escaped exactly once (not double-escaped to &amp;lt;).
+        assert!(html.contains("&lt;script&gt;"), "expected escaped script: {html}");
+        assert!(!html.contains("&amp;lt;"), "double-escaped output: {html}");
+    }
+
+    #[test]
+    fn html_body_keeps_normal_markdown() {
+        // Normal markdown + an enabled GFM extension still render.
+        let html = markdown_to_html_body("# Title\n\n~~struck~~ and **bold**");
+        assert!(html.contains("<h1>"), "heading missing: {html}");
+        assert!(html.contains("<del>"), "strikethrough missing: {html}");
+        assert!(html.contains("<strong>"), "bold missing: {html}");
+    }
+
+    #[test]
+    fn plaintext_drops_raw_html() {
+        // Raw HTML *tags* must not be copied into plaintext as if they were
+        // text. (CommonMark treats text between inline tags as ordinary text,
+        // so we only assert the tag tokens themselves are gone — that's what
+        // dropping the Html/InlineHtml events guarantees.)
+        let txt = markdown_to_plaintext(
+            "hello <img src=x onerror=alert(1)> world\n\n<script>boom</script>",
+        );
+        assert!(txt.contains("hello"));
+        assert!(txt.contains("world"));
+        assert!(!txt.contains("<img"), "raw inline tag leaked to plaintext: {txt}");
+        assert!(!txt.contains("onerror"), "tag attribute leaked to plaintext: {txt}");
+        assert!(!txt.contains("<script>"), "raw block tag leaked to plaintext: {txt}");
+    }
 }

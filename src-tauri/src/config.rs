@@ -183,6 +183,11 @@ pub fn load() -> Config {
 }
 
 pub fn save(cfg: &Config) -> std::io::Result<()> {
-    let json = serde_json::to_string_pretty(cfg).unwrap_or_default();
-    std::fs::write(config_path(), json)
+    // Never let a serialization failure truncate a valid config: propagate
+    // the error instead of writing an empty string over existing data.
+    let json = serde_json::to_string_pretty(cfg)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    // Atomic temp-file + rename so a crash mid-write can't leave a
+    // half-written / empty config.json behind.
+    crate::notes::write_atomic(config_path(), &json)
 }

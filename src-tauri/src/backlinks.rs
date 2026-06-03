@@ -149,13 +149,61 @@ pub fn orphan_paths() -> Vec<String> {
         .collect()
 }
 
-/// Rewrite every `[[link]]` in `body` whose target normalizes to `old_title`
-/// (case-insensitive exact OR slug-equal) so the inner text becomes
-/// `new_title` verbatim. Returns the new body and the number of links
-/// replaced. Used by the rename command to keep backlinks intact.
-pub fn rewrite_wikilinks_in_body(body: &str, old_title: &str, new_title: &str) -> (String, usize) {
+/// Split a wikilink's inner text into `(target, alias)` on the FIRST `|`.
+/// `[[Target|Alias]]` links to `Target` but displays `Alias`; a bare
+/// `[[Target]]` has no alias. The target is what we resolve, count as a
+/// backlink, and rewrite on rename — the alias is purely presentational.
+/// Both halves are returned UNTRIMMED so the rewriter can preserve the
+/// caller's exact spacing around the pipe; resolution trims separately.
+pub(crate) fn split_alias(inner: &str) -> (&str, Option<&str>) {
+    match inner.find('|') {
+        Some(p) => (&inner[..p], Some(&inner[p + 1..])),
+        None => (inner, None),
+    }
+}
+
+/// Rewrite every `[[link]]` in `body` that resolves to the note being
+/// renamed (was titled `old_title`) so the link target becomes `new_title`
+/// verbatim. Returns the new body and the number of links replaced. Used by
+/// the rename command to keep backlinks intact.
+///
+/// Resolution is **identity-aware**, mirroring `resolve`'s priority so a
+/// rename never hijacks a link that actually points at a *different*
+/// existing note:
+///   - An exact case-insensitive title match to `old_title` always rewrites
+///     (on a flat, case-insensitive folder no two notes share a title, so
+///     this is unambiguous).
+///   - A mere slug match (slugify collapses case + punctuation, so "Note 1",
+///     "Note-1", "note1" all collide) rewrites ONLY when the renamed note is
+///     the *unambiguous* slug owner: no other current note shares that slug
+///     and no other note claims the exact target title. If a slug-colliding
+///     sibling exists we leave the link alone rather than risk redirecting it
+///     to the wrong file.
+/// `existing_titles_lower` / `existing_slugs_lower` are the lowercased title
+/// and slug sets of the CURRENT notes (post-rename, so they describe
+/// `new_title`, not `old_title`); the caller builds them once and shares
+/// them across files.
+///
+/// Links inside fenced or inline code are passed through byte-for-byte: a
+/// `[[...]]` in a code sample is documentation, not a link, so renaming a
+/// note must never edit it.
+///
+/// `[[Target|Alias]]` rewrites only the `Target` half and preserves
+/// `|Alias` exactly.
+pub fn rewrite_wikilinks_in_body(
+    body: &str,
+    old_title: &str,
+    new_title: &str,
+    existing_titles_lower: &HashSet<String>,
+    existing_slugs_lower: &HashSet<String>,
+) -> (String, usize) {
     let old_lower = old_title.to_lowercase();
     let old_slug = slugify(old_title);
+    // The slug fallback is safe only when the renamed note alone owned this
+    // slug. If a *different* current note already carries `old_slug`, a bare
+    // slug-equal link is ambiguous — don't touch it.
+    let slug_fallback_safe = !existing_slugs_lower.contains(&old_slug);
+    let code = crate::link_suggestions::code_mask(body);
     let bytes = body.as_bytes();
     let mut out = String::with_capacity(body.len());
     let mut i = 0;
@@ -176,18 +224,37 @@ pub fn rewrite_wikilinks_in_body(body: &str, old_title: &str, new_title: &str) -
                 j += 1;
             }
             if found_close {
-                let inner = &body[i + 2..j];
-                let trimmed = inner.trim();
-                if !trimmed.is_empty() {
-                    let inner_lower = trimmed.to_lowercase();
-                    let inner_slug = slugify(trimmed);
-                    if inner_lower == old_lower || inner_slug == old_slug {
-                        out.push_str("[[");
-                        out.push_str(new_title);
-                        out.push_str("]]");
-                        count += 1;
-                        i = j + 2;
-                        continue;
+                // Inside a code fence / inline-code span? Leave the whole
+                // `[[..]]` untouched — it's a code sample, not a link.
+                let in_code = (i..j + 2).any(|k| k < code.len() && code[k]);
+                if !in_code {
+                    let inner = &body[i + 2..j];
+                    // Only the target half (left of the first `|`) resolves;
+                    // the alias half is preserved verbatim.
+                    let (target_raw, alias) = split_alias(inner);
+                    let trimmed = target_raw.trim();
+                    if !trimmed.is_empty() {
+                        let inner_lower = trimmed.to_lowercase();
+                        let exact_old = inner_lower == old_lower;
+                        // Slug fallback: target slug-collides with the renamed
+                        // note, the renamed note is the sole slug owner, AND no
+                        // other note owns this target by exact title.
+                        let slug_old = !exact_old
+                            && slug_fallback_safe
+                            && slugify(trimmed) == old_slug
+                            && !existing_titles_lower.contains(&inner_lower);
+                        if exact_old || slug_old {
+                            out.push_str("[[");
+                            out.push_str(new_title);
+                            if let Some(alias) = alias {
+                                out.push('|');
+                                out.push_str(alias);
+                            }
+                            out.push_str("]]");
+                            count += 1;
+                            i = j + 2;
+                            continue;
+                        }
                     }
                 }
                 out.push_str(&body[i..j + 2]);
@@ -219,6 +286,16 @@ pub fn cascade_wikilink_rename(
     skip_path: &Path,
 ) -> usize {
     let mut changed = 0usize;
+    // Lowercased titles + slugs of the CURRENT notes (the renamed file already
+    // lives at its new path on disk, so these describe `new_title`). Shared
+    // across every file so the per-link slug fallback can tell when some
+    // *other* note owns a target — by exact title or by a colliding slug — and
+    // must not be hijacked by this rename.
+    let current = crate::notes::list_notes();
+    let existing_titles_lower: HashSet<String> =
+        current.iter().map(|n| n.title.to_lowercase()).collect();
+    let existing_slugs_lower: HashSet<String> =
+        current.iter().map(|n| slugify(&n.title)).collect();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
     };
@@ -244,7 +321,13 @@ pub fn cascade_wikilink_rename(
             continue;
         }
         let (fm, body) = crate::frontmatter::split(&content);
-        let (new_body, count) = rewrite_wikilinks_in_body(body, old_title, new_title);
+        let (new_body, count) = rewrite_wikilinks_in_body(
+            body,
+            old_title,
+            new_title,
+            &existing_titles_lower,
+            &existing_slugs_lower,
+        );
         if count > 0 {
             let full = crate::frontmatter::merge(&fm, &new_body);
             if crate::notes::write_atomic(&p, &full).is_ok() {
@@ -267,6 +350,11 @@ fn resolve(
     by_title: &HashMap<String, String>,
     by_slug: &HashMap<String, String>,
 ) -> Option<String> {
+    // Defensive: if a caller passes raw inner text, only the part left of
+    // the first `|` is the link target (`[[Target|Alias]]`). `scan_wikilinks`
+    // already strips the alias, but resolving here too keeps `resolve`
+    // correct in isolation.
+    let (target, _alias) = split_alias(target);
     let t = target.trim().to_lowercase();
     if t.is_empty() {
         return None;
@@ -279,9 +367,16 @@ fn resolve(
 }
 
 /// Scan `body` for `[[name]]` patterns. Returns (link_text, match_start_byte,
-/// match_end_byte) tuples. Stops at unmatched brackets / newlines.
+/// match_end_byte) tuples where `link_text` is the resolvable TARGET (the
+/// part left of a `[[Target|Alias]]` pipe, trimmed). Stops at unmatched
+/// brackets / newlines.
+///
+/// Wikilinks inside fenced or inline code are skipped: a `[[...]]` in a code
+/// sample is documentation, so it must not count as a backlink (nor get
+/// rewritten on rename).
 fn scan_wikilinks(body: &str) -> Vec<(String, usize, usize)> {
     let mut out = Vec::new();
+    let code = crate::link_suggestions::code_mask(body);
     let bytes = body.as_bytes();
     let mut i = 0;
     while i + 3 < bytes.len() {
@@ -305,11 +400,18 @@ fn scan_wikilinks(body: &str) -> Vec<(String, usize, usize)> {
             }
             if found_close {
                 let end = j + 2;
-                // Extract the inner text safely (might span multi-byte chars).
-                let inner = &body[i + 2..j];
-                let link_text = inner.trim().to_string();
-                if !link_text.is_empty() {
-                    out.push((link_text, start, end));
+                // Skip links living inside a code fence / inline-code span.
+                let in_code = (start..end).any(|k| k < code.len() && code[k]);
+                if !in_code {
+                    // Extract the inner text safely (might span multi-byte
+                    // chars), then drop any `|alias` — only the target half
+                    // resolves and produces a backlink.
+                    let inner = &body[i + 2..j];
+                    let (target, _alias) = split_alias(inner);
+                    let link_text = target.trim().to_string();
+                    if !link_text.is_empty() {
+                        out.push((link_text, start, end));
+                    }
                 }
                 i = end;
                 continue;
@@ -356,4 +458,136 @@ fn ceil_char_boundary(s: &str, mut idx: usize) -> usize {
         idx += 1;
     }
     idx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn titles(ts: &[&str]) -> HashSet<String> {
+        ts.iter().map(|t| t.to_lowercase()).collect()
+    }
+    fn slugs(ts: &[&str]) -> HashSet<String> {
+        ts.iter().map(|t| slugify(t)).collect()
+    }
+
+    // H6: `scan_wikilinks` extracts only the TARGET half of an aliased link,
+    // so resolution + backlink crediting use "Note 1", not "Note 1|alias".
+    #[test]
+    fn scan_strips_alias_to_target() {
+        let body = "see [[Note 1|the first note]] here";
+        let found = scan_wikilinks(body);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "Note 1");
+    }
+
+    // H4: links inside fenced or inline code are not scanned (so they never
+    // count as backlinks).
+    #[test]
+    fn scan_skips_code() {
+        let body = "real [[Note 1]]\n```\ncode [[Note 1]]\n```\ninline `[[Note 1]]`";
+        let found = scan_wikilinks(body);
+        // Only the first, prose-level link is seen.
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "Note 1");
+        assert_eq!(found[0].1, 5); // byte offset of the prose link
+    }
+
+    // H4: rename must not touch a `[[link]]` that lives inside a code block,
+    // while still rewriting the genuine prose link.
+    #[test]
+    fn rename_preserves_links_in_code() {
+        let body = "prose [[Note 1]]\n```md\nexample: [[Note 1]]\n```\ntail `[[Note 1]]` done";
+        let (out, count) = rewrite_wikilinks_in_body(
+            body,
+            "Note 1",
+            "Renamed",
+            &titles(&["renamed"]),
+            &slugs(&["renamed"]),
+        );
+        assert_eq!(count, 1, "only the prose link is rewritten");
+        assert!(out.contains("prose [[Renamed]]"));
+        assert!(out.contains("example: [[Note 1]]"), "fenced link untouched");
+        assert!(out.contains("`[[Note 1]]`"), "inline-code link untouched");
+    }
+
+    // H6: an aliased link is rewritten on its TARGET only; the `|alias` is
+    // preserved verbatim.
+    #[test]
+    fn rename_rewrites_alias_target_only() {
+        let body = "[[Note 1|the first note]] and [[Note 1]]";
+        let (out, count) = rewrite_wikilinks_in_body(
+            body,
+            "Note 1",
+            "Renamed",
+            &titles(&["renamed"]),
+            &slugs(&["renamed"]),
+        );
+        assert_eq!(count, 2);
+        assert_eq!(out, "[[Renamed|the first note]] and [[Renamed]]");
+    }
+
+    // Baseline that must not regress: an exact case-insensitive title match is
+    // always rewritten.
+    #[test]
+    fn rename_rewrites_exact_title_case_insensitive() {
+        let body = "link to [[note 1]] here";
+        let (out, count) = rewrite_wikilinks_in_body(
+            body,
+            "Note 1",
+            "Renamed",
+            &titles(&["renamed"]),
+            &slugs(&["renamed"]),
+        );
+        assert_eq!(count, 1);
+        assert_eq!(out, "link to [[Renamed]] here");
+    }
+
+    // H5: a slug-colliding DISTINCT note must not be hijacked. Renaming
+    // "Note 1" while a separate note "Note-1" exists must leave [[Note-1]]
+    // alone (it resolves to the other file), even though both slugify to
+    // "note1".
+    #[test]
+    fn rename_does_not_hijack_slug_colliding_sibling() {
+        // Post-rename note set: the renamed file is now "Renamed"; the distinct
+        // "Note-1" still exists and shares the slug "note1" with old "Note 1".
+        let existing_titles = titles(&["renamed", "note-1"]);
+        let existing_slugs = slugs(&["renamed", "note-1"]); // {"renamed","note1"}
+        let body = "points elsewhere [[Note-1]]";
+        let (out, count) = rewrite_wikilinks_in_body(
+            body,
+            "Note 1",
+            "Renamed",
+            &existing_titles,
+            &existing_slugs,
+        );
+        assert_eq!(count, 0, "slug-colliding sibling link must be untouched");
+        assert_eq!(out, body);
+    }
+
+    // H5 corollary: with NO colliding sibling, a slug-variant link to the
+    // renamed note IS still rewritten (we don't over-correct and drop genuine
+    // links).
+    #[test]
+    fn rename_still_rewrites_slug_variant_when_unambiguous() {
+        let body = "punctuation variant [[Note-1]] here";
+        let (out, count) = rewrite_wikilinks_in_body(
+            body,
+            "Note 1",
+            "Renamed",
+            &titles(&["renamed"]),
+            &slugs(&["renamed"]),
+        );
+        assert_eq!(count, 1);
+        assert_eq!(out, "punctuation variant [[Renamed]] here");
+    }
+
+    // H6 + H4 together with the alias splitter as a unit.
+    #[test]
+    fn split_alias_splits_on_first_pipe() {
+        assert_eq!(split_alias("Target|Alias"), ("Target", Some("Alias")));
+        assert_eq!(split_alias("Bare"), ("Bare", None));
+        // Only the FIRST pipe splits; later pipes stay in the alias.
+        assert_eq!(split_alias("T|a|b"), ("T", Some("a|b")));
+    }
 }

@@ -173,9 +173,16 @@ fn is_word_boundary(text: &str, start: usize, end: usize) -> bool {
     prev_ok && next_ok
 }
 
-/// Build a per-byte mask of regions we should NOT consider for link
-/// suggestions: code fences, inline code, existing wikilinks, hashtags.
-fn build_exclusion_mask(body: &str) -> Vec<bool> {
+/// Build a per-byte mask of just the *code* regions of `body`: line-based
+/// code fences (``` / ~~~) and single-line inline backtick spans. Shared
+/// with the backlink rewriter (`backlinks::rewrite_wikilinks_in_body` /
+/// `scan_wikilinks`) so that a `[[link]]` written inside a code sample is
+/// never resolved, counted as a backlink, or rewritten on rename — keeping
+/// code blocks byte-for-byte intact. This is deliberately narrower than
+/// `build_exclusion_mask`, which *also* masks wikilinks + hashtags (right
+/// for suggestion scanning, wrong for the link parser that needs to SEE
+/// the wikilinks).
+pub(crate) fn code_mask(body: &str) -> Vec<bool> {
     let bytes = body.as_bytes();
     let mut mask = vec![false; bytes.len()];
 
@@ -238,6 +245,17 @@ fn build_exclusion_mask(body: &str) -> Vec<bool> {
             }
         }
     }
+
+    mask
+}
+
+/// Build a per-byte mask of regions we should NOT consider for link
+/// suggestions: code fences, inline code, existing wikilinks, hashtags.
+fn build_exclusion_mask(body: &str) -> Vec<bool> {
+    let bytes = body.as_bytes();
+    // Start from the code-only mask (fences + inline backticks), then layer
+    // wikilink + hashtag exclusions on top.
+    let mut mask = code_mask(body);
 
     // --- Existing [[wikilinks]] ---
     let mut k = 0usize;

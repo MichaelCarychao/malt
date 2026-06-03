@@ -56,35 +56,92 @@ impl NoteIndex {
         })
     }
 
+    /// Build the single tantivy document for the note `summary`. Factored
+    /// out of `rebuild` so the full-rebuild and the incremental `upsert`
+    /// paths produce byte-identical documents (same schema, same tag
+    /// expansion, same encrypted-note handling) — divergence here would let
+    /// an in-app edit and an external-change rebuild index the same note
+    /// differently. `summary.path` is the document's primary key — every
+    /// add MUST be preceded by `delete_term(path)` (see `upsert`/`remove`)
+    /// or duplicate documents accumulate for the same note.
+    fn build_doc(&self, summary: &crate::notes::NoteSummary) -> TantivyDocument {
+        let mut doc = TantivyDocument::default();
+        doc.add_text(self.path_field, &summary.path);
+        doc.add_text(self.title_field, &summary.title);
+        if summary.is_encrypted {
+            // Encrypted notes index by title only — the body is
+            // ciphertext, indexing it would leak no information but
+            // would also produce nonsense matches. Skip body + tag
+            // fields entirely. They're still findable by filename.
+            doc.add_u64(self.modified_field, summary.modified);
+            doc.add_u64(self.empty_field, 0);
+        } else {
+            let content = std::fs::read_to_string(&summary.path).unwrap_or_default();
+            let (_fm, body) = crate::frontmatter::split(&content);
+            let tags = crate::tags::extract_tags_full(&content);
+            let expanded = crate::tags::expand_with_slash_parents(&tags);
+            doc.add_text(self.body_field, body);
+            for tag in &expanded {
+                doc.add_text(self.tags_field, tag);
+            }
+            doc.add_u64(self.modified_field, summary.modified);
+            doc.add_u64(self.empty_field, if summary.is_empty { 1 } else { 0 });
+        }
+        doc
+    }
+
     pub fn rebuild(&self) -> tantivy::Result<()> {
         let _g = self.rebuild_lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut writer = self.index.writer(15_000_000)?;
         writer.delete_all_documents()?;
         for note in crate::notes::list_notes() {
-            let mut doc = TantivyDocument::default();
-            doc.add_text(self.path_field, &note.path);
-            doc.add_text(self.title_field, &note.title);
-            if note.is_encrypted {
-                // Encrypted notes index by title only — the body is
-                // ciphertext, indexing it would leak no information but
-                // would also produce nonsense matches. Skip body + tag
-                // fields entirely. They're still findable by filename.
-                doc.add_u64(self.modified_field, note.modified);
-                doc.add_u64(self.empty_field, 0);
-            } else {
-                let content = std::fs::read_to_string(&note.path).unwrap_or_default();
-                let (_fm, body) = crate::frontmatter::split(&content);
-                let tags = crate::tags::extract_tags_full(&content);
-                let expanded = crate::tags::expand_with_slash_parents(&tags);
-                doc.add_text(self.body_field, body);
-                for tag in &expanded {
-                    doc.add_text(self.tags_field, tag);
-                }
-                doc.add_u64(self.modified_field, note.modified);
-                doc.add_u64(self.empty_field, if note.is_empty { 1 } else { 0 });
-            }
-            writer.add_document(doc)?;
+            writer.add_document(self.build_doc(&note))?;
         }
+        writer.commit()?;
+        self.reader.reload()?;
+        Ok(())
+    }
+
+    /// Incrementally (re)index a single note by path. Called synchronously
+    /// from the write commands (save / create / rename) so an in-app edit is
+    /// searchable immediately, without waiting for the debounced watcher
+    /// rebuild — and resiliently, since dropped filesystem events can't
+    /// leave the index stale for content the app itself wrote.
+    ///
+    /// `path` is the primary key: the `path` field is STRING (one exact
+    /// token), so we MUST `delete_term` it before re-adding, or repeated
+    /// upserts would accumulate duplicate documents for the same note.
+    /// Takes `rebuild_lock` to preserve the single-writer invariant shared
+    /// with `rebuild` (tantivy permits only one writer at a time).
+    ///
+    /// The note's summary is built via `summary_for_path` (reads just this
+    /// one file) rather than scanning the whole vault, keeping the call O(1)
+    /// in corpus size. If the file is gone / unreadable / not a note, this
+    /// degrades to a `remove` so a missing file never lingers in the index.
+    pub fn upsert(&self, path: &str) -> tantivy::Result<()> {
+        let _g = self.rebuild_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut writer = self.index.writer(15_000_000)?;
+        let term = Term::from_field_text(self.path_field, path);
+        writer.delete_term(term);
+        if let Some(summary) = crate::notes::summary_for_path(path) {
+            writer.add_document(self.build_doc(&summary))?;
+        }
+        writer.commit()?;
+        self.reader.reload()?;
+        Ok(())
+    }
+
+    /// Remove a single note from the index by path (its primary key). Used
+    /// when a note is deleted or moved/renamed away. delete_term + commit +
+    /// reload; a no-op if the path isn't present.
+    pub fn remove(&self, path: &str) -> tantivy::Result<()> {
+        let _g = self.rebuild_lock.lock().unwrap_or_else(|e| e.into_inner());
+        // Annotate the writer's document type: unlike `upsert`, this path
+        // never calls `add_document`, so nothing else pins `D`.
+        let mut writer: tantivy::IndexWriter<TantivyDocument> =
+            self.index.writer(15_000_000)?;
+        let term = Term::from_field_text(self.path_field, path);
+        writer.delete_term(term);
         writer.commit()?;
         self.reader.reload()?;
         Ok(())
@@ -267,5 +324,78 @@ fn fuzzy_distance(len: usize) -> u8 {
         0..=3 => 0,
         4..=6 => 1,
         _ => 2,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal NoteSummary for index tests. We index by title here (the
+    /// body field is read from disk by `build_doc` for non-encrypted notes;
+    /// a synthetic path that doesn't exist yields an empty body, which is
+    /// fine — the title is what we assert on).
+    fn summary(path: &str, title: &str) -> crate::notes::NoteSummary {
+        crate::notes::NoteSummary {
+            path: path.to_string(),
+            title: title.to_string(),
+            display_title: title.to_string(),
+            snippet: String::new(),
+            modified: 0,
+            tags: Vec::new(),
+            is_conflict: false,
+            is_empty: false,
+            is_encrypted: true, // title-only: skips the disk read in build_doc
+            title_matches: Vec::new(),
+            snippet_matches: Vec::new(),
+        }
+    }
+
+    /// Index one document directly (bypassing the disk-reading
+    /// summary_for_path) so these tests don't depend on the active vault.
+    /// Mirrors upsert's primary-key discipline: delete_term(path) before add.
+    fn index_doc(idx: &NoteIndex, s: &crate::notes::NoteSummary) {
+        let _g = idx.rebuild_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut writer = idx.index.writer(15_000_000).unwrap();
+        writer.delete_term(Term::from_field_text(idx.path_field, &s.path));
+        writer.add_document(idx.build_doc(s)).unwrap();
+        writer.commit().unwrap();
+        idx.reader.reload().unwrap();
+    }
+
+    #[test]
+    fn upsert_then_search_finds_remove_then_search_misses() {
+        let idx = NoteIndex::new().unwrap();
+        let path = "/tmp/malt-test/znglbrt.md";
+
+        // Insert → searchable by its (unusual) title token.
+        index_doc(&idx, &summary(path, "znglbrt"));
+        let hits = idx.search("znglbrt", 10).unwrap();
+        assert!(hits.contains(&path.to_string()), "doc should be found after insert: {hits:?}");
+
+        // Remove → no longer searchable.
+        idx.remove(path).unwrap();
+        let hits = idx.search("znglbrt", 10).unwrap();
+        assert!(!hits.contains(&path.to_string()), "doc should be gone after remove: {hits:?}");
+    }
+
+    #[test]
+    fn reindexing_same_path_does_not_duplicate() {
+        let idx = NoteIndex::new().unwrap();
+        let path = "/tmp/malt-test/dup.md";
+
+        // Index the same path twice (each insert delete_terms first, as
+        // upsert does) — the path is the primary key, so there must be
+        // exactly one document, not two.
+        index_doc(&idx, &summary(path, "uniquetitletok"));
+        index_doc(&idx, &summary(path, "uniquetitletok"));
+        let hits = idx.search("uniquetitletok", 10).unwrap();
+        let count = hits.iter().filter(|p| *p == path).count();
+        assert_eq!(count, 1, "path is the primary key — no duplicate docs: {hits:?}");
+
+        // And remove clears it entirely.
+        idx.remove(path).unwrap();
+        let hits = idx.search("uniquetitletok", 10).unwrap();
+        assert!(hits.is_empty(), "should be empty after remove: {hits:?}");
     }
 }

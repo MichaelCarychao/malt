@@ -136,10 +136,17 @@ pub fn start(tagger: Arc<Tagger>, app_handle: AppHandle) {
         };
         loop {
             std::thread::sleep(TICK);
-            if !config::load().tagging_enabled {
+            // Load config once per tick and gate on the SAME config for both
+            // the enabled flag and the key check. `process()` tags with
+            // `cfg.active_provider`, so the gate must check that provider's
+            // key — not the legacy Anthropic-only `has_api_key()` shim, which
+            // would either drain the queue with errors (Anthropic key present
+            // but active provider's key missing) or never run (vice versa).
+            let cfg = config::load();
+            if !cfg.tagging_enabled {
                 continue;
             }
-            if !secrets::has_api_key() {
+            if !secrets::has_api_key_for(cfg.active_provider.id()) {
                 continue;
             }
             let Some(path) = tagger.next() else { continue };

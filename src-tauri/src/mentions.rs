@@ -27,7 +27,11 @@ pub struct UnlinkedMention {
 }
 
 /// Byte ranges of `[[...]]` spans in `body`, so we can exclude matches
-/// that are already linked.
+/// that are already linked. The span covers the entire wikilink including
+/// any `|alias` portion (`[[Target|Alias]]`), so a prose mention of either
+/// the target or the alias text falling inside an existing link is already
+/// excluded — this module only computes spans for masking and never
+/// resolves the inner target, so no alias splitting is needed here.
 fn wikilink_spans(body: &str) -> Vec<(usize, usize)> {
     let bytes = body.as_bytes();
     let mut spans = Vec::new();

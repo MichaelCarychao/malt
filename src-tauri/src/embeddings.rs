@@ -44,13 +44,26 @@ pub struct RelatedNote {
     pub similarity: f32,
 }
 
+// `distance_metric=cosine` is load-bearing: without it sqlite-vec defaults
+// to L2, but every consumer here computes `sim = 1 - distance/2` and gates on
+// cosine thresholds (related 0.55, near-dup 0.9). With cosine, `distance` is a
+// true cosine distance in [0, 2] and that math is correct. Changing the metric
+// is a schema change — see SCHEMA_VERSION / the migration in open_active_db.
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS embed_meta (
         path TEXT PRIMARY KEY,
         content_hash TEXT NOT NULL,
         updated_at INTEGER NOT NULL,
         vec_rowid INTEGER NOT NULL UNIQUE
     );
-    CREATE VIRTUAL TABLE IF NOT EXISTS vec_notes USING vec0(embedding float[384]);";
+    CREATE VIRTUAL TABLE IF NOT EXISTS vec_notes USING vec0(embedding float[384] distance_metric=cosine);";
+
+/// Bump this whenever SCHEMA changes in a way that invalidates existing rows
+/// (e.g. the L2→cosine distance-metric switch in v1). `open_active_db` drops
+/// and recreates the tables when an existing DB's `user_version` is below
+/// this, then stamps the DB with the new version. Embeddings are derived and
+/// cheap to recompute, so a full drop is acceptable — `enqueue_dir` at
+/// startup/vault-switch repopulates everything.
+const SCHEMA_VERSION: i64 = 1;
 
 /// Open (creating if needed) the embedding DB for the *currently active
 /// vault*. Each vault gets its own file so semantic results are fully
@@ -66,7 +79,32 @@ fn open_active_db() -> Result<Connection, String> {
     // fine for derived data we can re-embed at any time.
     let _ = conn.pragma_update(None, "journal_mode", "WAL");
     let _ = conn.pragma_update(None, "synchronous", "NORMAL");
+
+    // Schema migration. `CREATE ... IF NOT EXISTS` alone would keep an old
+    // L2 vec_notes table on existing installs (the L2→cosine switch in v1),
+    // silently miscalibrating every cosine threshold. So if this DB predates
+    // the current SCHEMA_VERSION, drop BOTH tables and recreate. embed_meta
+    // must go too: it's the content-hash cache, and keeping it would make the
+    // worker think notes are already embedded and skip re-populating the new
+    // (cosine) vec_notes. Fresh installs report version 0 with no tables, so
+    // the DROP IF EXISTS is a harmless no-op and they land at v1 cleanly too.
+    let db_version: i64 = conn
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap_or(0);
+    if db_version < SCHEMA_VERSION {
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS vec_notes;
+             DROP TABLE IF EXISTS embed_meta;",
+        )
+        .map_err(|e| e.to_string())?;
+    }
     conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
+    if db_version < SCHEMA_VERSION {
+        // Stamp the version only after the (cosine) tables exist, so an error
+        // above leaves the DB un-stamped and the migration retried next open.
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .map_err(|e| e.to_string())?;
+    }
     Ok(conn)
 }
 

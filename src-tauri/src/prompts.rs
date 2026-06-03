@@ -106,8 +106,14 @@ fn load_overrides() -> HashMap<PromptKey, String> {
 }
 
 fn save_overrides(map: &HashMap<PromptKey, String>) -> std::io::Result<()> {
-    let json = serde_json::to_string_pretty(map).unwrap_or_default();
-    std::fs::write(path(), json)
+    // Never let a serialization failure truncate the prompt overrides:
+    // propagate the error rather than writing an empty string over a valid
+    // file (which would silently wipe every customized prompt).
+    let json = serde_json::to_string_pretty(map)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    // Atomic temp-file + rename so a crash mid-write can't leave a
+    // half-written / empty prompts.json behind.
+    crate::notes::write_atomic(path(), &json)
 }
 
 /// Returns the prompt text for `key` — user override if set, else the

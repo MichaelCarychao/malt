@@ -10,23 +10,64 @@ use tauri::{AppHandle, Emitter};
 
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// Write `contents` to `path` atomically: stage a sibling temp file, then
-/// rename it over the target. Rename is atomic on the same volume (Windows
-/// and Unix both), so a concurrent reader — e.g. an external tool sharing
-/// the notes folder — never observes a truncated or half-written note; it
-/// sees either the old complete file or the new complete file. The temp
-/// name is unique per call so racing writers don't collide, and it's
-/// cleaned up on rename failure. The `.malt-tmp-*` suffix is ignored by the
-/// watcher + listing (see `should_ignore`).
+/// Write `contents` to `path` atomically AND durably: stage a sibling temp
+/// file, `fsync` it, then rename it over the target. Rename is atomic on the
+/// same volume (Windows and Unix both), so a concurrent reader — e.g. an
+/// external tool sharing the notes folder — never observes a truncated or
+/// half-written note; it sees either the old complete file or the new
+/// complete file. The temp name is unique per call so racing writers don't
+/// collide, and it's cleaned up on rename failure. The `.malt-tmp-*` suffix
+/// is ignored by the watcher + listing (see `should_ignore`).
+///
+/// Durability: `rename` is only crash-safe once the *data* it points at is
+/// on stable storage. Without the temp-file `sync_all()` below, a power loss
+/// between the metadata commit and the data write-back can resurrect the
+/// rename pointing at a zero-length (or partially written) file — i.e. a
+/// note silently truncated to empty. We `sync_all()` the temp BEFORE the
+/// rename so the bytes are durable first. On Unix we additionally fsync the
+/// containing directory after the rename so the *rename itself* survives a
+/// crash; Windows has no portable directory fsync, so there the temp-file
+/// flush is the load-bearing guarantee. Directory-fsync errors are ignored:
+/// best-effort, and the data is already safe regardless.
 pub fn write_atomic<P: AsRef<Path>>(path: P, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
     let path = path.as_ref();
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let mut tmp_name = path.as_os_str().to_os_string();
     tmp_name.push(format!(".malt-tmp-{seq}"));
     let tmp = PathBuf::from(tmp_name);
-    std::fs::write(&tmp, contents)?;
+
+    // Write + flush + fsync the temp file, then close it, before renaming.
+    // Scope the File so its handle is dropped (closed) prior to the rename —
+    // matters on Windows where an open handle can block the replace.
+    let write_result = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(contents.as_bytes())?;
+        f.flush()?;
+        f.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
     match std::fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            // Best-effort: fsync the parent directory so the rename entry
+            // itself is durable. Unix-only — no portable equivalent on
+            // Windows, where the temp-file sync_all above is what protects
+            // against the zero-length-note failure mode.
+            #[cfg(unix)]
+            {
+                if let Some(parent) = path.parent() {
+                    if let Ok(dir) = std::fs::File::open(parent) {
+                        let _ = dir.sync_all();
+                    }
+                }
+            }
+            Ok(())
+        }
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
             Err(e)
@@ -364,6 +405,77 @@ pub fn snippet_around_match(body: &str, terms: &[String], window: usize) -> (Str
     (display, matches)
 }
 
+/// Build a `NoteSummary` for one already-validated note `path` whose
+/// mtime (`modified`, unix secs) the caller has in hand. Shared by
+/// `list_notes` (passing each DirEntry's mtime) and `summary_for_path`
+/// (passing the file's own mtime) so the listing and the incremental
+/// search-index upsert see identical per-note fields. Returns the summary
+/// unconditionally — callers pre-filter `should_ignore` / non-files.
+fn summarize_path(path: &Path, modified: u64) -> NoteSummary {
+    let title = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("untitled")
+        .to_string();
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    let is_encrypted = crate::encryption::is_encrypted(&content);
+    // Encrypted notes contribute only filename to the listing. No
+    // snippet, no tags, no emptiness signal — none of that is
+    // meaningful (or knowable) without the password.
+    let (snippet, tags, is_empty, display_title) = if is_encrypted {
+        (String::from("(encrypted)"), Vec::new(), false, title.clone())
+    } else {
+        let (_fm, body) = crate::frontmatter::split(&content);
+        let snip = snippet_from(body);
+        let t = crate::tags::extract_tags_full(&content);
+        // Strip private markup before checking emptiness so a note
+        // that's *only* tags / wikilinks still counts as empty
+        // content-wise.
+        let stripped = crate::tags::strip_tags_for_ai(body);
+        let empty = stripped.trim().is_empty();
+        // First-line `# H1` becomes the display name; else the filename.
+        let disp = h1_title(body).unwrap_or_else(|| title.clone());
+        (snip, t, empty, disp)
+    };
+    let is_conflict = is_conflict_filename(&title);
+    NoteSummary {
+        path: path.to_string_lossy().to_string(),
+        title,
+        display_title,
+        snippet,
+        modified,
+        tags,
+        is_conflict,
+        is_empty,
+        is_encrypted,
+        title_matches: Vec::new(),
+        snippet_matches: Vec::new(),
+    }
+}
+
+/// Summary for a single note path, or `None` if it isn't an indexable
+/// note (missing, not a regular file, or an ignored/non-`.md` name). Used
+/// by the search index's incremental `upsert` so it can reindex exactly
+/// the note that changed without scanning the whole vault.
+pub fn summary_for_path(path: &str) -> Option<NoteSummary> {
+    let p = Path::new(path);
+    let filename = p.file_name().and_then(|n| n.to_str())?;
+    if should_ignore(filename) {
+        return None;
+    }
+    let meta = std::fs::metadata(p).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Some(summarize_path(p, modified))
+}
+
 pub fn list_notes() -> Vec<NoteSummary> {
     let dir = notes_dir();
     let mut notes = Vec::new();
@@ -379,31 +491,6 @@ pub fn list_notes() -> Vec<NoteSummary> {
         if should_ignore(filename) || !path.is_file() {
             continue;
         }
-        let title = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("untitled")
-            .to_string();
-        let content = std::fs::read_to_string(&path).unwrap_or_default();
-        let is_encrypted = crate::encryption::is_encrypted(&content);
-        // Encrypted notes contribute only filename to the listing. No
-        // snippet, no tags, no emptiness signal — none of that is
-        // meaningful (or knowable) without the password.
-        let (snippet, tags, is_empty, display_title) = if is_encrypted {
-            (String::from("(encrypted)"), Vec::new(), false, title.clone())
-        } else {
-            let (_fm, body) = crate::frontmatter::split(&content);
-            let snip = snippet_from(body);
-            let t = crate::tags::extract_tags_full(&content);
-            // Strip private markup before checking emptiness so a note
-            // that's *only* tags / wikilinks still counts as empty
-            // content-wise.
-            let stripped = crate::tags::strip_tags_for_ai(body);
-            let empty = stripped.trim().is_empty();
-            // First-line `# H1` becomes the display name; else the filename.
-            let disp = h1_title(body).unwrap_or_else(|| title.clone());
-            (snip, t, empty, disp)
-        };
         let modified = entry
             .metadata()
             .and_then(|m| m.modified())
@@ -411,20 +498,7 @@ pub fn list_notes() -> Vec<NoteSummary> {
             .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let is_conflict = is_conflict_filename(&title);
-        notes.push(NoteSummary {
-            path: path.to_string_lossy().to_string(),
-            title,
-            display_title,
-            snippet,
-            modified,
-            tags,
-            is_conflict,
-            is_empty,
-            is_encrypted,
-            title_matches: Vec::new(),
-            snippet_matches: Vec::new(),
-        });
+        notes.push(summarize_path(&path, modified));
     }
     notes.sort_by(|a, b| b.modified.cmp(&a.modified));
     notes
@@ -657,44 +731,69 @@ pub fn start_watcher(
             }
 
             let dir = notes_dir();
-            if dir != snapshot_dir {
-                // Vault switched out from under us — rebaseline and skip
-                // rename detection this round (cross-vault content
-                // collisions would otherwise masquerade as renames).
-                snapshot_dir = dir.clone();
-                prev_hashes = snapshot_hashes(&dir);
-            } else {
-                // Detect + cascade external renames BEFORE reindexing so the
-                // index reflects the rewritten links. A file that vanished
-                // and reappeared verbatim at a new path is a rename; rewrite
-                // every [[old]] → [[new]] in the other notes and repoint its
-                // embedding.
-                let curr_hashes = snapshot_hashes_reusing(&dir, &prev_hashes, &changed);
-                for (old_path, new_path) in detect_renames(&prev_hashes, &curr_hashes) {
-                    if let (Some(old_title), Some(new_title)) =
-                        (title_of(&old_path), title_of(&new_path))
-                    {
-                        if old_title != new_title {
-                            crate::backlinks::cascade_wikilink_rename(
-                                &dir, &old_title, &new_title, &new_path,
-                            );
-                            embeddings.rename_path(
-                                &old_path.to_string_lossy(),
-                                &new_path.to_string_lossy(),
-                            );
+
+            // Process the coalesced batch inside catch_unwind so a panic in a
+            // downstream helper (e.g. a tokenizer hiccup during rebuild, or
+            // rename-cascade link rewriting) can't poison this thread and
+            // permanently freeze indexing — the watcher would otherwise be
+            // dead for the rest of the session. On panic we log and fall
+            // through to the next event. AssertUnwindSafe: the captured Arcs
+            // / AppHandle carry interior mutability (so they're not auto
+            // UnwindSafe), but the locks they guard recover from poisoning
+            // (rebuild() uses `unwrap_or_else(into_inner)`), so resuming is
+            // safe. prev_hashes/snapshot_dir are borrowed mutably; if the
+            // closure panics partway the borrows simply end and the stale
+            // baseline is reused next round — correctness is preserved
+            // because rename detection only ever *adds* link rewrites.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if dir != snapshot_dir {
+                    // Vault switched out from under us — rebaseline and skip
+                    // rename detection this round (cross-vault content
+                    // collisions would otherwise masquerade as renames).
+                    snapshot_dir = dir.clone();
+                    prev_hashes = snapshot_hashes(&dir);
+                } else {
+                    // Detect + cascade external renames BEFORE reindexing so the
+                    // index reflects the rewritten links. A file that vanished
+                    // and reappeared verbatim at a new path is a rename; rewrite
+                    // every [[old]] → [[new]] in the other notes and repoint its
+                    // embedding.
+                    let curr_hashes = snapshot_hashes_reusing(&dir, &prev_hashes, &changed);
+                    for (old_path, new_path) in detect_renames(&prev_hashes, &curr_hashes) {
+                        if let (Some(old_title), Some(new_title)) =
+                            (title_of(&old_path), title_of(&new_path))
+                        {
+                            if old_title != new_title {
+                                crate::backlinks::cascade_wikilink_rename(
+                                    &dir, &old_title, &new_title, &new_path,
+                                );
+                                embeddings.rename_path(
+                                    &old_path.to_string_lossy(),
+                                    &new_path.to_string_lossy(),
+                                );
+                            }
                         }
                     }
+                    prev_hashes = curr_hashes;
                 }
-                prev_hashes = curr_hashes;
-            }
 
-            let _ = index.rebuild();
-            backlinks.rebuild();
-            tagger.enqueue_dir();
-            for p in &changed {
-                embeddings.enqueue_path(p.clone());
+                // The watcher rebuild is the external-change path (in-app
+                // edits update the index incrementally via the write
+                // commands). Log on error instead of swallowing it so a
+                // persistently failing rebuild is diagnosable.
+                if let Err(e) = index.rebuild() {
+                    eprintln!("watcher: index rebuild failed: {e}");
+                }
+                backlinks.rebuild();
+                tagger.enqueue_dir();
+                for p in &changed {
+                    embeddings.enqueue_path(p.clone());
+                }
+                let _ = app_handle.emit("notes_changed", ());
+            }));
+            if result.is_err() {
+                eprintln!("watcher: panic while processing change batch; continuing");
             }
-            let _ = app_handle.emit("notes_changed", ());
         }
     });
 
