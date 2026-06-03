@@ -534,6 +534,11 @@
 
   let unlisten: UnlistenFn | null = null;
   let queryGen = 0;
+  // Bumped on every vault switch/attach/remove. Vault-wide refreshers
+  // (refreshAllNotes / refreshTagMeta / refreshPinned) capture this at
+  // entry and discard their result if it changed across the await — so a
+  // slow old-vault listing can't repaint the new vault. Mirrors queryGen.
+  let vaultGen = 0;
   let pendingFocusAfterLoad = false;
 
   // Navigation history — per pane. Explicit opens push; arrow nav doesn't.
@@ -584,8 +589,16 @@
       // path. Pass through directly without going through switchVault
       // (which has its own clearing logic that would clobber what
       // we're about to set).
-      await flushAllEditors();
+      // Crossing vaults swaps the editor's content; if a pending save
+      // can't be flushed, abort the navigation rather than lose the edit.
+      if ((await flushAllEditors()) > 0) {
+        console.error("cross-vault navigation aborted: editor flush failed");
+        alert("Couldn't save pending edits — navigation aborted to avoid losing changes.");
+        return;
+      }
       vaultsState = await invoke<VaultsState>("switch_vault", { index: targetIdx });
+      // New vault is active — invalidate any in-flight old-vault refresh.
+      vaultGen++;
       rawResults = [];
       allNotes = [];
       await Promise.all([refreshAllNotes(), performSearch(query)]);
@@ -792,8 +805,11 @@
   }
 
   async function refreshAllNotes() {
+    const myGen = vaultGen;
     try {
-      allNotes = await invoke<Note[]>("list_notes");
+      const result = await invoke<Note[]>("list_notes");
+      // Discard a stale old-vault listing that resolved after a switch.
+      if (myGen === vaultGen) allNotes = result;
     } catch {
       /* keep stale list */
     }
@@ -953,6 +969,34 @@
 
     const mod = e.metaKey || e.ctrlKey;
     if (!mod) return;
+    // Text-entry guard: when focus is in a modal text field (rename,
+    // save-search, add-vault, password, vault-picker — any <input>/
+    // <textarea>/contentEditable), let the keystroke do normal text
+    // editing instead of firing page-level shortcuts. Otherwise combos
+    // like Cmd/Ctrl+Backspace (delete-word-left while editing a title)
+    // would trigger the delete-note confirmation, and Cmd+1-9 / Cmd+D
+    // would yank focus out of the modal.
+    //
+    // The editor (`.cm-content`) is contentEditable too, but it owns its
+    // own keymap and the branches below already special-case it (e.g. the
+    // `f` / Backspace `inEditor` checks), so we EXCLUDE it here and leave
+    // that handling intact. Escape is already routed above and returns
+    // before reaching this point, so it keeps working in modals.
+    {
+      const ae = document.activeElement;
+      const inEditor = ae instanceof HTMLElement && !!ae.closest(".cm-content");
+      const inTextEntry =
+        !inEditor &&
+        (ae instanceof HTMLInputElement ||
+          ae instanceof HTMLTextAreaElement ||
+          (ae instanceof HTMLElement && ae.isContentEditable));
+      // The search bar is an <input> but its modifier combos are meant to
+      // work globally (Cmd+L focuses it, Cmd+J/K navigate the list from it,
+      // etc.) — handleSearchKey already lets modifier combos fall through to
+      // here on purpose. So don't treat the search field as a text-entry
+      // context; only modal/editor-adjacent fields suppress the shortcuts.
+      if (inTextEntry && ae !== searchInput) return;
+    }
     // Most shift-modified combos belong to the editor's keymap (e.g.
     // Mod+Shift+L for link suggestions). The export modal is the exception
     // — it's a page-level action so we own Mod+Shift+E.
@@ -1185,8 +1229,10 @@
   }
 
   async function refreshPinned() {
+    const myGen = vaultGen;
     try {
-      pinnedPaths = await invoke<string[]>("get_pinned");
+      const result = await invoke<string[]>("get_pinned");
+      if (myGen === vaultGen) pinnedPaths = result;
     } catch {
       /* keep stale */
     }
@@ -1202,7 +1248,13 @@
   async function rowMenuMoveToVault(path: string, targetIndex: number) {
     rowMenu = null;
     try {
-      await flushAllEditors();
+      // Moving the note to another vault relocates the file on disk. If a
+      // pending save can't be flushed, abort rather than lose the edit.
+      if ((await flushAllEditors()) > 0) {
+        console.error("move_note_to_vault aborted: editor flush failed");
+        alert("Couldn't save pending edits — move aborted to avoid losing changes.");
+        return;
+      }
       await invoke<string>("move_note_to_vault", { path, targetIndex });
       // The note left this vault — drop it from the open panes, then refresh.
       if (selectedPath === path) selectedPath = null;
@@ -1712,8 +1764,14 @@
     renameError = null;
     try {
       // Flush any pending autosaves first — otherwise the editor could
-      // write stale content to the about-to-be-renamed path.
-      await flushAllEditors();
+      // write stale content to the about-to-be-renamed path. If a flush
+      // FAILS, abort: renaming moves the file out from under the editor,
+      // so an unsaved edit would be lost to the old (now gone) path.
+      if ((await flushAllEditors()) > 0) {
+        renameError = "Couldn't save pending edits — rename aborted to avoid losing changes.";
+        renameSaving = false;
+        return;
+      }
       const newPath = await invoke<string>("rename_note", {
         path: oldPath,
         newTitle,
@@ -1761,12 +1819,15 @@
   }
 
   async function refreshTagMeta() {
+    const myGen = vaultGen;
     try {
       const [vocab, all, styles] = await Promise.all([
         invoke<string[]>("get_tag_vocabulary"),
         invoke<TagCount[]>("list_all_tags"),
         invoke<TagStyle[]>("get_tag_styles"),
       ]);
+      // Drop results from a vault we've since switched away from.
+      if (myGen !== vaultGen) return;
       tagVocabulary = vocab;
       allTagCounts = all;
       tagStyles = styles;
@@ -2380,7 +2441,14 @@
     vaultSwitching = true;
     try {
       // Flush any pending edits before swapping out from under the editor.
-      await flushAllEditors();
+      // If a flush FAILS, abort the switch: the editor's content belongs to
+      // the current vault and would be lost once we clear state + repoint.
+      if ((await flushAllEditors()) > 0) {
+        console.error("switch_vault aborted: editor flush failed");
+        alert("Couldn't save pending edits — vault switch aborted to avoid losing changes.");
+        vaultSwitching = false;
+        return;
+      }
       // CRITICAL: clear selection state AND the sidebar lists BEFORE
       // invoking the switch. Otherwise the auto-select effect (which
       // fires on selectedPath = null) reads notes[0] from the stale
@@ -2400,6 +2468,9 @@
       // memory after switching away is poor hygiene.)
       unlockedPasswords = new Map();
       vaultsState = await invoke<VaultsState>("switch_vault", { index });
+      // New vault is live — bump the generation so any old-vault refresh
+      // still in flight (e.g. from a notes_changed event) discards itself.
+      vaultGen++;
       // Pull the new vault's listing now so the auto-select effect
       // has something to pick on the next reactive cycle.
       await Promise.all([refreshAllNotes(), performSearch(query)]);
@@ -2455,7 +2526,14 @@
     }
     vaultSwitching = true;
     try {
-      await flushAllEditors();
+      // Adding a vault makes it active (a vault switch under the hood). If a
+      // pending save can't be flushed, abort before we clear state + repoint
+      // so the current vault's unsaved edit isn't lost.
+      if ((await flushAllEditors()) > 0) {
+        addVaultError = "Couldn't save pending edits — aborted to avoid losing changes.";
+        vaultSwitching = false;
+        return;
+      }
       // Same staleness fix as switchVault: clear UI state BEFORE the
       // backend swap. add_vault auto-makes the new vault active.
       selectedPath = null;
@@ -2472,6 +2550,8 @@
       // add_vault on the backend just registers — it doesn't reindex.
       // Explicitly switch so the watcher + index + embeddings repoint.
       await invoke("switch_vault", { index: vaultsState.active_index });
+      // New vault is active — invalidate any in-flight old-vault refresh.
+      vaultGen++;
       await Promise.all([refreshAllNotes(), performSearch(query)]);
     } catch (e) {
       addVaultError = String(e);
@@ -2493,7 +2573,13 @@
     // Clear UI state first so we don't briefly render the removed
     // vault's last note in the editor.
     try {
-      await flushAllEditors();
+      // Removing the active vault repoints the index off the current
+      // notes. Abort if a pending save can't be flushed first.
+      if ((await flushAllEditors()) > 0) {
+        console.error("remove_vault aborted: editor flush failed");
+        alert("Couldn't save pending edits — vault removal aborted to avoid losing changes.");
+        return;
+      }
       selectedPath = null;
       secondaryPath = null;
       primaryHistory = { stack: [], idx: -1 };
@@ -2502,6 +2588,8 @@
       allNotes = [];
       unlockedPasswords = new Map();
       vaultsState = await invoke<VaultsState>("remove_vault", { index });
+      // Active vault may have changed — invalidate in-flight old refreshers.
+      vaultGen++;
       await Promise.all([refreshAllNotes(), performSearch(query)]);
     } catch (e) {
       console.error("remove_vault failed", e);

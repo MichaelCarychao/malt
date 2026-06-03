@@ -1763,7 +1763,12 @@
       lastSavedContent = content;
       onSaved?.();
     } catch (e) {
+      // Genuine save failure (IPC/disk error). Log, then re-throw so an
+      // explicit flushAllEditors() before a destructive op can detect it and
+      // abort rather than lose content. The fire-and-forget autosave/blur/
+      // destroy callers .catch() this so they don't raise unhandled rejections.
       console.error("save_note failed", e);
+      throw e;
     }
   }
 
@@ -1805,8 +1810,16 @@
   function finalizeTagsOnBlur() {
     queueMicrotask(() => {
       if (!view || !currentPath || externalConflict !== null) return;
+      // Blur normally ends composition, but if the IME is somehow still
+      // composing, don't dispatch a doc-replacing relocate into it (would risk
+      // dropping characters). Persist the current text as-is and let the
+      // compositionend handler finalize tags once the IME commits.
+      if (view.composing) {
+        flushSave(currentPath, view.state.doc.toString()).catch(() => {});
+        return;
+      }
       relocateTags(true);
-      void flushSave(currentPath, view.state.doc.toString());
+      flushSave(currentPath, view.state.doc.toString()).catch(() => {});
     });
   }
 
@@ -1816,6 +1829,16 @@
     const p = currentPath;
     saveTimer = window.setTimeout(() => {
       if (!view) return;
+      // Mid-IME composition (choosing a CJK/accented candidate): relocateTags
+      // dispatches a full-doc replace, which cancels the in-flight composition
+      // and can drop or duplicate the partially-composed characters. Don't
+      // touch the doc now — re-arm the debounce so the save lands just after
+      // composition ends (also covered by the compositionend handler below).
+      if (view.composing) {
+        saveTimer = null;
+        scheduleSave();
+        return;
+      }
       // A conflict is pending resolution — don't write either side until
       // the user chooses, or we'd silently clobber the on-disk version.
       if (externalConflict !== null) {
@@ -1824,7 +1847,7 @@
       }
       // Migrate inline hashtags to the hidden canonical line, then save.
       relocateTags(false);
-      void flushSave(p, view.state.doc.toString());
+      flushSave(p, view.state.doc.toString()).catch(() => {});
       saveTimer = null;
     }, SAVE_DEBOUNCE_MS) as unknown as number;
   }
@@ -1847,8 +1870,13 @@
     if (view && currentPath && currentPath !== p) {
       // Flush the OUTGOING note with ITS still-current captured codec
       // (currentIsEncrypted/currentPassword aren't reassigned until this load
-      // wins below, so they still describe the note being left here).
-      await flushSave(currentPath, view.state.doc.toString());
+      // wins below, so they still describe the note being left here). A failed
+      // flush must not abort the load (flushSave now re-throws); log + continue.
+      try {
+        await flushSave(currentPath, view.state.doc.toString());
+      } catch {
+        /* already logged in flushSave */
+      }
     }
     if (view) {
       view.destroy();
@@ -1903,6 +1931,13 @@
       EditorView.domEventHandlers({
         blur: () => {
           finalizeTagsOnBlur();
+          return false;
+        },
+        // IME composition just finished — any relocate/save we deferred while
+        // view.composing was true (see scheduleSave) can run now. Re-arm the
+        // debounce so the canonical tag line is rebuilt for the committed text.
+        compositionend: () => {
+          scheduleSave();
           return false;
         },
       }),
@@ -2136,9 +2171,14 @@
     // Allow the parent to await all pending saves before a rename / other
     // path-mutating op so we don't write stale content to a renamed file.
     unregisterFlusher = registerEditorFlusher(async () => {
-      if (saveTimer && currentPath && view) {
-        clearTimeout(saveTimer);
-        saveTimer = null;
+      if (currentPath && view) {
+        if (saveTimer) {
+          clearTimeout(saveTimer);
+          saveTimer = null;
+        }
+        // Flush unconditionally (flushSave no-ops when the buffer is already
+        // saved); a genuine failure propagates to flushAllEditors so a pending
+        // destructive op (rename/move/vault-switch) aborts instead of losing edits.
         await flushSave(currentPath, view.state.doc.toString());
       }
     });
@@ -2153,7 +2193,7 @@
     unlistenNotes?.();
     unregisterFlusher?.();
     if (saveTimer && currentPath && view) {
-      void flushSave(currentPath, view.state.doc.toString());
+      flushSave(currentPath, view.state.doc.toString()).catch(() => {});
     }
     view?.destroy();
   });

@@ -30,6 +30,15 @@ static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 /// flush is the load-bearing guarantee. Directory-fsync errors are ignored:
 /// best-effort, and the data is already safe regardless.
 pub fn write_atomic<P: AsRef<Path>>(path: P, contents: &str) -> std::io::Result<()> {
+    write_atomic_bytes(path, contents.as_bytes())
+}
+
+/// Bytes-oriented sibling of [`write_atomic`] — same temp-file + fsync +
+/// rename guarantee, for callers writing non-UTF-8 payloads (e.g. a binary
+/// epub export, where a truncated re-export must never replace a good file).
+/// `write_atomic` delegates here so both paths share one implementation; see
+/// that function's doc comment for the full atomicity/durability rationale.
+pub fn write_atomic_bytes<P: AsRef<Path>>(path: P, contents: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let path = path.as_ref();
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -42,7 +51,7 @@ pub fn write_atomic<P: AsRef<Path>>(path: P, contents: &str) -> std::io::Result<
     // matters on Windows where an open handle can block the replace.
     let write_result = (|| -> std::io::Result<()> {
         let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(contents.as_bytes())?;
+        f.write_all(contents)?;
         f.flush()?;
         f.sync_all()?;
         Ok(())

@@ -99,8 +99,56 @@ async fn search_notes(
     .map_err(|e| e.to_string())?
 }
 
+/// Reject paths that escape the active vault before any read/write. Note
+/// commands receive an absolute path the frontend got from `list_notes`,
+/// but defense-in-depth: a crafted path must not let an IPC caller touch
+/// files outside the vault.
+///
+/// Canonicalize both sides and compare canonical-to-canonical — on Windows
+/// `canonicalize` adds a `\\?\` prefix, so a raw-vs-canonical `starts_with`
+/// would never match. For a path that doesn't exist yet (e.g. a note about
+/// to be created) we canonicalize its parent instead. If canonicalization
+/// fails entirely, fall back to the prior lexical `starts_with` check rather
+/// than hard-failing a legitimate flow.
+fn ensure_in_vault(path: &str) -> Result<(), String> {
+    let dir = notes::notes_dir();
+    let target = std::path::Path::new(path);
+
+    let canon_dir = std::fs::canonicalize(&dir);
+    // Canonicalize the target itself if it exists, otherwise its parent
+    // (the file is about to be created inside that directory).
+    let canon_target = if target.exists() {
+        std::fs::canonicalize(target)
+    } else if let Some(parent) = target.parent() {
+        std::fs::canonicalize(parent)
+    } else {
+        std::fs::canonicalize(target)
+    };
+
+    match (canon_dir, canon_target) {
+        (Ok(d), Ok(t)) if t.starts_with(&d) => Ok(()),
+        (Ok(_), Ok(_)) => Err(format!(
+            "refusing to access {} (outside vault)",
+            target.display()
+        )),
+        // Canonicalization failed on one side (permissions, race, etc.) —
+        // fall back to the prior lexical check so we don't break valid use.
+        _ => {
+            if target.starts_with(&dir) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "refusing to access {} (outside vault)",
+                    target.display()
+                ))
+            }
+        }
+    }
+}
+
 #[tauri::command]
 fn read_note(path: String) -> Result<String, String> {
+    ensure_in_vault(&path)?;
     std::fs::read_to_string(&path).map_err(|e| e.to_string())
 }
 
@@ -110,6 +158,20 @@ fn save_note(
     content: String,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
+    ensure_in_vault(&path)?;
+    // Defense in depth (belt-and-suspenders behind the frontend's
+    // never-write-plaintext-over-ciphertext rule): if the file on disk is
+    // currently an encrypted envelope and the incoming content is NOT one,
+    // refuse the write. Otherwise a stray plaintext save would silently
+    // destroy the encryption and leak the note's contents. Reads of a
+    // not-yet-existing file return Err → nothing to clobber, proceed.
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        if encryption::is_encrypted(&existing) && !encryption::is_encrypted(&content) {
+            return Err(
+                "refusing to overwrite an encrypted note with plaintext".to_string(),
+            );
+        }
+    }
     notes::write_atomic(&path, &content).map_err(|e| e.to_string())?;
     // Update the search index synchronously so the edit is searchable
     // immediately and doesn't depend on the debounced watcher (which can
@@ -137,6 +199,11 @@ fn save_note(
 
 #[tauri::command]
 fn is_note_encrypted(path: String) -> bool {
+    // Out-of-vault paths are reported as not-encrypted; the read/save guards
+    // reject any real access regardless.
+    if ensure_in_vault(&path).is_err() {
+        return false;
+    }
     std::fs::read_to_string(&path)
         .map(|c| encryption::is_encrypted(&c))
         .unwrap_or(false)
@@ -145,6 +212,7 @@ fn is_note_encrypted(path: String) -> bool {
 /// Decrypt + return plaintext for an already-encrypted note.
 #[tauri::command]
 fn read_encrypted_note(path: String, password: String) -> Result<String, String> {
+    ensure_in_vault(&path)?;
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     encryption::decrypt(&content, &password)
 }
@@ -159,6 +227,7 @@ fn save_encrypted_note(
     password: String,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
+    ensure_in_vault(&path)?;
     // Reuse the salt from the note's current on-disk envelope so the
     // derived-key cache hits — turns each autosave into a cheap AES-GCM
     // pass instead of a fresh Argon2id run. Fresh nonce every time.
@@ -189,6 +258,7 @@ fn decrypt_existing_note(
     password: String,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
+    ensure_in_vault(&path)?;
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let plaintext = encryption::decrypt(&content, &password)?;
     notes::write_atomic(&path, &plaintext).map_err(|e| e.to_string())?;
@@ -211,6 +281,7 @@ fn change_note_password(
     new_password: String,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
+    ensure_in_vault(&path)?;
     if new_password.is_empty() {
         return Err("new password is empty".into());
     }
@@ -319,7 +390,7 @@ fn export_to_file(
         "epub" => export::markdown_to_epub(&md, &title)?,
         _ => return Err(format!("unsupported file format: {format}")),
     };
-    std::fs::write(&dest_path, &bytes).map_err(|e| e.to_string())?;
+    notes::write_atomic_bytes(&dest_path, &bytes).map_err(|e| e.to_string())?;
     Ok(())
 }
 

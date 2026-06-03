@@ -507,6 +507,18 @@ impl EmbedIndex {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
 
+        // Stale-vault guard. A vault switch (repoint) clears the queue and
+        // swaps `db` to the new vault's connection, but a process() that was
+        // already in flight for an OLD-vault path would, on grabbing the lock
+        // below, write that path + vector into the NEW vault's DB — cross-vault
+        // leakage. Re-check membership now, right before we touch the DB: if
+        // the path is no longer under the active vault, discard this stale
+        // write. (notes_dir() reflects the active vault post-repoint.) Equality
+        // on the parent dir is enough — the vault is a flat folder.
+        if path.parent() != Some(crate::notes::notes_dir().as_path()) {
+            return Ok(false);
+        }
+
         // Insert or update — atomic within a transaction.
         let mut conn = self.db.lock().expect("db lock");
         let tx = conn.transaction().map_err(|e| e.to_string())?;

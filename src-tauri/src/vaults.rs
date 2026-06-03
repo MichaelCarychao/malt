@@ -104,15 +104,29 @@ fn save(state: &VaultsState) -> std::io::Result<()> {
 /// Path of the currently-active vault. notes::notes_dir() calls this.
 pub fn active_path() -> PathBuf {
     let state = load();
-    let p = &state.vaults[state.active_index].path;
-    PathBuf::from(p)
+    // Defense-in-depth: load() already clamps active_index, but this is
+    // the hottest path (every command + every watcher event), so degrade
+    // to the OS default rather than panicking on a malformed registry.
+    match state.vaults.get(state.active_index) {
+        Some(v) => PathBuf::from(&v.path),
+        None => PathBuf::from(fallback_default_path()),
+    }
 }
 
 /// Name of the active vault — surfaced in the sidebar header next to
 /// the note count.
 pub fn active_name() -> String {
     let state = load();
-    state.vaults[state.active_index].name.clone()
+    // Same defense-in-depth as active_path(): fall back to the basename
+    // of the default path (and a "notes" literal) instead of panicking.
+    match state.vaults.get(state.active_index) {
+        Some(v) => v.name.clone(),
+        None => PathBuf::from(fallback_default_path())
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("notes")
+            .to_string(),
+    }
 }
 
 /// Add a new vault. Returns the new VaultsState (with active_index
