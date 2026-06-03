@@ -415,6 +415,11 @@ async fn suggest_wikilinks_ai(
     path: String,
 ) -> Result<Vec<link_suggestions::LinkSuggestion>, String> {
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    // AI is disabled for encrypted notes: the file is ciphertext, and the user
+    // must decrypt it first (M2). Refuse rather than ship the envelope to a model.
+    if crate::encryption::is_encrypted(&content) {
+        return Err("AI is disabled for encrypted notes; decrypt the note first".into());
+    }
     // Strip our markup before sending to the model — same hygiene as the
     // completion paths. We don't want the AI fixating on existing tags or
     // wikilinks instead of finding fresh entities.

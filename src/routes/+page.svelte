@@ -1560,7 +1560,28 @@
   // a brainstorm from the current note body. Reuses the secondary
   // pane's real estate (closing it first if a regular note was open).
   // `body` arrives from the editor pre-stringified.
+  // M2 — AI is disabled on encrypted notes. Returns true (and offers to
+  // decrypt, which needs the password) when `path` is an encrypted note;
+  // false to let the AI action proceed. Decrypting rewrites the note as
+  // plaintext, after which AI works normally. Blocks even when the note is
+  // unlocked in-session: "encrypted on disk" is the gate, not readability.
+  function blockAiForEncrypted(path: string | null): boolean {
+    if (!path) return false;
+    const note = allNotes.find((n) => n.path === path);
+    if (!note?.is_encrypted) return false;
+    const title = getTitleForPath(path);
+    if (
+      confirm(
+        "AI features are disabled for encrypted notes.\n\nDecrypt this note to use AI? You'll need its password, and the note will be saved as plaintext.",
+      )
+    ) {
+      openPasswordModal("decrypt", path, title);
+    }
+    return true;
+  }
+
   function openBrewForPrimary(body: string) {
+    if (blockAiForEncrypted(selectedPath)) return;
     const title = selectedPath ? getTitleForPath(selectedPath) : "(untitled)";
     secondaryPath = null;
     secondaryHistory = { stack: [], idx: -1 };
@@ -1576,6 +1597,7 @@
   // the secondary note's body. Output replaces the secondary's editor
   // view; the primary stays put.
   function openBrewForSecondary(body: string) {
+    if (blockAiForEncrypted(secondaryPath)) return;
     const title = secondaryPath ? getTitleForPath(secondaryPath) : "(untitled)";
     secondaryPath = null;
     secondaryHistory = { stack: [], idx: -1 };
@@ -2975,6 +2997,7 @@
               password={selectedPath ? unlockedPasswords.get(selectedPath) ?? null : null}
               onBrew={openBrewForPrimary}
               getPrePrompt={() => getPrePromptFor("primary")}
+              onEncryptedAiBlocked={blockAiForEncrypted}
             />
           </div>
           {#if secondaryPath || brewActive}
@@ -3037,6 +3060,7 @@
                   password={secondaryPath ? unlockedPasswords.get(secondaryPath) ?? null : null}
                   onBrew={openBrewForSecondary}
                   getPrePrompt={() => getPrePromptFor("secondary")}
+                  onEncryptedAiBlocked={blockAiForEncrypted}
                 />
               {/if}
             </div>

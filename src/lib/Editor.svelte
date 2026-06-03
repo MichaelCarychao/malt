@@ -93,6 +93,7 @@
     isEncrypted = false,
     onBrew,
     getPrePrompt,
+    onEncryptedAiBlocked,
   }: {
     path: string | null;
     query?: string;
@@ -140,6 +141,10 @@
      * second note pane open (feature no-ops). The parent supplies a
      * pane-specific implementation. */
     getPrePrompt?: () => Promise<string | null>;
+    /** Fired when the user triggers an AI action (complete / rewrite / prompt /
+     * brew) on an encrypted note. AI is disabled until the note is decrypted;
+     * the parent offers to decrypt (M2). */
+    onEncryptedAiBlocked?: (path: string) => void;
   } = $props();
 
   // Right-click pill menu: floating div anchored at cursor.
@@ -620,6 +625,12 @@
   });
 
   async function fetchCompletion(v: EditorView, direction = "") {
+    // AI is disabled on encrypted notes — block and let the parent offer to
+    // decrypt (M2). Covers both completion and rewrite (this fn handles both).
+    if (isEncrypted) {
+      onEncryptedAiBlocked?.(currentPath ?? "");
+      return;
+    }
     const myGen = ++fetchGen;
     const sel = v.state.selection.main;
     const docLen = v.state.doc.length;
@@ -726,6 +737,10 @@
   // note pane is open (getPrePrompt returns null).
   async function runTwoPanePrompt(v: EditorView) {
     if (!getPrePrompt) return;
+    if (isEncrypted) {
+      onEncryptedAiBlocked?.(currentPath ?? "");
+      return;
+    }
     let prePrompt: string | null = null;
     try {
       prePrompt = await getPrePrompt();
