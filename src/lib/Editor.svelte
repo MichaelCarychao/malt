@@ -1448,6 +1448,21 @@
     return caret > m.from && caret <= m.to;
   }
 
+  // The canonical tag line, but only once it's FINALIZED. While the caret is on
+  // that line the user is still typing/editing the tag, so treat it as ordinary
+  // editable text — not hidden, not protected, not pilled, not in the tag row —
+  // until the caret leaves the line. Without this, a freshly-typed `#j` on a line
+  // below body text is instantly classified as the (hidden, protected) canonical
+  // line, which hid it mid-word AND made protectTagLine drop the next keystroke.
+  function liveCanonicalRange(state: EditorState): { from: number; to: number } | null {
+    const range = canonicalTagLineRange(state.doc.toString());
+    if (!range) return null;
+    const head = state.selection.main.head;
+    const line = state.doc.lineAt(range.from);
+    if (head >= line.from && head <= line.to) return null;
+    return range;
+  }
+
   const tagWatcher = ViewPlugin.fromClass(
     class {
       constructor(view: EditorView) {
@@ -1461,7 +1476,13 @@
       refresh(view: EditorView) {
         const doc = view.state.doc.toString();
         const caret = view.state.selection.main.head;
-        const canonical = findCanonicalTagLine(doc);
+        let canonical = findCanonicalTagLine(doc);
+        // The line the caret is on isn't a finalized tag line yet — treat it as
+        // ordinary text so its tags don't pop into the row while being typed.
+        if (canonical) {
+          const cl = view.state.doc.line(canonical.lineIdx + 1);
+          if (caret >= cl.from && caret <= cl.to) canonical = null;
+        }
         const aboveText = canonical
           ? doc.split("\n").slice(0, canonical.lineIdx).join("\n")
           : doc;
@@ -1498,6 +1519,9 @@
         if (
           u.docChanged ||
           u.viewportChanged ||
+          // Recompute on caret moves too: a half-typed tag must pill the moment
+          // the caret leaves it (cursor move / click) and un-pill when re-entered.
+          u.selectionSet ||
           u.transactions.some((tr) => tr.effects.some((e) => e.is(tagPillRedraw)))
         ) {
           this.decorations = this.compute(u.view);
@@ -1506,12 +1530,18 @@
       compute(view: EditorView): DecorationSet {
         const builder = new RangeSetBuilder<Decoration>();
         const doc = view.state.doc.toString();
-        const canonical = canonicalTagLineRange(doc);
+        const caret = view.state.selection.main.head;
+        const canonical = liveCanonicalRange(view.state);
         const matches = findInlineTags(doc);
         for (const m of matches) {
           // Skip matches inside the canonical tag line — that whole line is
           // hidden by tagLineHider, so styling individual pills there is wasted.
           if (canonical && m.from >= canonical.from && m.to <= canonical.to) continue;
+          // Don't pill the tag the caret is still inside: a half-typed #tag
+          // stays plain editable text and only becomes a pill once the caret
+          // leaves it (space / return / cursor move / blur). Mirrors tagWatcher,
+          // so the inline pill and the tag-row pill finalize at the same moment.
+          if (isCaretInTag(m, caret)) continue;
           const cls = currentVocab.includes(m.tag)
             ? "cm-hashtag-inline"
             : "cm-hashtag-inline cm-hashtag-adhoc";
@@ -1529,8 +1559,7 @@
   // it crosses a line boundary, so this lives in a StateField even though
   // tag-pill marks (which never span newlines) stay in a ViewPlugin.
   function computeTagLineHide(state: EditorState): DecorationSet {
-    const doc = state.doc.toString();
-    const range = canonicalTagLineRange(doc);
+    const range = liveCanonicalRange(state);
     if (!range) return Decoration.none;
     const line = state.doc.lineAt(range.from);
     const from = line.from > 0 ? line.from - 1 : line.from;
@@ -1542,7 +1571,10 @@
       return computeTagLineHide(state);
     },
     update(value, tr) {
-      if (!tr.docChanged) return value;
+      // Recompute on selection changes too: the hide now depends on where the
+      // caret is (the line it sits on is shown as editable, not hidden), so it
+      // must update when the caret moves on/off the tag line, not just on edits.
+      if (!tr.docChanged && !tr.selection) return value;
       return computeTagLineHide(tr.state);
     },
     provide: (f) => EditorView.decorations.from(f),
@@ -1554,28 +1586,58 @@
   // carry no annotation and are subject to protection.
   const internalDocRewrite = Annotation.define<boolean>();
 
-  // Protect the hidden canonical tag line from user edits. Without this,
-  // backspacing past trailing newlines at the end of a note silently
-  // eats into the (invisible) tag line — you can delete tags you can't
-  // see. changeFilter returns the protected [from,to] range; CodeMirror
-  // drops any user deletion that would touch it while still allowing
-  // insertions adjacent to it and edits everywhere else. We protect from
-  // the separator newline before the tag line through the end of the
-  // document so the tags and their separator are both safe.
-  const protectTagLine = EditorState.changeFilter.of((tr) => {
-    if (tr.annotation(internalDocRewrite)) return true;
-    const doc = tr.startState.doc.toString();
-    const range = canonicalTagLineRange(doc);
-    if (!range) return true;
+  // Protect the hidden canonical tag line from BOTH user edits and the cursor.
+  //
+  // The old approach (EditorState.changeFilter) only blocked *deletions* that
+  // touched the region — CodeMirror still allows "insertions adjacent to it",
+  // so typing at the very end of a note (cursor at/after the hidden tags)
+  // either merged the character into the last tag or briefly un-hid the whole
+  // line (the "flash") until the debounced relocate fired. A transactionFilter
+  // is authoritative: it (1) drops any user change that reaches past the end of
+  // the visible body, and (2) clamps the selection so the caret can never sit
+  // on or after the hidden tags. Net effect: Ctrl+End / Cmd+Down / a click
+  // below the tags all land at the end of the visible body, and typing there
+  // appends to the body — tags never appear in the editor and never absorb a
+  // keystroke. Internal rewrites (relocate-to-bottom, external reloads) carry
+  // the internalDocRewrite annotation and pass through untouched.
+  const protectTagLine = EditorState.transactionFilter.of((tr) => {
+    if (tr.annotation(internalDocRewrite)) return tr;
+    // Only protect a FINALIZED tag line. If the caret is on it, the user is
+    // typing/editing the tag — let every keystroke through (this is what was
+    // dropping characters when you typed a #tag on a line below body text).
+    const range = liveCanonicalRange(tr.startState);
+    if (!range) return tr;
     const line = tr.startState.doc.lineAt(range.from);
-    // Protect the tag line AND the separator newline before it — the exact
-    // span tagLineHider hides. Protecting only the tag chars left a gap: a
-    // backspace at that boundary deleted the (hidden) separator and collapsed
-    // the canonical line up into visible, editable text. canonicalTagLineRange
-    // already returns null when there's no content above, so a tag-only note
-    // still has an editable anchor and never reaches here.
-    const from = line.from > 0 ? line.from - 1 : line.from;
-    return [from, line.to];
+    // `guard` = last editable position: just before the hidden separator
+    // newline that precedes the tag line. Everything > guard is off-limits.
+    const guard = line.from - 1;
+
+    // (1) Block any user change that reaches into the protected region. This
+    // catches boundary insertions (the char-into-tag merge) as well as
+    // deletions/replacements. Drop the edit and park the caret at the body end
+    // so the keystroke the user *meant* for the body still has somewhere to go.
+    if (tr.docChanged) {
+      let reachesTags = false;
+      tr.changes.iterChangedRanges((_fromA, toA) => {
+        if (toA > guard) reachesTags = true;
+      });
+      if (reachesTags) {
+        return { selection: { anchor: guard } };
+      }
+    }
+
+    // (2) Keep the caret out of the hidden region on plain navigation
+    // (Ctrl+End, Cmd+Down, clicking below the tags).
+    if (tr.selection && !tr.docChanged) {
+      const { anchor, head } = tr.selection.main;
+      if (anchor > guard || head > guard) {
+        return [
+          tr,
+          { selection: { anchor: Math.min(anchor, guard), head: Math.min(head, guard) } },
+        ];
+      }
+    }
+    return tr;
   });
 
   // Make the hidden tag region atomic so arrow keys / word-motion skip
@@ -2031,6 +2093,31 @@
           );
           if (!internal) scheduleSave();
           emitCount(u.state.doc.toString());
+        }
+        // Finalize a freshly-typed tag on a plain cursor move too — not only on
+        // edit (debounce) and blur. When the caret LEAVES an inline tag, relocate
+        // it to the canonical line right away, so its inline copy doesn't linger
+        // beside the tag-row pill until the next keystroke/blur. Deferred via a
+        // microtask (can't dispatch inside an update); the relocate's own rewrite
+        // carries internalDocRewrite, so it can't re-trigger this.
+        if (u.selectionSet && !u.docChanged && externalConflict === null) {
+          const internalSel = u.transactions.some(
+            (tr) => !!tr.annotation(internalDocRewrite),
+          );
+          const prevHead = u.startState.selection.main.head;
+          const newHead = u.state.selection.main.head;
+          const leftATag =
+            !internalSel &&
+            findInlineTags(u.startState.doc.toString()).some(
+              (m) => isCaretInTag(m, prevHead) && !isCaretInTag(m, newHead),
+            );
+          if (leftATag) {
+            queueMicrotask(() => {
+              if (!view || !currentPath || externalConflict !== null) return;
+              relocateTags(false);
+              void flushSave(currentPath, view.state.doc.toString()).catch(() => {});
+            });
+          }
         }
         // Open wikilink completion whenever the cursor sits inside an open
         // [[...  context. CodeMirror's auto-trigger only fires on word
