@@ -59,19 +59,21 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # ── macOS code signing (Developer ID) + notarization ──
-          # When these secrets are set, tauri-action imports the cert, signs
-          # the .app/.dmg with the hardened runtime, submits to Apple's notary
-          # service, and staples the ticket — Gatekeeper then opens the app
-          # with no warning and no right-click dance. Ignored on the Windows
-          # runner. IMPORTANT: add all six secrets BEFORE the next release tag
-          # — until then the macOS build is unsigned.
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # ── macOS code signing (Developer ID) + notarization — DISABLED ──
+          # Intentionally commented out until the Apple signing secrets exist.
+          # DO NOT pass these as `${{ secrets.* }}` while the secrets are unset:
+          # an unset secret resolves to an EMPTY string, and Tauri's bundler
+          # treats a present-but-empty APPLE_CERTIFICATE as "sign this app" — it
+          # runs `security import` on an empty cert and FAILS the whole macOS
+          # build (it does NOT fall back to unsigned). With these absent, macOS
+          # builds unsigned and succeeds.
+          # TO ENABLE SIGNING: add all six repo secrets, then uncomment these.
+          # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # APPLE_ID: ${{ secrets.APPLE_ID }}
+          # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           # Tauri updater signing (separate from OS-level code signing).
           # Private key + optional password live in GitHub secrets; signed
           # .sig files are emitted next to each binary so the in-app
@@ -81,7 +83,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "malt ${{ github.ref_name }}"
-          releaseBody: "See CHANGELOG.md for what's in this release. The Windows build is unsigned — you may see a SmartScreen warning (More info → Run anyway). The macOS build is signed & notarized."
+          releaseBody: "See CHANGELOG.md for what's in this release. Both builds are currently unsigned: on Windows, click More info → Run anyway at the SmartScreen prompt; on macOS, right-click the app → Open the first time to get past Gatekeeper. Code signing is on the roadmap."
           releaseDraft: true
           # Must stay false: the in-app updater fetches /releases/latest/...,
           # and GitHub's "latest" endpoint skips anything flagged prerelease,
