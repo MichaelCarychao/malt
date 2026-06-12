@@ -73,10 +73,38 @@ fn path() -> PathBuf {
 /// order takes over). Seeds the built-in Empty Notes search at the
 /// front on first load.
 pub fn load() -> Vec<SavedSearch> {
-    let mut items: Vec<SavedSearch> = std::fs::read_to_string(path())
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
+    load_inner().unwrap_or_else(|_| {
+        // Unreadable (transient IO) — serve the builtins in memory but
+        // never persist over the user's real file. Mutations are blocked
+        // separately via load_for_update.
+        let mut items = Vec::new();
+        for b in builtins() {
+            items.push(b);
+        }
+        assign_slots(&mut items);
+        items
+    })
+}
+
+/// Load for a read-modify-write cycle (upsert/delete/rename/reorder).
+/// Errors when the file exists but can't be read — saving a default list
+/// over it would silently drop every custom saved search.
+fn load_for_update() -> Result<Vec<SavedSearch>, String> {
+    load_inner().map_err(|_| {
+        "saved_searches.json exists but can't be read right now — change not \
+         saved (retry in a moment)"
+            .to_string()
+    })
+}
+
+fn load_inner() -> Result<Vec<SavedSearch>, ()> {
+    let mut items: Vec<SavedSearch> = match crate::config::read_json(&path()) {
+        crate::config::JsonRead::Parsed(v) => v,
+        // Missing → first run; Quarantined → original preserved in a .bak.
+        // Both are safe to rebuild from scratch (and later persist).
+        crate::config::JsonRead::Missing | crate::config::JsonRead::Quarantined => Vec::new(),
+        crate::config::JsonRead::Unreadable => return Err(()),
+    };
     // Stable sort: slotted items by slot ascending, then unbound items in
     // their existing array order. Stable sort means ties (e.g. two unbound)
     // preserve insertion order.
@@ -92,7 +120,7 @@ pub fn load() -> Vec<SavedSearch> {
         }
     }
     assign_slots(&mut items);
-    items
+    Ok(items)
 }
 
 /// Overwrite each item's `slot` field from its position in `items`.
@@ -127,8 +155,8 @@ fn save(items: &[SavedSearch]) -> std::io::Result<()> {
 /// - If `item.slot` is set and differs from the current position, the
 ///   item is moved into that 1-indexed position and others shift to
 ///   accommodate.
-pub fn upsert(item: SavedSearch) -> std::io::Result<Vec<SavedSearch>> {
-    let mut items = load();
+pub fn upsert(item: SavedSearch) -> Result<Vec<SavedSearch>, String> {
+    let mut items = load_for_update()?;
     let requested = item.slot;
 
     if let Some(idx) = items.iter().position(|x| x.id == item.id) {
@@ -153,24 +181,24 @@ pub fn upsert(item: SavedSearch) -> std::io::Result<Vec<SavedSearch>> {
     }
 
     assign_slots(&mut items);
-    save(&items)?;
+    save(&items).map_err(|e| e.to_string())?;
     Ok(items)
 }
 
-pub fn delete(id: &str) -> std::io::Result<Vec<SavedSearch>> {
-    let mut items = load();
+pub fn delete(id: &str) -> Result<Vec<SavedSearch>, String> {
+    let mut items = load_for_update()?;
     // Reject deletion of built-in searches (they get re-seeded on next
     // load anyway, but the user shouldn't see the operation succeed and
     // then have the item reappear).
     if items.iter().any(|x| x.id == id && x.is_builtin) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "Built-in saved searches can't be deleted. Use 'Remove from quick bar' instead.",
-        ));
+        return Err(
+            "Built-in saved searches can't be deleted. Use 'Remove from quick bar' instead."
+                .to_string(),
+        );
     }
     items.retain(|x| x.id != id);
     assign_slots(&mut items);
-    save(&items)?;
+    save(&items).map_err(|e| e.to_string())?;
     Ok(items)
 }
 
@@ -178,32 +206,32 @@ pub fn delete(id: &str) -> std::io::Result<Vec<SavedSearch>> {
 /// binding and disappears from the chip bar — but stays in the Settings
 /// list. Equivalent to reorder(id, MAX_SLOTS + 1) but clearer at call
 /// sites and more discoverable.
-pub fn unbind_slot(id: &str) -> std::io::Result<Vec<SavedSearch>> {
+pub fn unbind_slot(id: &str) -> Result<Vec<SavedSearch>, String> {
     reorder(id, MAX_SLOTS + 1)
 }
 
 /// Rename the saved search with `id`. Position/slot unchanged.
-pub fn rename(id: &str, name: String) -> std::io::Result<Vec<SavedSearch>> {
-    let mut items = load();
+pub fn rename(id: &str, name: String) -> Result<Vec<SavedSearch>, String> {
+    let mut items = load_for_update()?;
     if let Some(item) = items.iter_mut().find(|x| x.id == id) {
         item.name = name;
     }
-    // `load()` already assigned slots; rename doesn't touch order.
-    save(&items)?;
+    // `load_for_update()` already assigned slots; rename doesn't touch order.
+    save(&items).map_err(|e| e.to_string())?;
     Ok(items)
 }
 
 /// Move the saved search with `id` to 1-indexed `target_position`,
 /// shifting other items to accommodate. Positions past the end of the
 /// list clamp to the end (i.e. append). No-op if `id` is unknown.
-pub fn reorder(id: &str, target_position: usize) -> std::io::Result<Vec<SavedSearch>> {
-    let mut items = load();
+pub fn reorder(id: &str, target_position: usize) -> Result<Vec<SavedSearch>, String> {
+    let mut items = load_for_update()?;
     if let Some(idx) = items.iter().position(|x| x.id == id) {
         let item = items.remove(idx);
         let target_idx = target_position.saturating_sub(1).min(items.len());
         items.insert(target_idx, item);
         assign_slots(&mut items);
-        save(&items)?;
+        save(&items).map_err(|e| e.to_string())?;
     }
     Ok(items)
 }

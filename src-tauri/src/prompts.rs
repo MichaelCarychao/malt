@@ -99,10 +99,26 @@ fn path() -> PathBuf {
 }
 
 fn load_overrides() -> HashMap<PromptKey, String> {
-    std::fs::read_to_string(path())
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    match crate::config::read_json(&path()) {
+        crate::config::JsonRead::Parsed(m) => m,
+        _ => HashMap::new(),
+    }
+}
+
+/// Load for a read-modify-write cycle (set/reset). Errors when the file
+/// exists but can't be read — saving a default map over it would silently
+/// wipe every customized prompt.
+fn load_overrides_for_update() -> Result<HashMap<PromptKey, String>, String> {
+    match crate::config::read_json(&path()) {
+        crate::config::JsonRead::Parsed(m) => Ok(m),
+        crate::config::JsonRead::Missing | crate::config::JsonRead::Quarantined => {
+            Ok(HashMap::new())
+        }
+        crate::config::JsonRead::Unreadable => Err(
+            "prompts.json exists but can't be read right now — change not saved              (retry in a moment)"
+                .to_string(),
+        ),
+    }
 }
 
 fn save_overrides(map: &HashMap<PromptKey, String>) -> std::io::Result<()> {
@@ -129,22 +145,22 @@ pub fn get(key: PromptKey) -> String {
 
 /// Save a user override for `key`. Empty content is treated as a
 /// reset (removes the override).
-pub fn set(key: PromptKey, content: String) -> std::io::Result<()> {
-    let mut overrides = load_overrides();
+pub fn set(key: PromptKey, content: String) -> Result<(), String> {
+    let mut overrides = load_overrides_for_update()?;
     if content.trim().is_empty() {
         overrides.remove(&key);
     } else {
         overrides.insert(key, content);
     }
-    save_overrides(&overrides)
+    save_overrides(&overrides).map_err(|e| e.to_string())
 }
 
 /// Remove the user override for `key`, falling back to the built-in
 /// default on next `get()`.
-pub fn reset(key: PromptKey) -> std::io::Result<()> {
-    let mut overrides = load_overrides();
+pub fn reset(key: PromptKey) -> Result<(), String> {
+    let mut overrides = load_overrides_for_update()?;
     overrides.remove(&key);
-    save_overrides(&overrides)
+    save_overrides(&overrides).map_err(|e| e.to_string())
 }
 
 #[derive(Debug, Clone, Serialize)]

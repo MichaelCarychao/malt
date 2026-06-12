@@ -96,21 +96,24 @@ impl Default for Config {
     }
 }
 
-/// Toggle a note's pinned state; returns the new pinned list.
-pub fn toggle_pin(path: &str) -> std::io::Result<Vec<String>> {
-    let mut cfg = load();
+/// Toggle a note's pinned state; returns the new pinned list. Uses
+/// `load_for_update` so a transiently unreadable config.json aborts the
+/// toggle instead of saving a default config over the user's settings.
+pub fn toggle_pin(path: &str) -> Result<Vec<String>, String> {
+    let mut cfg = load_for_update()?;
     if let Some(i) = cfg.pinned_paths.iter().position(|p| p == path) {
         cfg.pinned_paths.remove(i);
     } else {
         cfg.pinned_paths.push(path.to_string());
     }
-    save(&cfg)?;
+    save(&cfg).map_err(|e| e.to_string())?;
     Ok(cfg.pinned_paths)
 }
 
 /// Repoint a pin after a rename (keeps the pin on the renamed file).
+/// Best-effort: skipped (not defaulted!) when the config can't be loaded.
 pub fn repoint_pin(old: &str, new: &str) {
-    let mut cfg = load();
+    let Ok(mut cfg) = load_for_update() else { return };
     let mut changed = false;
     for p in cfg.pinned_paths.iter_mut() {
         if p == old {
@@ -123,9 +126,10 @@ pub fn repoint_pin(old: &str, new: &str) {
     }
 }
 
-/// Drop a pin (after delete or move-out-of-vault).
+/// Drop a pin (after delete or move-out-of-vault). Best-effort: skipped
+/// (not defaulted!) when the config can't be loaded.
 pub fn remove_pin(path: &str) {
-    let mut cfg = load();
+    let Ok(mut cfg) = load_for_update() else { return };
     let before = cfg.pinned_paths.len();
     cfg.pinned_paths.retain(|p| p != path);
     if cfg.pinned_paths.len() != before {
@@ -175,11 +179,88 @@ fn config_path() -> PathBuf {
     p
 }
 
+/// How a config-style JSON file read went. The distinction matters because
+/// the failure modes need OPPOSITE handling: a missing file is a legitimate
+/// first run (seed defaults), a corrupt file must be preserved before we
+/// touch anything (quarantine + start fresh), and a transiently unreadable
+/// file (AV lock, disk hiccup) must never be "repaired" — acting on defaults
+/// and then saving would permanently overwrite the user's real data with
+/// them. That last case is exactly how a one-off IO error used to wipe
+/// vaults.json / pins / saved searches.
+pub(crate) enum JsonRead<T> {
+    Parsed(T),
+    /// File doesn't exist — safe to seed + persist defaults.
+    Missing,
+    /// File existed but didn't parse. The original has been renamed to a
+    /// `.corrupt-<ts>.bak` sibling, so seeding + persisting defaults is safe
+    /// and the user's bytes are recoverable.
+    Quarantined,
+    /// File exists but couldn't be read (lock/permissions/IO). Treat as
+    /// read-only fallback: use in-memory defaults, NEVER persist them.
+    Unreadable,
+}
+
+/// Read + parse a JSON file with the failure isolation described on
+/// [`JsonRead`]. Shared by config / vaults / saved-searches / prompts.
+pub(crate) fn read_json<T: serde::de::DeserializeOwned>(path: &PathBuf) -> JsonRead<T> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => match serde_json::from_str::<T>(&s) {
+            Ok(v) => JsonRead::Parsed(v),
+            Err(e) => {
+                eprintln!(
+                    "malt: {} is corrupt ({e}); quarantining and starting fresh",
+                    path.display()
+                );
+                quarantine_corrupt(path);
+                JsonRead::Quarantined
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => JsonRead::Missing,
+        Err(e) => {
+            eprintln!(
+                "malt: {} unreadable ({e}); using defaults WITHOUT persisting",
+                path.display()
+            );
+            JsonRead::Unreadable
+        }
+    }
+}
+
+/// Move an unparseable file aside (`<name>.corrupt-<unix-secs>.bak`) so a
+/// fresh default can be written without destroying the user's original.
+/// Best-effort: if even the rename fails we leave the file alone — the
+/// caller must then treat it as Unreadable (no persist).
+fn quarantine_corrupt(path: &PathBuf) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut bak = path.as_os_str().to_os_string();
+    bak.push(format!(".corrupt-{ts}.bak"));
+    let _ = std::fs::rename(path, PathBuf::from(bak));
+}
+
 pub fn load() -> Config {
-    std::fs::read_to_string(config_path())
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    match read_json::<Config>(&config_path()) {
+        JsonRead::Parsed(c) => c,
+        _ => Config::default(),
+    }
+}
+
+/// Load for a read-modify-write cycle. Errors when the file exists but
+/// can't be read — proceeding would make the subsequent `save()` overwrite
+/// the user's real config with defaults. Missing/quarantined files are fine
+/// to start from defaults (nothing valid would be lost by saving).
+pub(crate) fn load_for_update() -> Result<Config, String> {
+    match read_json::<Config>(&config_path()) {
+        JsonRead::Parsed(c) => Ok(c),
+        JsonRead::Missing | JsonRead::Quarantined => Ok(Config::default()),
+        JsonRead::Unreadable => Err(
+            "config.json exists but can't be read right now — change not saved \
+             (retry in a moment)"
+                .to_string(),
+        ),
+    }
 }
 
 pub fn save(cfg: &Config) -> std::io::Result<()> {

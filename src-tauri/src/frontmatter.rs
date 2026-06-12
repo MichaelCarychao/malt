@@ -35,8 +35,17 @@ pub fn split(content: &str) -> (Frontmatter, &str) {
         return (Frontmatter::default(), content);
     };
 
-    let fm: Frontmatter = serde_yaml::from_str(yaml_str).unwrap_or_default();
-    (fm, body)
+    // Unparseable YAML between valid markers: treat the WHOLE file as body
+    // (no frontmatter) rather than defaulting. Returning a default here used
+    // to make every rewrite path (rename cascade, auto-tag, link-mention)
+    // emit merge(default, body) — silently deleting the user's hand-written
+    // (if malformed) frontmatter block from the file. As opaque body text it
+    // survives the round-trip byte-for-byte; the cost is merely that tags/
+    // metadata inside it aren't interpreted until the YAML is fixed.
+    match serde_yaml::from_str::<Frontmatter>(yaml_str) {
+        Ok(fm) => (fm, body),
+        Err(_) => (Frontmatter::default(), content),
+    }
 }
 
 /// Build a file string from a frontmatter + body. Skips writing the YAML
@@ -92,5 +101,18 @@ mod tests {
     fn merge_emits_no_frontmatter_when_truly_empty() {
         let fm = Frontmatter::default();
         assert_eq!(merge(&fm, "Just a body.\n"), "Just a body.\n");
+    }
+
+    // Regression: malformed YAML between valid markers must survive a
+    // split → merge round-trip as opaque body text, not get dropped.
+    #[test]
+    fn malformed_yaml_is_preserved_as_body() {
+        let content = "---\nid: ok\n\tbad: tabs aren't valid yaml indentation\n---\nBody.\n";
+        let (fm, body) = split(content);
+        assert!(fm.tags.is_none());
+        assert!(fm.extra.is_empty());
+        assert_eq!(body, content, "unparseable frontmatter must stay in the body");
+        let out = merge(&fm, body);
+        assert_eq!(out, content, "round-trip must be lossless");
     }
 }

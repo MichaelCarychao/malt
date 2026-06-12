@@ -60,25 +60,43 @@ fn fallback_default_path() -> String {
     "./malt".to_string()
 }
 
-/// Load the vault registry. On first call (or if the file is missing
-/// / unreadable / empty), seed a single "default" vault and persist it
-/// so subsequent calls are idempotent.
-pub fn load() -> VaultsState {
-    let raw = std::fs::read_to_string(registry_path())
-        .ok()
-        .and_then(|s| serde_json::from_str::<VaultsState>(&s).ok());
-    let mut state = raw.unwrap_or_default();
-    if state.vaults.is_empty() {
-        // Seed: try the legacy config notes_dir first so existing users
-        // don't see their notes "disappear" on upgrade. Fall back to
-        // the OS default if no override.
-        let legacy = crate::config::load().notes_dir;
-        let path = legacy.unwrap_or_else(fallback_default_path);
-        state.vaults.push(Vault {
+/// Seed a fresh single-vault state: the legacy config notes_dir if set
+/// (so existing users don't see their notes "disappear" on upgrade),
+/// else the OS default.
+fn seeded_default() -> VaultsState {
+    let legacy = crate::config::load().notes_dir;
+    let path = legacy.unwrap_or_else(fallback_default_path);
+    VaultsState {
+        vaults: vec![Vault {
             name: "Default".to_string(),
             path,
-        });
-        state.active_index = 0;
+        }],
+        active_index: 0,
+    }
+}
+
+/// Load the vault registry. Failure handling is deliberately asymmetric
+/// (see config::JsonRead): a MISSING file is a first run — seed + persist
+/// a default vault; a CORRUPT file is quarantined to a .bak first, then
+/// seeded (the user's original bytes survive for manual recovery); an
+/// UNREADABLE file (AV lock, transient IO error) returns an in-memory
+/// default WITHOUT persisting — this used to `save()` unconditionally,
+/// which let one transient read failure permanently overwrite the user's
+/// entire vault registry with a single "Default" entry.
+pub fn load() -> VaultsState {
+    let mut state = match crate::config::read_json::<VaultsState>(&registry_path()) {
+        crate::config::JsonRead::Parsed(s) => s,
+        crate::config::JsonRead::Missing | crate::config::JsonRead::Quarantined => {
+            let seeded = seeded_default();
+            let _ = save(&seeded);
+            seeded
+        }
+        crate::config::JsonRead::Unreadable => return seeded_default(),
+    };
+    if state.vaults.is_empty() {
+        // Parsed fine but empty — a legitimate (if odd) on-disk state;
+        // re-seed so the app always has somewhere to point.
+        state = seeded_default();
         let _ = save(&state);
     }
     // Clamp active_index defensively — if the user hand-edited the
@@ -87,6 +105,20 @@ pub fn load() -> VaultsState {
         state.active_index = 0;
     }
     state
+}
+
+/// Load for a read-modify-write cycle (add/switch/rename/remove). Errors
+/// when the registry exists but can't be read right now — mutating a
+/// default state and saving it would wipe the user's real vault list.
+fn load_for_update() -> Result<VaultsState, String> {
+    match crate::config::read_json::<VaultsState>(&registry_path()) {
+        crate::config::JsonRead::Unreadable => Err(
+            "vaults.json exists but can't be read right now — change not saved \
+             (retry in a moment)"
+                .to_string(),
+        ),
+        _ => Ok(load()),
+    }
 }
 
 fn save(state: &VaultsState) -> std::io::Result<()> {
@@ -143,7 +175,7 @@ pub fn add(name: String, path: String) -> Result<VaultsState, String> {
     if !p.is_dir() {
         return Err(format!("not a directory: {path}"));
     }
-    let mut state = load();
+    let mut state = load_for_update()?;
     state.vaults.push(Vault {
         name: if name.trim().is_empty() {
             p.file_name()
@@ -162,7 +194,7 @@ pub fn add(name: String, path: String) -> Result<VaultsState, String> {
 
 /// Switch the active vault. Returns the new state.
 pub fn switch(index: usize) -> Result<VaultsState, String> {
-    let mut state = load();
+    let mut state = load_for_update()?;
     if index >= state.vaults.len() {
         return Err(format!("vault index {index} out of range"));
     }
@@ -173,7 +205,7 @@ pub fn switch(index: usize) -> Result<VaultsState, String> {
 
 /// Rename a vault in place.
 pub fn rename(index: usize, name: String) -> Result<VaultsState, String> {
-    let mut state = load();
+    let mut state = load_for_update()?;
     if index >= state.vaults.len() {
         return Err(format!("vault index {index} out of range"));
     }
@@ -191,7 +223,7 @@ pub fn rename(index: usize, name: String) -> Result<VaultsState, String> {
 /// shifts to index 0; if the last vault is removed, a fresh "Default"
 /// is seeded.
 pub fn remove(index: usize) -> Result<VaultsState, String> {
-    let mut state = load();
+    let mut state = load_for_update()?;
     if index >= state.vaults.len() {
         return Err(format!("vault index {index} out of range"));
     }
