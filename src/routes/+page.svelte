@@ -1149,7 +1149,7 @@
       void tryEnter();
     } else if (e.key === "Tab" && !e.shiftKey) {
       e.preventDefault();
-      focusEditor();
+      focusEditorOrUnlock();
     }
     // Esc is now handled by the global capture-phase handler — always clears.
   }
@@ -1452,6 +1452,25 @@
     cm?.focus();
   }
 
+  /** True when `path` is an encrypted note with no cached password. */
+  function isLocked(path: string | null): boolean {
+    if (!path) return false;
+    const note = allNotes.find((n) => n.path === path);
+    return !!note?.is_encrypted && !unlockedPasswords.has(path);
+  }
+
+  /** Keyboard-first unlock: entering a locked note (Enter / Tab from the
+   * search bar, arrow-nav + Enter) pops the password modal instead of
+   * focusing a silently empty editor. Unlocking previously required a
+   * mouse click on the row — a dead end for keyboard-only use. */
+  function focusEditorOrUnlock() {
+    if (selectedPath && isLocked(selectedPath)) {
+      openPasswordModal("unlock", selectedPath, getTitleForPath(selectedPath), "primary");
+      return;
+    }
+    focusEditor();
+  }
+
   function handleEditorReady(view: { focus: () => void }) {
     if (pendingFocusAfterLoad) {
       pendingFocusAfterLoad = false;
@@ -1463,7 +1482,7 @@
     const trimmed = query.trim();
     // Empty query: jump into the editor on whatever's selected, if anything.
     if (!trimmed) {
-      if (selectedPath) focusEditor();
+      if (selectedPath) focusEditorOrUnlock();
       return;
     }
     // Semantic mode (~concept) and report lenses (is:orphan, is:onthisday,
@@ -1471,12 +1490,12 @@
     // It opens the top-ranked / selected result, or no-ops if there are
     // none. Creating happens only in plain lexical mode.
     if (semanticMode || specialReport) {
-      if (selectedPath) focusEditor();
+      if (selectedPath) focusEditorOrUnlock();
       return;
     }
     // 1) User explicitly arrowed in the result list — honor their choice.
     if (userNavigated && selectedPath) {
-      focusEditor();
+      focusEditorOrUnlock();
       return;
     }
     // 2) The typed query is the exact title of an existing note (case-insensitive,
@@ -1491,7 +1510,7 @@
       selectedPath = exact.path;
       focusedPane = "primary";
       void scrollSelectedIntoView("nearest");
-      focusEditor();
+      focusEditorOrUnlock();
       query = "";
       return;
     }
@@ -2413,7 +2432,7 @@
       selectedPath = existing.path;
       focusedPane = "primary";
       void scrollSelectedIntoView("nearest");
-      void tick().then(() => focusEditor());
+      void tick().then(() => focusEditorOrUnlock());
       return;
     }
     try {
@@ -2456,7 +2475,7 @@
     selectedPath = pick.path;
     focusedPane = "primary";
     void scrollSelectedIntoView("nearest");
-    void tick().then(() => focusEditor());
+    void tick().then(() => focusEditorOrUnlock());
   }
 
   // ─── Vault management ────────────────────────────────────────────
@@ -2680,6 +2699,7 @@
   });
 
   let unlistenEmbedStatus: UnlistenFn | null = null;
+  let unlistenVaultChanged: UnlistenFn | null = null;
 
   onMount(async () => {
     unlisten = await listen("notes_changed", async () => {
@@ -2688,6 +2708,15 @@
     unlistenEmbedStatus = await listen<string>("embedding_status", (e) => {
       const p = e.payload;
       if (p === "loading" || p === "ready" || p === "error") embedStatus = p;
+    });
+    // The active vault can be repointed from Settings (notes-folder picker)
+    // — a flow this page doesn't drive, unlike switchVault. Refresh the
+    // registry mirror + lists whenever the backend says the vault moved;
+    // for page-driven switches this is a cheap, gen-guarded double-refresh.
+    unlistenVaultChanged = await listen("vault_changed", async () => {
+      vaultGen++;
+      await refreshVaults();
+      await Promise.all([refreshAllNotes(), performSearch(query), refreshTagMeta(), refreshPinned()]);
     });
     window.addEventListener("keydown", handleGlobalKey, true);
     window.addEventListener("blur", handleWindowBlur);
@@ -2754,6 +2783,7 @@
   onDestroy(() => {
     unlisten?.();
     unlistenEmbedStatus?.();
+    unlistenVaultChanged?.();
     window.removeEventListener("keydown", handleGlobalKey, true);
     window.removeEventListener("keydown", handleTipsKey);
     window.removeEventListener("blur", handleWindowBlur);
@@ -3011,6 +3041,25 @@
               getPrePrompt={() => getPrePromptFor("primary")}
               onEncryptedAiBlocked={blockAiForEncrypted}
             />
+            {#if isLocked(selectedPath)}
+              <div
+                class="locked-overlay"
+                role="button"
+                tabindex="0"
+                onclick={() => focusEditorOrUnlock()}
+                onkeydown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    focusEditorOrUnlock();
+                  }
+                }}
+              >
+                <div class="locked-overlay-inner">
+                  <span class="locked-overlay-icon">🔒</span>
+                  locked — press <kbd>Enter</kbd> or click to unlock
+                </div>
+              </div>
+            {/if}
           </div>
           {#if secondaryPath || brewActive}
             <div
@@ -3074,6 +3123,39 @@
                   getPrePrompt={() => getPrePromptFor("secondary")}
                   onEncryptedAiBlocked={blockAiForEncrypted}
                 />
+                {#if isLocked(secondaryPath)}
+                  <div
+                    class="locked-overlay"
+                    role="button"
+                    tabindex="0"
+                    onclick={() => {
+                      if (secondaryPath) {
+                        openPasswordModal(
+                          "unlock",
+                          secondaryPath,
+                          getTitleForPath(secondaryPath),
+                          "secondary",
+                        );
+                      }
+                    }}
+                    onkeydown={(e) => {
+                      if ((e.key === "Enter" || e.key === " ") && secondaryPath) {
+                        e.preventDefault();
+                        openPasswordModal(
+                          "unlock",
+                          secondaryPath,
+                          getTitleForPath(secondaryPath),
+                          "secondary",
+                        );
+                      }
+                    }}
+                  >
+                    <div class="locked-overlay-inner">
+                      <span class="locked-overlay-icon">🔒</span>
+                      locked — press <kbd>Enter</kbd> or click to unlock
+                    </div>
+                  </div>
+                {/if}
               {/if}
             </div>
           {/if}
@@ -4768,6 +4850,43 @@
     display: flex;
     flex-direction: row;
     overflow: hidden;
+  }
+  .locked-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(26, 26, 26, 0.82);
+    cursor: pointer;
+    z-index: 5;
+  }
+  .locked-overlay:focus-visible {
+    outline: 1px solid #6cb6ff;
+    outline-offset: -1px;
+  }
+  .locked-overlay-inner {
+    color: #888;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid #2e2e2e;
+    padding: 10px 16px;
+    border-radius: 4px;
+    background: #1d1d1d;
+  }
+  .locked-overlay-icon {
+    font-size: 14px;
+  }
+  .locked-overlay-inner kbd {
+    border: 1px solid #3a3a3a;
+    border-bottom-width: 2px;
+    border-radius: 3px;
+    padding: 0 5px;
+    font: inherit;
+    font-size: 10px;
+    color: #aaa;
   }
   .editor-wrapper {
     min-width: 0;

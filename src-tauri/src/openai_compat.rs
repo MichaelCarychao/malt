@@ -19,10 +19,30 @@ const ONESHOT_TIMEOUT_SECS: u64 = 30;
 struct ChatCompletionRequest<'a> {
     model: &'a str,
     messages: Vec<ChatMessage<'a>>,
+    /// Legacy token cap — what DeepSeek/Grok/Gemini-compat expect.
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    /// OpenAI's replacement: gpt-5-era and o-series models REJECT
+    /// `max_tokens` with a 400, so OpenAI calls must use this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+}
+
+/// Which token-cap field a provider's endpoint expects. Exactly one is
+/// ever sent.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TokenParam {
+    MaxTokens,
+    MaxCompletionTokens,
+}
+
+fn split_limit(limit: Option<u32>, param: TokenParam) -> (Option<u32>, Option<u32>) {
+    match param {
+        TokenParam::MaxTokens => (limit, None),
+        TokenParam::MaxCompletionTokens => (None, limit),
+    }
 }
 
 #[derive(Serialize)]
@@ -100,7 +120,8 @@ pub async fn send(
     model: &str,
     system: Option<&str>,
     user: &str,
-    max_tokens: Option<u32>,
+    limit: Option<u32>,
+    token_param: TokenParam,
 ) -> Result<String, String> {
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let mut messages = Vec::with_capacity(2);
@@ -108,10 +129,12 @@ pub async fn send(
         messages.push(ChatMessage { role: "system", content: s });
     }
     messages.push(ChatMessage { role: "user", content: user });
+    let (max_tokens, max_completion_tokens) = split_limit(limit, token_param);
     let req = ChatCompletionRequest {
         model,
         messages,
         max_tokens,
+        max_completion_tokens,
         stream: None,
     };
     let resp = client()
@@ -148,7 +171,8 @@ pub async fn stream<F>(
     model: &str,
     system: Option<&str>,
     user: &str,
-    max_tokens: Option<u32>,
+    limit: Option<u32>,
+    token_param: TokenParam,
     mut on_text: F,
 ) -> Result<(), String>
 where
@@ -160,10 +184,12 @@ where
         messages.push(ChatMessage { role: "system", content: s });
     }
     messages.push(ChatMessage { role: "user", content: user });
+    let (max_tokens, max_completion_tokens) = split_limit(limit, token_param);
     let req = ChatCompletionRequest {
         model,
         messages,
         max_tokens,
+        max_completion_tokens,
         stream: Some(true),
     };
 

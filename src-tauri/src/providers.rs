@@ -99,6 +99,16 @@ impl Provider {
         self.openai_base_url().is_some()
     }
 
+    /// Which token-cap field this provider's chat endpoint expects.
+    /// OpenAI's current models (gpt-5 era) REJECT `max_tokens` outright;
+    /// the compat forks (DeepSeek, Grok, Gemini-compat) still take it.
+    pub fn token_param(self) -> crate::openai_compat::TokenParam {
+        match self {
+            Provider::Openai => crate::openai_compat::TokenParam::MaxCompletionTokens,
+            _ => crate::openai_compat::TokenParam::MaxTokens,
+        }
+    }
+
     /// One-line hint shown beside the model picker — what kind of
     /// gotcha to expect with this provider.
     pub fn note(self) -> &'static str {

@@ -1123,9 +1123,17 @@
       const evTarget = event.target as HTMLElement | null;
       const linkEl = evTarget?.closest?.(".cm-wikilink, .cm-wikilink-broken");
       if (linkEl) {
-        const raw = linkEl.textContent ?? "";
-        // The span text is the full "[[name]]" — strip the brackets.
-        const target = raw.replace(/^\[\[/, "").replace(/\]\]$/, "").trim();
+        // Prefer the data-target the decoration attached (the resolvable
+        // half of an aliased link). Fall back to parsing the visible text:
+        // strip brackets, drop any |alias — clicking an aliased link used
+        // to create a junk note literally titled "Target-Alias".
+        const attr = linkEl.getAttribute("data-target");
+        const raw = attr ?? linkEl.textContent ?? "";
+        const target = raw
+          .replace(/^\[\[/, "")
+          .replace(/\]\]$/, "")
+          .split("|")[0]
+          .trim();
         if (target) {
           const alt = event.metaKey || event.ctrlKey;
           declineGhost(view);
@@ -1235,6 +1243,9 @@
   }
 
   function resolveWikilink(target: string): NoteRef | null {
+    // [[Target|Alias]]: only the part left of the first pipe resolves.
+    const pipe = target.indexOf("|");
+    if (pipe >= 0) target = target.slice(0, pipe);
     const t = target.trim().toLowerCase();
     if (!t) return null;
     const pool = allNotes.length ? allNotes : currentAllNotes;
@@ -1278,7 +1289,9 @@
           while ((m = WIKILINK_RE.exec(text)) !== null) {
             const start = from + m.index;
             const end = start + m[0].length;
-            const target = m[1].trim();
+            const inner = m[1];
+            const pipeIdx = inner.indexOf("|");
+            const target = (pipeIdx >= 0 ? inner.slice(0, pipeIdx) : inner).trim();
             const resolved = resolveWikilink(target);
             // Three states for wikilinks:
             //   - broken: no matching note → cm-wikilink-broken (dashed amber)
@@ -1296,14 +1309,20 @@
             adds.push({
               from: start,
               to: end,
-              dec: Decoration.mark({ class: cls }),
+              // data-target carries the RESOLVABLE half so the click
+              // handler doesn't have to re-derive it from the (possibly
+              // alias-only) visible text.
+              dec: Decoration.mark({ class: cls, attributes: { "data-target": target } }),
             });
             // Hide `[[` and `]]` unless the cursor / selection is anywhere
             // inside [start, end] (inclusive at both ends — so the cursor
-            // arriving at the link's edge reveals the brackets too).
+            // arriving at the link's edge reveals the brackets too). For
+            // aliased links the hidden opening run extends through
+            // "Target|" so only the alias shows — standard wiki behavior.
             const cursorInLink = sel.from <= end && sel.to >= start;
             if (!cursorInLink) {
-              adds.push({ from: start, to: start + 2, dec: Decoration.replace({}) });
+              const openHideTo = pipeIdx >= 0 ? start + 2 + pipeIdx + 1 : start + 2;
+              adds.push({ from: start, to: openHideTo, dec: Decoration.replace({}) });
               adds.push({ from: end - 2, to: end, dec: Decoration.replace({}) });
             }
           }
@@ -1923,18 +1942,32 @@
     const caret = view.state.selection.main.head;
     const typingTag =
       !force && findInlineTags(oldContent).some((m) => isCaretInTag(m, caret));
-    const { body: newContent } = typingTag
-      ? { body: oldContent }
+    const { body: newContent, cuts } = typingTag
+      ? { body: oldContent, cuts: [] as [number, number][] }
       : relocateTagsToBottom(oldContent);
     if (newContent === oldContent) return;
-    // Clamp the caret to the end of the VISIBLE body — never into or past the
-    // now-hidden canonical tag line, or the next keystroke could merge into a
-    // tag (#foo + #bar -> #foo#bar) and re-expose it.
+    // Map the caret through the removed spans so it stays at the same
+    // LOGICAL position. Keeping the raw offset (the old behavior) made the
+    // cursor jump rightward — usually to the end of the body via the clamp
+    // — whenever a tag ABOVE the caret relocated on autosave.
+    let mapped = caret;
+    for (const [f, t] of cuts) {
+      if (t <= caret) {
+        mapped -= t - f;
+      } else if (f < caret) {
+        mapped -= caret - f;
+      }
+    }
+    // Clamp to the end of the VISIBLE body — never into or past the
+    // now-hidden canonical tag line, or the next keystroke could merge into
+    // a tag (#foo + #bar -> #foo#bar) and re-expose it. (The blank-line
+    // collapse can still drift the mapped position slightly left; the clamp
+    // plus drift-toward-start keeps it out of the hidden region.)
     const range = canonicalTagLineRange(newContent);
     const maxCaret = range
       ? newContent.slice(0, range.from).replace(/\s+$/, "").length
       : newContent.length;
-    const cursor = Math.min(caret, maxCaret);
+    const cursor = Math.max(0, Math.min(mapped, maxCaret));
     view.dispatch({
       changes: { from: 0, to: oldContent.length, insert: newContent },
       selection: { anchor: cursor },
@@ -2021,11 +2054,15 @@
       clearTimeout(saveTimer);
       saveTimer = null;
     }
-    if (view && currentPath && currentPath !== p) {
-      // Flush the OUTGOING note with ITS still-current captured codec
+    if (view && currentPath) {
+      // Flush the OUTGOING buffer with ITS still-current captured codec
       // (currentIsEncrypted/currentPassword aren't reassigned until this load
-      // wins below, so they still describe the note being left here). A failed
-      // flush must not abort the load (flushSave now re-throws); log + continue.
+      // wins below, so they still describe the note being left here). This
+      // runs on SAME-path reloads too — a password change (lock on blur,
+      // unlock) re-runs loadPath with currentPath === p, and skipping the
+      // flush there discarded up to 300ms of typing. flushSave no-ops when
+      // the buffer is clean. A failed flush must not abort the load
+      // (flushSave re-throws); log + continue.
       try {
         await flushSave(currentPath, view.state.doc.toString());
       } catch {
@@ -2260,25 +2297,35 @@
     // Burst events (sync storms) fire this repeatedly; tag each run so a
     // slower earlier read can't apply its result after a newer one.
     const myGen = ++externalChangeGen;
+    // Read with the CAPTURED codec for the loaded buffer — the same
+    // discipline flushSave uses. The live isEncrypted/password props update
+    // to the INCOMING note during a switch, so reading currentPath with
+    // them could fetch note A's raw envelope as if it were plaintext and
+    // surface ciphertext in the conflict bar.
+    const pathAtStart = currentPath;
+    const encAtStart = currentIsEncrypted;
+    const pwAtStart = currentPassword;
     let fresh = "";
     try {
-      if (isEncrypted && password) {
+      if (encAtStart && pwAtStart) {
         fresh = await invoke<string>("read_encrypted_note", {
-          path: currentPath,
-          password,
+          path: pathAtStart,
+          password: pwAtStart,
         });
-      } else if (isEncrypted) {
+      } else if (encAtStart) {
         // Locked: don't try to read. Save would clobber anyway.
         return;
       } else {
-        fresh = await invoke<string>("read_note", { path: currentPath });
+        fresh = await invoke<string>("read_note", { path: pathAtStart });
       }
     } catch {
       return;
     }
     // A newer external-change handler started while we awaited the read —
-    // let it win; acting on our now-stale `fresh` could clobber.
+    // let it win; acting on our now-stale `fresh` could clobber. Same if
+    // the editor moved to a different note (or tore down) mid-read.
     if (myGen !== externalChangeGen) return;
+    if (!view || currentPath !== pathAtStart) return;
     // Disk already matches what we last wrote — nothing external happened
     // (this is also how our own autosave echoes back via the watcher).
     if (fresh === lastSavedContent) return;

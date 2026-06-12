@@ -658,11 +658,17 @@ fn rename_note(
 
     let new_path = dir.join(format!("{}.md", sanitized));
 
-    // Case-insensitive collision check (defensive even though Win/Mac FS is CI).
+    // Case-insensitive collision check (defensive even though Win/Mac FS is
+    // CI). Skip the file being renamed itself — otherwise a case-only
+    // rename ("Note" -> "note") always collided with its own old name and
+    // was impossible. fs::rename handles in-place case changes fine.
     if new_path != old_path {
         let want = format!("{}.md", sanitized).to_lowercase();
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
+                if entry.path() == old_path {
+                    continue;
+                }
                 if let Some(name) = entry.file_name().to_str() {
                     if name.to_lowercase() == want {
                         return Err(format!("a note named \"{sanitized}\" already exists"));
@@ -1040,35 +1046,39 @@ fn reset_prompt(key: prompts::PromptKey) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_notes_dir(path: Option<String>) -> Result<String, String> {
-    let mut cfg = config::load();
-    match path {
-        None => {
-            cfg.notes_dir = None;
-            config::save(&cfg).map_err(|e| e.to_string())?;
-        }
-        Some(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                cfg.notes_dir = None;
-                config::save(&cfg).map_err(|e| e.to_string())?;
-            } else {
-                let p = std::path::PathBuf::from(trimmed);
-                if !p.exists() {
-                    std::fs::create_dir_all(&p)
-                        .map_err(|e| format!("can't create {}: {}", p.display(), e))?;
-                }
-                if !p.is_dir() {
-                    return Err(format!("{} is not a directory", p.display()));
-                }
-                cfg.notes_dir = Some(p.to_string_lossy().to_string());
-                config::save(&cfg).map_err(|e| e.to_string())?;
-            }
-        }
+async fn set_notes_dir(
+    path: Option<String>,
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    // Since vaults landed (v0.3.1), the registry — not config.notes_dir —
+    // decides where notes live, so this command used to be dead UI: it
+    // wrote a field nothing read and the Settings picker silently snapped
+    // back. It now repoints the ACTIVE vault at the chosen folder (None =
+    // reset to ~/malt) and runs the same reindex sequence as a vault
+    // switch. The legacy config field is still written so a downgraded
+    // malt finds the notes too.
+    let updated = vaults::set_active_path(path.clone())?;
+    if let Ok(mut cfg) = config::load_for_update() {
+        cfg.notes_dir = path.and_then(|p| {
+            let t = p.trim().to_string();
+            if t.is_empty() { None } else { Some(t) }
+        });
+        let _ = config::save(&cfg);
     }
-    // Return the *effective* path (resolved by notes_dir() — falls back to
-    // ~/malt/ when the override is None). Frontend uses this for display.
-    Ok(notes::notes_dir().to_string_lossy().to_string())
+    let new_dir = notes::notes_dir();
+    notes::repoint_watcher(&state.watcher, &new_dir);
+    if let Err(e) = state.index.rebuild() {
+        eprintln!("set_notes_dir: index rebuild failed: {e}");
+    }
+    state.backlinks.rebuild();
+    if let Err(e) = state.embeddings.repoint() {
+        eprintln!("set_notes_dir: embeddings repoint failed: {e}");
+    }
+    state.embeddings.enqueue_dir();
+    let _ = tauri::Emitter::emit(&app_handle, "notes_changed", ());
+    let _ = tauri::Emitter::emit(&app_handle, "vault_changed", &updated);
+    Ok(new_dir.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -1121,20 +1131,25 @@ async fn switch_vault(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<vaults::VaultsState, String> {
-    // Capture the path the watcher is currently observing BEFORE we
-    // flip the active vault — `notes::notes_dir()` reads through the
-    // vaults registry, so it changes the instant `switch` returns.
-    let old_dir = notes::notes_dir();
     let updated = vaults::switch(index as usize)?;
     let new_dir = notes::notes_dir();
-    notes::repoint_watcher(&state.watcher, &old_dir, &new_dir);
-    // Reindex everything for the new vault. Backlinks + search index
-    // rebuild are cheap (in-memory); embeddings repoint to the new
-    // vault's own DB then re-queue. The notes_changed event triggers a
-    // frontend refresh.
-    state.index.rebuild().map_err(|e| e.to_string())?;
+    // The watcher tracks the dir it actually observes, so repointing
+    // doesn't depend on re-deriving "old" from the (already-flipped)
+    // registry.
+    notes::repoint_watcher(&state.watcher, &new_dir);
+    // Reindex everything for the new vault. The note cache detects the
+    // dir change and rescans; backlinks + search index rebuild from it;
+    // embeddings repoint to the new vault's own DB then re-queue. Errors
+    // here are LOGGED, not returned — the switch already happened, every
+    // subsystem self-heals via the watcher, and bailing midway used to
+    // leave embeddings pointed at the old vault's DB.
+    if let Err(e) = state.index.rebuild() {
+        eprintln!("switch_vault: index rebuild failed: {e}");
+    }
     state.backlinks.rebuild();
-    let _ = state.embeddings.repoint();
+    if let Err(e) = state.embeddings.repoint() {
+        eprintln!("switch_vault: embeddings repoint failed: {e}");
+    }
     state.embeddings.enqueue_dir();
     let _ = tauri::Emitter::emit(&app_handle, "notes_changed", ());
     let _ = tauri::Emitter::emit(&app_handle, "vault_changed", &updated);
@@ -1160,21 +1175,23 @@ fn remove_vault(
         .vaults
         .get(index as usize)
         .map(|v| v.path.clone());
-    let old_dir = notes::notes_dir();
     let updated = vaults::remove(index as usize)?;
     let new_dir = notes::notes_dir();
-    if old_dir != new_dir {
-        notes::repoint_watcher(&state.watcher, &old_dir, &new_dir);
+    notes::repoint_watcher(&state.watcher, &new_dir);
+    // Removing a vault may have shifted the active one. Repoint the
+    // embeddings connection FIRST — if the removed vault was active, its
+    // DB is still held open, and deleting an open sqlite file fails on
+    // Windows (orphaning it). Then reclaim the file.
+    if let Err(e) = state.embeddings.repoint() {
+        eprintln!("remove_vault: embeddings repoint failed: {e}");
     }
-    // Reclaim the removed vault's embedding DB file.
     if let Some(p) = removed_path {
         embeddings::delete_db_for(&p);
     }
-    // Removing a vault may have shifted the active one. Reindex + repoint
-    // embeddings to whatever the new active vault is.
-    state.index.rebuild().map_err(|e| e.to_string())?;
+    if let Err(e) = state.index.rebuild() {
+        eprintln!("remove_vault: index rebuild failed: {e}");
+    }
     state.backlinks.rebuild();
-    let _ = state.embeddings.repoint();
     state.embeddings.enqueue_dir();
     let _ = tauri::Emitter::emit(&app_handle, "notes_changed", ());
     let _ = tauri::Emitter::emit(&app_handle, "vault_changed", &updated);

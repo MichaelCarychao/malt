@@ -70,6 +70,8 @@ const SCHEMA_VERSION: i64 = 1;
 /// siloed — no cross-vault leakage, and removing a vault can reclaim its
 /// embeddings by deleting one file.
 fn open_active_db() -> Result<Connection, String> {
+    let vault = crate::vaults::active_path().to_string_lossy().to_string();
+    migrate_legacy_db(&vault);
     let path = db_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -614,29 +616,69 @@ fn db_path() -> PathBuf {
     db_file_for(&crate::vaults::active_path().to_string_lossy())
 }
 
-pub fn db_file_for(vault_path: &str) -> PathBuf {
-    use std::hash::{Hash, Hasher};
+fn embeddings_dir() -> PathBuf {
     let mut p = dirs::config_dir().unwrap_or_else(std::env::temp_dir);
     p.push("malt");
     p.push("embeddings");
+    p
+}
+
+pub fn db_file_for(vault_path: &str) -> PathBuf {
+    // FNV-1a, not DefaultHasher: the filename is an on-disk identity, and
+    // DefaultHasher's algorithm may change between Rust releases — a
+    // toolchain bump would silently remap every vault to a fresh DB
+    // (recompute everything, orphan the old files).
+    let mut p = embeddings_dir();
+    p.push(format!("vault-{:016x}.db", crate::fnv::fnv1a64_str(vault_path)));
+    p
+}
+
+/// The pre-FNV filename (DefaultHasher-derived). Only computable under
+/// the same std hash algorithm that wrote it, so this is best-effort: it
+/// rescues installs upgrading under an unchanged DefaultHasher; anything
+/// else just re-embeds (the status-quo failure, one last time).
+fn legacy_db_file_for(vault_path: &str) -> PathBuf {
+    use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     vault_path.hash(&mut h);
+    let mut p = embeddings_dir();
     p.push(format!("vault-{:016x}.db", h.finish()));
     p
+}
+
+/// One-time migration: if a vault's DB exists under the legacy
+/// (DefaultHasher) name but not the stable (FNV) one, rename it (and its
+/// WAL/SHM sidecars) so the embeddings carry over instead of recomputing.
+fn migrate_legacy_db(vault_path: &str) {
+    let old = legacy_db_file_for(vault_path);
+    let new = db_file_for(vault_path);
+    if old == new || !old.exists() || new.exists() {
+        return;
+    }
+    for suffix in ["", "-wal", "-shm"] {
+        let from = PathBuf::from(format!("{}{}", old.to_string_lossy(), suffix));
+        let to = PathBuf::from(format!("{}{}", new.to_string_lossy(), suffix));
+        if from.exists() {
+            let _ = std::fs::rename(from, to);
+        }
+    }
 }
 
 /// Delete a vault's embedding DB (and its WAL/SHM sidecars). Best-effort
 /// — used when a vault is removed from the registry so we don't leave
 /// orphaned embedding files behind. Errors are ignored.
 pub fn delete_db_for(vault_path: &str) {
-    let base = db_file_for(vault_path);
-    for suffix in ["", "-wal", "-shm"] {
-        let p = if suffix.is_empty() {
-            base.clone()
-        } else {
-            PathBuf::from(format!("{}{}", base.to_string_lossy(), suffix))
-        };
-        let _ = std::fs::remove_file(p);
+    // Delete under BOTH the stable and the legacy name — a vault that was
+    // never opened post-migration still has its file under the old hash.
+    for base in [db_file_for(vault_path), legacy_db_file_for(vault_path)] {
+        for suffix in ["", "-wal", "-shm"] {
+            let p = if suffix.is_empty() {
+                base.clone()
+            } else {
+                PathBuf::from(format!("{}{}", base.to_string_lossy(), suffix))
+            };
+            let _ = std::fs::remove_file(p);
+        }
     }
 }
 

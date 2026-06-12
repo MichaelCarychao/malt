@@ -229,6 +229,30 @@ pub fn switch(index: usize) -> Result<VaultsState, String> {
     Ok(state)
 }
 
+/// Repoint the ACTIVE vault at a different folder (Settings → notes
+/// folder). The vault keeps its name and slot; only the path changes.
+/// `path` of None resets to the OS default (~/malt).
+pub fn set_active_path(path: Option<String>) -> Result<VaultsState, String> {
+    let target = match path {
+        Some(p) if !p.trim().is_empty() => p.trim().to_string(),
+        _ => fallback_default_path(),
+    };
+    let p = PathBuf::from(&target);
+    if !p.exists() {
+        std::fs::create_dir_all(&p).map_err(|e| format!("create notes dir: {e}"))?;
+    }
+    if !p.is_dir() {
+        return Err(format!("not a directory: {target}"));
+    }
+    let mut state = load_for_update()?;
+    let idx = state.active_index.min(state.vaults.len().saturating_sub(1));
+    if let Some(v) = state.vaults.get_mut(idx) {
+        v.path = target;
+    }
+    save(&state).map_err(|e| e.to_string())?;
+    Ok(state)
+}
+
 /// Rename a vault in place.
 pub fn rename(index: usize, name: String) -> Result<VaultsState, String> {
     let mut state = load_for_update()?;

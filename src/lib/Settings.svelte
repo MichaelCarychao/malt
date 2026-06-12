@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { flushAllEditors } from "./editorRegistry";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import {
     shouldSkipOnStartup,
@@ -511,6 +512,12 @@
         title: "Choose notes folder",
       });
       if (!picked || typeof picked !== "string") return;
+      // Repointing the active vault swaps the folder out from under any
+      // open editor — flush first, abort if a pending edit can't be saved.
+      if ((await flushAllEditors()) > 0) {
+        notesDirError = "Couldn't save pending edits — folder change aborted.";
+        return;
+      }
       const effective = await invoke<string>("set_notes_dir", { path: picked });
       if (effective !== notesDirPath) {
         notesDirPath = effective;
@@ -524,6 +531,10 @@
   async function resetNotesDir() {
     notesDirError = null;
     try {
+      if ((await flushAllEditors()) > 0) {
+        notesDirError = "Couldn't save pending edits — folder change aborted.";
+        return;
+      }
       const effective = await invoke<string>("set_notes_dir", { path: null });
       if (effective !== notesDirPath) {
         notesDirPath = effective;
@@ -844,7 +855,7 @@
             {#if notesDirDirty}
               <tr>
                 <td class="keys"></td>
-                <td class="action test-result">Restart malt for the new folder to take effect.</td>
+                <td class="action test-result">Folder switched — the active vault now points here.</td>
                 <td class="status"></td>
               </tr>
             {/if}

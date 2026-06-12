@@ -582,6 +582,7 @@ where
         Some(&system_prompt),
         &user_msg,
         Some(400),
+        provider.token_param(),
         |t| on_text(t),
     )
     .await
@@ -616,6 +617,7 @@ where
         Some(&system_prompt),
         &user_msg,
         Some(800),
+        provider.token_param(),
         |t| on_text(t),
     )
     .await
@@ -643,6 +645,7 @@ where
         Some(&system_prompt),
         body,
         Some(1024),
+        provider.token_param(),
         |t| on_text(t),
     )
     .await
@@ -670,6 +673,7 @@ where
         None, // no system prompt — the notes are the whole prompt
         prompt,
         Some(2048),
+        provider.token_param(),
         |t| on_text(t),
     )
     .await
@@ -693,6 +697,7 @@ pub async fn dispatch_propose_tags(
         Some(&system_prompt),
         body,
         Some(256),
+        provider.token_param(),
     )
     .await?;
     let json_start = reply.find('{').ok_or("no JSON in reply")?;
@@ -732,6 +737,7 @@ pub async fn dispatch_propose_entities(
         Some(&system_prompt),
         body,
         Some(512),
+        provider.token_param(),
     )
     .await?;
     let json_start = reply.find('{').ok_or("no JSON in reply")?;
@@ -765,6 +771,7 @@ pub async fn dispatch_test(
         None,
         "Reply with the single word: malt",
         Some(32),
+        provider.token_param(),
     )
     .await
 }

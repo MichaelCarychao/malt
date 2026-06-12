@@ -600,21 +600,37 @@ pub fn list_notes() -> Vec<NoteSummary> {
     notes
 }
 
+/// The live watcher plus the directory it's CURRENTLY observing. Tracking
+/// the dir here (instead of re-deriving "old" from the vault registry at
+/// repoint time) matters: the add-vault flow flips the registry before the
+/// repoint runs, so a registry-derived old_dir already pointed at the NEW
+/// vault and the actual old directory was never unwatched — every sync
+/// tick in the abandoned vault kept triggering spurious full reindexes.
+pub struct WatcherState {
+    watcher: RecommendedWatcher,
+    dir: PathBuf,
+}
+
 /// Handle for the live file watcher. Wrapped in a Mutex so vault
-/// switching can call `repoint(new_dir)` from another thread to
+/// switching can call `repoint_watcher(new_dir)` from another thread to
 /// un-watch the old path and watch the new one. Drops naturally on
 /// app exit when the last Arc goes out of scope.
-pub type WatcherHandle = Arc<std::sync::Mutex<Option<RecommendedWatcher>>>;
+pub type WatcherHandle = Arc<std::sync::Mutex<Option<WatcherState>>>;
 
-/// Swap the directory the watcher is observing. Used on vault
-/// switch. Safe to call before `start_watcher` has run (no-op).
-pub fn repoint_watcher(handle: &WatcherHandle, old: &PathBuf, new: &PathBuf) {
-    let mut guard = handle.lock().expect("watcher handle lock");
-    if let Some(w) = guard.as_mut() {
+/// Point the watcher at `new`, unwatching whatever it actually watched
+/// before. Used on vault switch. Safe to call before `start_watcher` has
+/// run (no-op) and idempotent when already watching `new`.
+pub fn repoint_watcher(handle: &WatcherHandle, new: &PathBuf) {
+    let mut guard = handle.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(st) = guard.as_mut() {
+        if &st.dir == new {
+            return;
+        }
         // unwatch ignores errors — the old path may already be gone if
         // the user moved or deleted it before switching.
-        let _ = w.unwatch(old);
-        let _ = w.watch(new, RecursiveMode::NonRecursive);
+        let _ = st.watcher.unwatch(&st.dir);
+        let _ = st.watcher.watch(new, RecursiveMode::NonRecursive);
+        st.dir = new.clone();
     }
 }
 
@@ -779,7 +795,10 @@ pub fn start_watcher(
     // Hand the watcher back to the caller via a Mutex<Option<...>> so
     // it stays alive (it'd otherwise drop when start_watcher returns)
     // AND so vault switching can swap the watched path.
-    let handle: WatcherHandle = Arc::new(std::sync::Mutex::new(Some(watcher)));
+    let handle: WatcherHandle = Arc::new(std::sync::Mutex::new(Some(WatcherState {
+        watcher,
+        dir: dir.clone(),
+    })));
 
     std::thread::spawn(move || {
         // No longer need to keep `watcher` alive here — the AppState

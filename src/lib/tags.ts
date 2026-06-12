@@ -145,7 +145,15 @@ export function findCanonicalTagLine(body: string): { lineIdx: number; tags: str
  * Returns the new body + the unified tag set. If no changes are needed,
  * returns the input body unchanged so the editor can short-circuit.
  */
-export function relocateTagsToBottom(body: string): { body: string; tags: string[] } {
+export function relocateTagsToBottom(body: string): {
+  body: string;
+  tags: string[];
+  /** Spans removed from the original text (tag + the one whitespace char
+   * collapsed with it), in original-document offsets. The editor maps the
+   * caret through these so relocating a tag ABOVE the cursor doesn't
+   * teleport it (the raw offset used to be kept and merely clamped). */
+  cuts: [number, number][];
+} {
   const canonical = findCanonicalTagLine(body);
   const canonicalIdx = canonical?.lineIdx ?? -1;
   const lines = body.split("\n");
@@ -156,15 +164,16 @@ export function relocateTagsToBottom(body: string): { body: string; tags: string
   // If there are no inline tags above and the canonical line is already at
   // the bottom (no trailing blank lines past it), nothing to do.
   if (inline.length === 0) {
-    if (canonicalIdx === -1) return { body, tags: [] };
+    if (canonicalIdx === -1) return { body, tags: [], cuts: [] };
     // Check that nothing nonempty comes after the canonical line.
     const tail = lines.slice(canonicalIdx + 1).join("\n").trim();
     if (tail === "") {
-      return { body, tags: canonical!.tags };
+      return { body, tags: canonical!.tags, cuts: [] };
     }
   }
 
   // Rewrite the above-text with inline tags removed.
+  const cuts: [number, number][] = [];
   let newAbove = "";
   let cursor = 0;
   for (const m of inline) {
@@ -173,14 +182,17 @@ export function relocateTagsToBottom(body: string): { body: string; tags: string
     // following char is whitespace; otherwise consume one leading space.
     const after = aboveText[m.to];
     if (after === " " || after === "\t") {
+      cuts.push([m.from, m.to + 1]);
       cursor = m.to + 1;
     } else if (
       newAbove.length > 0 &&
       (newAbove.endsWith(" ") || newAbove.endsWith("\t"))
     ) {
       newAbove = newAbove.slice(0, -1);
+      cuts.push([m.from - 1, m.to]);
       cursor = m.to;
     } else {
+      cuts.push([m.from, m.to]);
       cursor = m.to;
     }
   }
@@ -207,7 +219,7 @@ export function relocateTagsToBottom(body: string): { body: string; tags: string
   }
   result += "\n";
 
-  return { body: result, tags: sorted };
+  return { body: result, tags: sorted, cuts };
 }
 
 /**
