@@ -73,9 +73,16 @@ function scanLineInto(line: string, lineOffset: number, out: TagMatch[]): void {
 }
 
 function maskInlineCode(line: string): string {
+  // Mask inline-code regions with spaces. The mask must be UTF-16-LENGTH-
+  // PRESERVING: scanLineInto records indices into the masked string and
+  // applies them to the ORIGINAL line, so we iterate code UNITS (not code
+  // points — `for..of` would collapse an astral char like an emoji to one
+  // space and shift every offset after the code span, corrupting the text
+  // sliced out by relocateTagsToBottom on autosave).
   let inCode = false;
   let out = "";
-  for (const c of line) {
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
     if (c === "`") {
       inCode = !inCode;
       out += " ";

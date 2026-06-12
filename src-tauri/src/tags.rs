@@ -408,9 +408,15 @@ pub fn is_canonical_tag_line(line: &str) -> bool {
 // ---------- internal helpers ----------
 
 fn strip_inline_code(line: &str) -> String {
-    // Replace runs between matched backticks with spaces so positions don't
-    // shift relative to the original line. We only care about exclusion, not
-    // re-rendering, so this is fine.
+    // Replace runs between matched backticks with spaces. The mask must be
+    // BYTE-length-preserving: `scan_line_positions` records byte offsets in
+    // the masked string and applies them to the ORIGINAL line, so a masked
+    // char must occupy exactly as many bytes as the char it replaces. One
+    // space per UTF-8 byte does that (and stays valid UTF-8, since the mask
+    // is pure ASCII). Collapsing a multibyte char to a single space — the
+    // old behavior — shifted every offset after a non-ASCII code span,
+    // which silently corrupted notes on tag relocation and could slice
+    // mid-char (a panic that broke every list_notes call).
     let mut out = String::with_capacity(line.len());
     let mut in_code = false;
     for c in line.chars() {
@@ -418,7 +424,9 @@ fn strip_inline_code(line: &str) -> String {
             in_code = !in_code;
             out.push(' ');
         } else if in_code {
-            out.push(' ');
+            for _ in 0..c.len_utf8() {
+                out.push(' ');
+            }
         } else {
             out.push(c);
         }
@@ -536,5 +544,49 @@ mod tests {
                 "projects/malt/v0".to_string(),
             ]
         );
+    }
+
+    // Regression: the inline-code mask must be byte-length-preserving so
+    // tag offsets recorded against the masked string stay valid in the
+    // original. Multibyte chars inside code spans used to shift every
+    // later offset — slicing mid-char (panic) or mangling the text.
+    #[test]
+    fn strip_survives_multibyte_in_inline_code() {
+        // Tag directly after a code span holding two 2-byte chars. The old
+        // mask put the recorded offset mid-é → byte-boundary panic.
+        let out = strip_tags_for_ai("body text\n`\u{e9}\u{e9}`#x\n");
+        assert!(out.contains("body text"));
+        assert!(!out.contains("#x"), "tag should be stripped: {out:?}");
+    }
+
+    #[test]
+    fn strip_is_clean_after_multibyte_code_span() {
+        // The old mask left a stray trailing char from the tag behind
+        // ("keep `é`g rest") because the removal range was shifted left.
+        let out = strip_tags_for_ai("keep `\u{e9}` #tag rest\n");
+        assert_eq!(out.trim_end(), "keep `\u{e9}` rest");
+    }
+
+    #[test]
+    fn strip_is_clean_after_emoji_code_span() {
+        // 4-byte chars shift offsets the most.
+        let out = strip_tags_for_ai("keep `\u{1f3af}\u{1f3af}` #tag rest\n");
+        assert_eq!(out.trim_end(), "keep `\u{1f3af}\u{1f3af}` rest");
+    }
+
+    #[test]
+    fn positions_align_after_multibyte_code_span() {
+        let line = "x `\u{e9}\u{e9}` #foo y";
+        let pos = inline_tag_positions(line);
+        assert_eq!(pos.len(), 1);
+        let (from, to) = pos[0];
+        assert_eq!(&line[from..to], "#foo");
+    }
+
+    #[test]
+    fn extraction_still_skips_code_with_multibyte() {
+        // Tags inside code spans stay excluded even with multibyte content.
+        let tags = extract_tags_from_body("use `\u{e9} #not` but #yes here");
+        assert_eq!(tags, vec!["yes"]);
     }
 }
