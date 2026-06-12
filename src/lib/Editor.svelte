@@ -246,11 +246,22 @@
 
   async function openLinkSuggestions() {
     if (!view || !currentPath) return;
-    // Cancel any pending autosave so a tag-relocate doesn't shift the
-    // positions out from under us while the user reviews suggestions.
+    // FLUSH (not just cancel) the pending autosave first: the backend
+    // scans the file ON DISK, so buffer and disk must agree or every
+    // returned position is shifted by the unsaved edits. Running the tag
+    // relocation now also means it can't fire mid-review and shift things
+    // later. If the save fails we still proceed — the apply step verifies
+    // each slice before wrapping, so a mismatch degrades to a skipped
+    // suggestion, never a corrupted note.
     if (saveTimer) {
       clearTimeout(saveTimer);
       saveTimer = null;
+    }
+    relocateTags(false);
+    try {
+      await flushSave(currentPath, view.state.doc.toString());
+    } catch {
+      /* already logged in flushSave */
     }
     const path = currentPath;
     linkSuggestionsLoading = true;
@@ -315,12 +326,37 @@
     // is case/slug-insensitive for existing notes, and for new-note
     // suggestions (kind: "create"), clicking the broken link will create
     // a file with whatever title is in the brackets.
+    // Backend positions are UTF-8 BYTE offsets into the file; CodeMirror
+    // addresses the doc in UTF-16 code units. Translate exactly (one pass
+    // over the doc) — for ASCII the two coincide, but any non-ASCII char
+    // before a match shifts them apart. Offsets that don't land on a char
+    // boundary (drift from an edit) simply don't map and get skipped.
+    const docText = view.state.doc.toString();
+    const wantedBytes = new Set<number>();
+    for (const s of [...linkSuggestions, ...linkAiSuggestions]) {
+      if (!linkSuggestionChecked[suggestionKey(s)]) continue;
+      for (const [from, to] of s.positions) {
+        wantedBytes.add(from);
+        wantedBytes.add(to);
+      }
+    }
+    const byteToU16 = mapByteOffsetsToUtf16(docText, wantedBytes);
+
     const changes: { from: number; to: number; insert: string }[] = [];
     const acceptedCreates: { title: string }[] = [];
     for (const s of [...linkSuggestions, ...linkAiSuggestions]) {
       if (!linkSuggestionChecked[suggestionKey(s)]) continue;
-      for (const [from, to] of s.positions) {
-        const original = view.state.doc.sliceString(from, to);
+      const termLower = s.term.toLowerCase();
+      for (const [bFrom, bTo] of s.positions) {
+        const from = byteToU16.get(bFrom);
+        const to = byteToU16.get(bTo);
+        if (from === undefined || to === undefined || from >= to) continue;
+        const original = docText.slice(from, to);
+        // Verify the slice really is the matched term before wrapping —
+        // final guard against any drift between the scanned file and the
+        // buffer (an edit while the modal was open, a failed flush). A
+        // mismatched occurrence is skipped, never wrapped blind.
+        if (original.toLowerCase() !== termLower) continue;
         changes.push({ from, to, insert: `[[${original}]]` });
       }
       if (s.kind === "create" && createNotesIfNeeded) {
@@ -348,6 +384,33 @@
       }
     }
     cancelLinkSuggestions();
+  }
+
+  /** Map a set of UTF-8 byte offsets in `text` to UTF-16 code-unit
+   * offsets, in one linear pass. Offsets that fall mid-character (or past
+   * the end) are simply absent from the result — callers treat a missing
+   * mapping as "skip this occurrence". */
+  function mapByteOffsetsToUtf16(text: string, byteOffsets: Set<number>): Map<number, number> {
+    const sorted = [...byteOffsets].sort((a, b) => a - b);
+    const out = new Map<number, number>();
+    let wi = 0;
+    let byte = 0;
+    let i = 0;
+    while (i < text.length && wi < sorted.length) {
+      while (wi < sorted.length && sorted[wi] === byte) {
+        out.set(byte, i);
+        wi++;
+      }
+      if (wi >= sorted.length) break;
+      const cp = text.codePointAt(i)!;
+      i += cp > 0xffff ? 2 : 1;
+      byte += cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4;
+    }
+    while (wi < sorted.length && sorted[wi] === byte) {
+      out.set(byte, text.length);
+      wi++;
+    }
+    return out;
   }
 
   function totalSelectedOccurrences(): number {

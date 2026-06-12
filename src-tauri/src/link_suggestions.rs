@@ -20,8 +20,36 @@ pub struct LinkSuggestion {
     /// "link" for existing-note matches. (AI-proposed entity creation will
     /// use "create" once that layer lands.)
     pub kind: String,
-    /// Byte offsets in the original body where the term appears.
+    /// Byte offsets into the FULL file content where the term appears.
+    /// Full-file (not body-relative) because the editor applies these to
+    /// its buffer, which includes any frontmatter block — body-relative
+    /// offsets were shifted by the frontmatter's length and wrapped the
+    /// wrong text.
     pub positions: Vec<(usize, usize)>,
+}
+
+/// Verify each lowercase-haystack match against the ORIGINAL body and
+/// rebase it to full-file offsets. Unicode case-folding can change byte
+/// lengths (İ→i̇ grows, ẞ→ß shrinks), so offsets found in `body_lower`
+/// aren't automatically valid in `body`; `get` also rejects mid-char
+/// slices. A position that survives this filter is guaranteed to slice
+/// cleanly out of the file as exactly the matched term, so applying it
+/// can never corrupt the note.
+fn verify_and_rebase(
+    body: &str,
+    needle_lower: &str,
+    body_offset: usize,
+    positions: Vec<(usize, usize)>,
+) -> Vec<(usize, usize)> {
+    positions
+        .into_iter()
+        .filter(|&(s, e)| {
+            body.get(s..e)
+                .map(|t| t.to_lowercase() == needle_lower)
+                .unwrap_or(false)
+        })
+        .map(|(s, e)| (s + body_offset, e + body_offset))
+        .collect()
 }
 
 /// Build `kind: "create"` LinkSuggestions for AI-proposed entity names by
@@ -32,6 +60,10 @@ pub struct LinkSuggestion {
 /// wikilink, code block, or hashtag.
 pub fn build_entity_suggestions(content: &str, entities: &[String]) -> Vec<LinkSuggestion> {
     let (_fm, body) = frontmatter::split(content);
+    // `split` returns the body as a suffix slice of `content`, so the
+    // frontmatter block's byte length is exactly the difference. All
+    // positions get rebased by this so they index the full file.
+    let body_offset = content.len() - body.len();
     let mask = build_exclusion_mask(body);
     let body_lower = body.to_lowercase();
     let existing_titles: std::collections::HashSet<String> = crate::notes::list_notes()
@@ -54,13 +86,18 @@ pub fn build_entity_suggestions(content: &str, entities: &[String]) -> Vec<LinkS
         if existing_titles.contains(&entity_lower) {
             continue;
         }
-        let positions = find_word_boundary_matches(&body_lower, &entity_lower, &mask);
+        let positions = verify_and_rebase(
+            body,
+            &entity_lower,
+            body_offset,
+            find_word_boundary_matches(&body_lower, &entity_lower, &mask),
+        );
         if positions.is_empty() {
             // AI hallucinated a name that isn't actually in the body — skip.
             continue;
         }
         let (first_start, first_end) = positions[0];
-        let term = body[first_start..first_end].to_string();
+        let term = content[first_start..first_end].to_string();
         out.push(LinkSuggestion {
             term,
             candidate_title: canon.to_string(),
@@ -74,6 +111,8 @@ pub fn build_entity_suggestions(content: &str, entities: &[String]) -> Vec<LinkS
 
 pub fn suggest_for_note(content: &str, current_path: &str) -> Vec<LinkSuggestion> {
     let (_fm, body) = frontmatter::split(content);
+    // See build_entity_suggestions: positions are full-file offsets.
+    let body_offset = content.len() - body.len();
     let mask = build_exclusion_mask(body);
 
     let body_lower = body.to_lowercase();
@@ -99,12 +138,17 @@ pub fn suggest_for_note(content: &str, current_path: &str) -> Vec<LinkSuggestion
             continue;
         }
 
-        let positions = find_word_boundary_matches(&body_lower, &title_lower, &mask);
+        let positions = verify_and_rebase(
+            body,
+            &title_lower,
+            body_offset,
+            find_word_boundary_matches(&body_lower, &title_lower, &mask),
+        );
         if positions.is_empty() {
             continue;
         }
         let (first_start, first_end) = positions[0];
-        let term = body[first_start..first_end].to_string();
+        let term = content[first_start..first_end].to_string();
         out.push(LinkSuggestion {
             term,
             candidate_title: title.clone(),
