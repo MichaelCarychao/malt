@@ -343,6 +343,8 @@ fn link_unlinked_mention(
     target_title: String,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
+    // Rewrites source_path on disk — vault-only, like every other write.
+    ensure_in_vault(&source_path)?;
     mentions::link_first(&source_path, &target_title)?;
     // Refresh backlinks immediately so the linkbacks panel updates
     // without waiting for the debounced watcher event.
@@ -356,6 +358,10 @@ fn export_as_string(
     format: String,
     append_links: bool,
 ) -> Result<String, String> {
+    // The export pipeline reads the source file (and, with append_links,
+    // its link targets) — same vault-only rule as read_note. Without this,
+    // export_as_string(path, "md") was an arbitrary-file-read primitive.
+    ensure_in_vault(&path)?;
     let md = export::build_composite_markdown(&path, append_links)?;
     let title = std::path::Path::new(&path)
         .file_stem()
@@ -378,6 +384,28 @@ fn export_to_file(
     append_links: bool,
     dest_path: String,
 ) -> Result<(), String> {
+    ensure_in_vault(&path)?;
+    // The destination is user-chosen via the native save dialog, so any
+    // directory is fine — but the extension must match the format. This
+    // keeps a compromised webview from using export as a write-anything
+    // primitive (e.g. dropping a .bat into the Startup folder).
+    let dest_ext = std::path::Path::new(&dest_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+    let ext_ok = match format.as_str() {
+        "md" => dest_ext == "md",
+        "txt" => dest_ext == "txt",
+        "html" => dest_ext == "html" || dest_ext == "htm",
+        "epub" => dest_ext == "epub",
+        _ => false,
+    };
+    if !ext_ok {
+        return Err(format!(
+            "destination extension .{dest_ext} doesn't match format {format}"
+        ));
+    }
     let md = export::build_composite_markdown(&path, append_links)?;
     let title = std::path::Path::new(&path)
         .file_stem()
@@ -397,6 +425,7 @@ fn export_to_file(
 
 #[tauri::command]
 fn count_wikilink_targets(path: String) -> Result<usize, String> {
+    ensure_in_vault(&path)?;
     let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let (_fm, body) = frontmatter::split(&raw);
     let targets = backlinks::resolved_targets_in(body);
@@ -407,6 +436,7 @@ fn count_wikilink_targets(path: String) -> Result<usize, String> {
 
 #[tauri::command]
 fn suggest_wikilinks(path: String) -> Result<Vec<link_suggestions::LinkSuggestion>, String> {
+    ensure_in_vault(&path)?;
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     Ok(link_suggestions::suggest_for_note(&content, &path))
 }
@@ -415,6 +445,9 @@ fn suggest_wikilinks(path: String) -> Result<Vec<link_suggestions::LinkSuggestio
 async fn suggest_wikilinks_ai(
     path: String,
 ) -> Result<Vec<link_suggestions::LinkSuggestion>, String> {
+    // Reads the file AND ships its contents to the configured LLM — the
+    // strictest possible reason to keep it vault-scoped.
+    ensure_in_vault(&path)?;
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     // AI is disabled for encrypted notes: the file is ciphertext, and the user
     // must decrypt it first (M2). Refuse rather than ship the envelope to a model.
@@ -532,15 +565,11 @@ async fn list_near_duplicates(
 
 #[tauri::command]
 fn delete_note(path: String, state: tauri::State<AppState>) -> Result<(), String> {
-    let dir = notes::notes_dir();
+    // Canonicalizing vault guard — same rule as read/save (the lexical
+    // starts_with it replaces both missed symlink escapes and falsely
+    // rejected case-variant / 8.3-short-name paths on Windows).
+    ensure_in_vault(&path)?;
     let p = std::path::PathBuf::from(&path);
-    // Defense in depth: only allow deletes within the notes directory.
-    if !p.starts_with(&dir) {
-        return Err(format!(
-            "refusing to delete {} (outside notes dir)",
-            p.display()
-        ));
-    }
     std::fs::remove_file(&p).map_err(|e| e.to_string())?;
     // Drop it from the search index now so a deleted note can't surface in
     // results before the watcher catches up. Log on failure (file is gone
@@ -563,10 +592,8 @@ fn rename_note(
     use tauri::Emitter;
 
     let dir = notes::notes_dir();
+    ensure_in_vault(&path)?;
     let old_path = std::path::PathBuf::from(&path);
-    if !old_path.starts_with(&dir) {
-        return Err("refusing to rename outside notes dir".into());
-    }
     if !old_path.is_file() {
         return Err(format!("file not found: {}", old_path.display()));
     }
@@ -1022,6 +1049,7 @@ fn reveal_notes_dir(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn reveal_note(app: tauri::AppHandle, path: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
+    ensure_in_vault(&path)?;
     // Reveal the note in its containing folder, selected. The opener plugin
     // uses each platform's native reveal-and-select (Windows Shell COM
     // SHOpenFolderAndSelectItems, macOS Finder reveal, Linux file-manager
@@ -1116,14 +1144,12 @@ fn remove_vault(
 
 #[tauri::command]
 fn duplicate_note(path: String) -> Result<String, String> {
+    ensure_in_vault(&path)?;
     let src = std::path::PathBuf::from(&path);
     if !src.is_file() {
         return Err(format!("file not found: {}", src.display()));
     }
     let dir = notes::notes_dir();
-    if !src.starts_with(&dir) {
-        return Err("refusing to duplicate outside notes dir".into());
-    }
     let stem = src
         .file_stem()
         .and_then(|s| s.to_str())
@@ -1341,14 +1367,12 @@ fn move_note_to_vault(
     target_index: u32,
     state: tauri::State<AppState>,
 ) -> Result<String, String> {
+    ensure_in_vault(&path)?;
     let src = std::path::PathBuf::from(&path);
     if !src.is_file() {
         return Err(format!("file not found: {}", src.display()));
     }
     let cur_dir = notes::notes_dir();
-    if !src.starts_with(&cur_dir) {
-        return Err("refusing to move a file outside the active vault".into());
-    }
     let vaults = vaults::load();
     let target = vaults
         .vaults
