@@ -11,15 +11,52 @@ const MAX_BODY_CHARS: usize = 8000;
 
 pub struct Tagger {
     queue: Mutex<HashSet<PathBuf>>,
-    last_tagged_hash: Mutex<HashMap<PathBuf, u64>>,
+    /// path → stable hash of the note body AS LAST TAGGED (post-merge).
+    /// Persisted to disk (see `hashes_path`) so a restart doesn't re-send
+    /// the entire vault to the AI: previously this map was in-memory only,
+    /// and `enqueue_dir` at startup re-tagged every note on every launch —
+    /// two API calls and two mtime-bumping rewrites per note (the stored
+    /// hash was of the PRE-merge body, so the tagger's own write looked
+    /// like a fresh edit on the next pass).
+    last_tagged_hash: Mutex<HashMap<String, u64>>,
     last_tagged_at: Mutex<HashMap<PathBuf, Instant>>,
+}
+
+/// Where the persisted body-hash map lives. Sidecar config data — never in
+/// the notes folder.
+fn hashes_path() -> PathBuf {
+    let mut p = dirs::config_dir().unwrap_or_else(std::env::temp_dir);
+    p.push("malt");
+    let _ = std::fs::create_dir_all(&p);
+    p.push("tagger_hashes.json");
+    p
+}
+
+fn load_hashes() -> HashMap<String, u64> {
+    let map: HashMap<String, u64> = match crate::config::read_json(&hashes_path()) {
+        crate::config::JsonRead::Parsed(m) => m,
+        _ => HashMap::new(),
+    };
+    // Prune entries for files that no longer exist so the map doesn't
+    // grow forever across renames/deletes. One stat per entry, startup only.
+    map.into_iter()
+        .filter(|(p, _)| std::path::Path::new(p).is_file())
+        .collect()
+}
+
+fn save_hashes(map: &HashMap<String, u64>) {
+    // Derived data — best-effort persistence, but atomic so a crash can't
+    // leave a truncated file (which read_json would then quarantine).
+    if let Ok(json) = serde_json::to_string(map) {
+        let _ = notes::write_atomic(hashes_path(), &json);
+    }
 }
 
 impl Tagger {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             queue: Mutex::new(HashSet::new()),
-            last_tagged_hash: Mutex::new(HashMap::new()),
+            last_tagged_hash: Mutex::new(load_hashes()),
             last_tagged_at: Mutex::new(HashMap::new()),
         })
     }
@@ -52,6 +89,13 @@ impl Tagger {
         next
     }
 
+    /// Record `body` as the tagged state for `path` and persist the map.
+    fn remember_tagged(&self, path_str: &str, body_trimmed: &str) {
+        let mut hashes = self.last_tagged_hash.lock().expect("tagger lock");
+        hashes.insert(path_str.to_string(), crate::fnv::fnv1a64_str(body_trimmed));
+        save_hashes(&hashes);
+    }
+
     async fn process(&self, path: PathBuf) -> Result<bool, String> {
         // Recency check — don't re-tag the same note within MIN_REAGE.
         {
@@ -74,12 +118,14 @@ impl Tagger {
         if body_trimmed.is_empty() {
             return Ok(false);
         }
+        let path_str = path.to_string_lossy().to_string();
 
-        // Body-hash check — skip if body unchanged since last tagging.
-        let body_hash = hash_str(body_trimmed);
+        // Body-hash check — skip if the body is unchanged since we last
+        // tagged it (stable hash, persisted across restarts).
+        let body_hash = crate::fnv::fnv1a64_str(body_trimmed);
         {
             let hashes = self.last_tagged_hash.lock().expect("tagger lock");
-            if hashes.get(&path) == Some(&body_hash) {
+            if hashes.get(&path_str) == Some(&body_hash) {
                 return Ok(false);
             }
         }
@@ -105,18 +151,39 @@ impl Tagger {
         };
         let new_tags = ai::dispatch_propose_tags(provider, &key, &body_for_api).await?;
 
+        // The AI call took seconds; the user (or a sync tool) may have
+        // edited the note meanwhile. Merging into the snapshot we read
+        // would clobber those edits on disk — the classic lost update. So
+        // re-read and only proceed if the file is byte-identical to what
+        // the tags were proposed for; otherwise skip — the edit's own
+        // change event re-enqueues the note for a fresh pass.
+        let fresh = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        if fresh != content {
+            return Ok(false);
+        }
+
         // Pivot from YAML to inline: merge_tags_into_file unions the
         // proposed tags with any existing tags (inline + canonical line +
         // legacy YAML), wipes the legacy YAML tag list, and writes a fresh
         // canonical tag line at the bottom of the body. The user's editor
         // will hide that line and surface the tags as pills.
         let new_content = crate::tags::merge_tags_into_file(&content, &new_tags);
+        if new_content == content {
+            // Nothing to change (AI proposed tags we already have). Record
+            // the hash anyway so we don't burn another API call on this
+            // body, and skip the write — a no-op rewrite would still bump
+            // mtime, reshuffling the modified-date ordering and making
+            // sync tools re-upload the file.
+            self.remember_tagged(&path_str, body_trimmed);
+            return Ok(false);
+        }
         crate::notes::write_atomic(&path, &new_content).map_err(|e| e.to_string())?;
 
-        {
-            let mut hashes = self.last_tagged_hash.lock().expect("tagger lock");
-            hashes.insert(path.clone(), body_hash);
-        }
+        // Record the hash of the body WE JUST WROTE (post-merge), not the
+        // pre-merge body — otherwise our own write looks like a fresh edit
+        // on the next pass and triggers a second API call + rewrite.
+        let (_fm2, new_body) = frontmatter::split(&new_content);
+        self.remember_tagged(&path_str, new_body.trim());
         {
             let mut last_at = self.last_tagged_at.lock().expect("tagger lock");
             last_at.insert(path, Instant::now());
@@ -161,12 +228,4 @@ pub fn start(tagger: Arc<Tagger>, app_handle: AppHandle) {
             }
         }
     });
-}
-
-fn hash_str(s: &str) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    s.hash(&mut h);
-    h.finish()
 }

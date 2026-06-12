@@ -1880,6 +1880,20 @@
     });
   }
 
+  // The parent deleted a note. If it's the one in this editor, mark the
+  // buffer clean and cancel any pending autosave — otherwise the upcoming
+  // pane switch would flush the old content back to the deleted path and
+  // save_note would recreate the file ("deleted" notes resurrecting).
+  function handleNoteDeleted(e: Event) {
+    const detail = (e as CustomEvent<{ path: string }>).detail;
+    if (!detail || detail.path !== currentPath || !view) return;
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    lastSavedContent = view.state.doc.toString();
+  }
+
   // Finalize any in-progress tag when the editor loses focus — whether to
   // another part of the app or another window entirely. Deferred a microtask
   // so we never dispatch into a view that navigation is tearing down (loadPath
@@ -2269,6 +2283,7 @@
     // App window lost focus (alt-tab to another application) → finalize any
     // in-progress tag, same as an in-app blur.
     window.addEventListener("blur", finalizeTagsOnBlur);
+    window.addEventListener("malt:note-deleted", handleNoteDeleted);
     unlistenNotes = await listen("notes_changed", handleExternalChange);
     // Allow the parent to await all pending saves before a rename / other
     // path-mutating op so we don't write stale content to a renamed file.
@@ -2292,6 +2307,7 @@
     window.removeEventListener("keydown", handlePillMenuEsc, true);
     window.removeEventListener("keydown", handleLinkSuggestionsKey, true);
     window.removeEventListener("blur", finalizeTagsOnBlur);
+    window.removeEventListener("malt:note-deleted", handleNoteDeleted);
     unlistenNotes?.();
     unregisterFlusher?.();
     if (saveTimer && currentPath && view) {

@@ -1357,11 +1357,23 @@
     }
     deleteConfirmOpen = false;
     try {
+      // Sync editor save-state BEFORE deleting: if the open note has
+      // unsaved edits, the pane switch after deletion would flush them
+      // back to the just-deleted path — save_note recreates files, so the
+      // "deleted" note resurrected with the buffer's content. Flushing
+      // first makes that flush a no-op; the malt:note-deleted event below
+      // belt-and-suspenders it by marking the buffer clean either way.
+      await flushAllEditors();
       await invoke("delete_note", { path });
     } catch (e) {
       console.error("delete_note failed", e);
       return;
     }
+    // Tell every editor instance this path is gone on purpose, so none of
+    // them re-saves stale content onto it during their own teardown.
+    window.dispatchEvent(
+      new CustomEvent("malt:note-deleted", { detail: { path } }),
+    );
     // Prune history in both panes. With cross-vault entries the
     // filter compares by path only — if you delete a note, any history
     // entries referencing it (in this vault or another) are stale.

@@ -4,6 +4,7 @@ mod config;
 mod embeddings;
 mod encryption;
 mod export;
+mod fnv;
 mod frontmatter;
 mod index;
 mod link_suggestions;
