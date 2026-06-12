@@ -433,6 +433,10 @@ impl EmbedIndex {
         next
     }
 
+    fn queue_is_empty(&self) -> bool {
+        self.queue.lock().expect("queue lock").is_empty()
+    }
+
     fn process(&self, path: PathBuf, app_handle: &AppHandle) -> Result<bool, String> {
         if !path.is_file() {
             // File no longer exists — clean up if we still hold a row.
@@ -564,15 +568,40 @@ impl EmbedIndex {
 pub fn start(index: Arc<EmbedIndex>, app_handle: AppHandle) {
     std::thread::spawn(move || loop {
         std::thread::sleep(TICK);
-        let Some(path) = index.next() else { continue };
-        match index.process(path, &app_handle) {
-            Ok(true) => {
-                let _ = app_handle.emit("related_changed", ());
+        if index.queue_is_empty() {
+            continue;
+        }
+        // Make sure the model is up BEFORE draining: otherwise every queued
+        // path would be consumed by a "model not available" error and never
+        // re-embedded. The backoff inside load_model keeps this cheap while
+        // a download keeps failing — the queue just waits.
+        if !index.load_model(&app_handle) {
+            continue;
+        }
+        // Drain the whole queue each tick instead of one item per tick. A
+        // fresh 1,000-note vault used to take ~8 MINUTES of queue time even
+        // when every item was a cheap hash-skip; actual embedding is
+        // ~5-30ms/note, so draining keeps related-notes and is:duplicate
+        // complete within seconds. Emit related_changed periodically (not
+        // per item) so the frontend refresh doesn't storm during the
+        // initial fill.
+        let mut embedded = 0usize;
+        while let Some(path) = index.next() {
+            match index.process(path, &app_handle) {
+                Ok(true) => {
+                    embedded += 1;
+                    if embedded % 25 == 0 {
+                        let _ = app_handle.emit("related_changed", ());
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    eprintln!("embeddings: {e}");
+                }
             }
-            Ok(false) => {}
-            Err(e) => {
-                eprintln!("embeddings: {e}");
-            }
+        }
+        if embedded > 0 {
+            let _ = app_handle.emit("related_changed", ());
         }
     });
 }

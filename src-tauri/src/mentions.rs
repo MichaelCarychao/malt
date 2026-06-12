@@ -160,9 +160,14 @@ pub fn find(target_path: &str, title: &str, candidate_paths: &[String]) -> Vec<U
         if path == target_path {
             continue;
         }
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => continue,
+        // Serve from the note cache (falling back to disk for a path the
+        // cache hasn't met) — this scan runs on every note switch.
+        let content: std::sync::Arc<str> = match crate::notes::cached_content(path) {
+            Some(c) => c,
+            None => match std::fs::read_to_string(path) {
+                Ok(c) => std::sync::Arc::from(c.as_str()),
+                Err(_) => continue,
+            },
         };
         if crate::encryption::is_encrypted(&content) {
             continue;
@@ -220,5 +225,8 @@ pub fn link_first(source_path: &str, target_title: &str) -> Result<(), String> {
     let new_body = format!("{}[[{}]]{}", &body[..idx], matched, &body[end..]);
     let new_content = crate::frontmatter::merge(&fm, &new_body);
     crate::notes::write_atomic(source_path, &new_content).map_err(|e| e.to_string())?;
+    // Keep the note cache current for the rewritten source (the backlink
+    // rebuild that follows reads from the cache).
+    let _ = crate::notes::refresh_path(source_path);
     Ok(())
 }

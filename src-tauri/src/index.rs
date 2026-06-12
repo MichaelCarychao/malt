@@ -14,6 +14,12 @@ use tantivy::{
 pub struct NoteIndex {
     index: Index,
     reader: IndexReader,
+    /// ONE long-lived writer, created at startup. Creating an IndexWriter
+    /// is heavyweight (it allocates the arena and spawns indexing threads),
+    /// and the old code did it per `upsert` — i.e. on every 300ms-debounced
+    /// autosave. The Mutex doubles as the single-writer serialization that
+    /// `rebuild_lock` used to provide.
+    writer: Mutex<tantivy::IndexWriter<TantivyDocument>>,
     path_field: Field,
     title_field: Field,
     body_field: Field,
@@ -22,7 +28,6 @@ pub struct NoteIndex {
     /// 0 when the note has meaningful content, 1 when it's empty (no body
     /// after stripping malt-private markup). Used for `empty:true` queries.
     empty_field: Field,
-    rebuild_lock: Mutex<()>,
 }
 
 impl NoteIndex {
@@ -43,28 +48,29 @@ impl NoteIndex {
             .reader_builder()
             .reload_policy(ReloadPolicy::OnCommitWithDelay)
             .try_into()?;
+        let writer = index.writer(15_000_000)?;
         Ok(Self {
             index,
             reader,
+            writer: Mutex::new(writer),
             path_field,
             title_field,
             body_field,
             tags_field,
             modified_field,
             empty_field,
-            rebuild_lock: Mutex::new(()),
         })
     }
 
-    /// Build the single tantivy document for the note `summary`. Factored
-    /// out of `rebuild` so the full-rebuild and the incremental `upsert`
-    /// paths produce byte-identical documents (same schema, same tag
-    /// expansion, same encrypted-note handling) — divergence here would let
-    /// an in-app edit and an external-change rebuild index the same note
-    /// differently. `summary.path` is the document's primary key — every
-    /// add MUST be preceded by `delete_term(path)` (see `upsert`/`remove`)
-    /// or duplicate documents accumulate for the same note.
-    fn build_doc(&self, summary: &crate::notes::NoteSummary) -> TantivyDocument {
+    /// Build the single tantivy document for the note `summary` with its
+    /// full file `content` (from the note cache — no disk read; the old
+    /// version re-read every file here, doubling each rebuild's IO).
+    /// Factored out so the full-rebuild and the incremental `upsert` paths
+    /// produce byte-identical documents (same schema, same tag expansion,
+    /// same encrypted-note handling). `summary.path` is the document's
+    /// primary key — every add MUST be preceded by `delete_term(path)`
+    /// (see `upsert`/`remove`) or duplicate documents accumulate.
+    fn build_doc(&self, summary: &crate::notes::NoteSummary, content: &str) -> TantivyDocument {
         let mut doc = TantivyDocument::default();
         doc.add_text(self.path_field, &summary.path);
         doc.add_text(self.title_field, &summary.title);
@@ -76,9 +82,8 @@ impl NoteIndex {
             doc.add_u64(self.modified_field, summary.modified);
             doc.add_u64(self.empty_field, 0);
         } else {
-            let content = std::fs::read_to_string(&summary.path).unwrap_or_default();
-            let (_fm, body) = crate::frontmatter::split(&content);
-            let tags = crate::tags::extract_tags_full(&content);
+            let (_fm, body) = crate::frontmatter::split(content);
+            let tags = crate::tags::extract_tags_full(content);
             let expanded = crate::tags::expand_with_slash_parents(&tags);
             doc.add_text(self.body_field, body);
             for tag in &expanded {
@@ -91,11 +96,10 @@ impl NoteIndex {
     }
 
     pub fn rebuild(&self) -> tantivy::Result<()> {
-        let _g = self.rebuild_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let mut writer = self.index.writer(15_000_000)?;
+        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         writer.delete_all_documents()?;
-        for note in crate::notes::list_notes() {
-            writer.add_document(self.build_doc(&note))?;
+        for (note, content) in crate::notes::list_with_content() {
+            writer.add_document(self.build_doc(&note, &content))?;
         }
         writer.commit()?;
         self.reader.reload()?;
@@ -108,23 +112,23 @@ impl NoteIndex {
     /// rebuild — and resiliently, since dropped filesystem events can't
     /// leave the index stale for content the app itself wrote.
     ///
+    /// Doubles as the cache-invalidation funnel: `refresh_path` re-reads
+    /// exactly this one file into the note cache, and the fresh
+    /// (summary, content) feeds the document — so every command that
+    /// upserts the index keeps the sidebar/search cache current for free.
+    ///
     /// `path` is the primary key: the `path` field is STRING (one exact
     /// token), so we MUST `delete_term` it before re-adding, or repeated
     /// upserts would accumulate duplicate documents for the same note.
-    /// Takes `rebuild_lock` to preserve the single-writer invariant shared
-    /// with `rebuild` (tantivy permits only one writer at a time).
-    ///
-    /// The note's summary is built via `summary_for_path` (reads just this
-    /// one file) rather than scanning the whole vault, keeping the call O(1)
-    /// in corpus size. If the file is gone / unreadable / not a note, this
-    /// degrades to a `remove` so a missing file never lingers in the index.
+    /// If the file is gone / unreadable / not a note, this degrades to a
+    /// `remove` so a missing file never lingers in the index.
     pub fn upsert(&self, path: &str) -> tantivy::Result<()> {
-        let _g = self.rebuild_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let mut writer = self.index.writer(15_000_000)?;
+        let fresh = crate::notes::refresh_path(path);
+        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let term = Term::from_field_text(self.path_field, path);
         writer.delete_term(term);
-        if let Some(summary) = crate::notes::summary_for_path(path) {
-            writer.add_document(self.build_doc(&summary))?;
+        if let Some((summary, content)) = fresh {
+            writer.add_document(self.build_doc(&summary, &content))?;
         }
         writer.commit()?;
         self.reader.reload()?;
@@ -132,14 +136,12 @@ impl NoteIndex {
     }
 
     /// Remove a single note from the index by path (its primary key). Used
-    /// when a note is deleted or moved/renamed away. delete_term + commit +
-    /// reload; a no-op if the path isn't present.
+    /// when a note is deleted or moved/renamed away. Also drops the path
+    /// from the note cache. delete_term + commit + reload; a no-op if the
+    /// path isn't present.
     pub fn remove(&self, path: &str) -> tantivy::Result<()> {
-        let _g = self.rebuild_lock.lock().unwrap_or_else(|e| e.into_inner());
-        // Annotate the writer's document type: unlike `upsert`, this path
-        // never calls `add_document`, so nothing else pins `D`.
-        let mut writer: tantivy::IndexWriter<TantivyDocument> =
-            self.index.writer(15_000_000)?;
+        crate::notes::forget_path_cache(path);
+        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let term = Term::from_field_text(self.path_field, path);
         writer.delete_term(term);
         writer.commit()?;
@@ -351,14 +353,13 @@ mod tests {
         }
     }
 
-    /// Index one document directly (bypassing the disk-reading
-    /// summary_for_path) so these tests don't depend on the active vault.
-    /// Mirrors upsert's primary-key discipline: delete_term(path) before add.
+    /// Index one document directly (bypassing the note cache) so these
+    /// tests don't depend on the active vault. Mirrors upsert's
+    /// primary-key discipline: delete_term(path) before add.
     fn index_doc(idx: &NoteIndex, s: &crate::notes::NoteSummary) {
-        let _g = idx.rebuild_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let mut writer = idx.index.writer(15_000_000).unwrap();
+        let mut writer = idx.writer.lock().unwrap_or_else(|e| e.into_inner());
         writer.delete_term(Term::from_field_text(idx.path_field, &s.path));
-        writer.add_document(idx.build_doc(s)).unwrap();
+        writer.add_document(idx.build_doc(s, "")).unwrap();
         writer.commit().unwrap();
         idx.reader.reload().unwrap();
     }

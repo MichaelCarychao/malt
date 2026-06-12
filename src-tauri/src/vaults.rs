@@ -83,7 +83,25 @@ fn seeded_default() -> VaultsState {
 /// default WITHOUT persisting — this used to `save()` unconditionally,
 /// which let one transient read failure permanently overwrite the user's
 /// entire vault registry with a single "Default" entry.
+/// In-memory mirror of the registry. `active_path()` sits under EVERY
+/// command and every note-cache access, so it must not cost a disk read
+/// of vaults.json per call. The mirror is updated by `save()` (all
+/// mutations write through) and only misses a concurrent hand-edit of
+/// vaults.json while the app is running — which was never supported.
+fn registry_cache() -> &'static std::sync::Mutex<Option<VaultsState>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<VaultsState>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
 pub fn load() -> VaultsState {
+    if let Some(cached) = registry_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        return cached;
+    }
     let mut state = match crate::config::read_json::<VaultsState>(&registry_path()) {
         crate::config::JsonRead::Parsed(s) => s,
         crate::config::JsonRead::Missing | crate::config::JsonRead::Quarantined => {
@@ -91,6 +109,10 @@ pub fn load() -> VaultsState {
             let _ = save(&seeded);
             seeded
         }
+        // Transient read failure: serve the default for THIS call but do
+        // NOT cache it — the next call retries the disk so a recovered
+        // file wins (and no mutation can persist the default; see
+        // load_for_update).
         crate::config::JsonRead::Unreadable => return seeded_default(),
     };
     if state.vaults.is_empty() {
@@ -104,6 +126,7 @@ pub fn load() -> VaultsState {
     if state.active_index >= state.vaults.len() {
         state.active_index = 0;
     }
+    *registry_cache().lock().unwrap_or_else(|e| e.into_inner()) = Some(state.clone());
     state
 }
 
@@ -130,7 +153,10 @@ fn save(state: &VaultsState) -> std::io::Result<()> {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     // Atomic temp-file + rename so a crash mid-write can't leave a
     // half-written / empty vaults.json behind.
-    crate::notes::write_atomic(registry_path(), &json)
+    crate::notes::write_atomic(registry_path(), &json)?;
+    // Write-through to the in-memory mirror so reads stay disk-free.
+    *registry_cache().lock().unwrap_or_else(|e| e.into_inner()) = Some(state.clone());
+    Ok(())
 }
 
 /// Path of the currently-active vault. notes::notes_dir() calls this.

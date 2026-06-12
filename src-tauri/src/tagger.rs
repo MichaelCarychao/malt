@@ -178,6 +178,9 @@ impl Tagger {
             return Ok(false);
         }
         crate::notes::write_atomic(&path, &new_content).map_err(|e| e.to_string())?;
+        // Keep the note cache current so the notes_changed refresh that
+        // follows shows the new tags immediately.
+        let _ = crate::notes::refresh_path(&path_str);
 
         // Record the hash of the body WE JUST WROTE (post-merge), not the
         // pre-merge body — otherwise our own write looks like a fresh edit

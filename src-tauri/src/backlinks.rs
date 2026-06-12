@@ -25,21 +25,23 @@ impl BacklinkIndex {
     /// Re-scan all notes, parse wikilinks, resolve targets, populate the
     /// reverse map. Called alongside the Tantivy index rebuild.
     pub fn rebuild(&self) {
-        let notes = crate::notes::list_notes();
+        // Summaries + content straight from the note cache — this rebuild
+        // used to be one of several redundant full-vault disk passes per
+        // watcher batch.
+        let notes = crate::notes::list_with_content();
 
         // Build lookup tables for the resolver — case-insensitive title and
         // slug-normalized title — keyed to canonical paths.
         let mut by_title: HashMap<String, String> = HashMap::new();
         let mut by_slug: HashMap<String, String> = HashMap::new();
-        for n in &notes {
+        for (n, _) in &notes {
             by_title.insert(n.title.to_lowercase(), n.path.clone());
             by_slug.insert(slugify(&n.title), n.path.clone());
         }
 
         let mut new_map: HashMap<String, Vec<BacklinkInfo>> = HashMap::new();
-        for note in &notes {
-            let content = std::fs::read_to_string(&note.path).unwrap_or_default();
-            let (_fm, body) = crate::frontmatter::split(&content);
+        for (note, content) in &notes {
+            let (_fm, body) = crate::frontmatter::split(content);
             for (link_text, match_start, match_end) in scan_wikilinks(body) {
                 if let Some(target_path) = resolve(&link_text, &by_title, &by_slug) {
                     let snippet = snippet_around(body, match_start, match_end);
@@ -112,11 +114,11 @@ pub fn resolved_targets_in(body: &str) -> Vec<(String, String)> {
 /// their targets — an acceptable blind spot, since encryption hides the
 /// graph by design.
 pub fn orphan_paths() -> Vec<String> {
-    let notes = crate::notes::list_notes();
+    let notes = crate::notes::list_with_content();
 
     let mut by_title: HashMap<String, String> = HashMap::new();
     let mut by_slug: HashMap<String, String> = HashMap::new();
-    for n in &notes {
+    for (n, _) in &notes {
         by_title.insert(n.title.to_lowercase(), n.path.clone());
         by_slug.insert(slugify(&n.title), n.path.clone());
     }
@@ -124,12 +126,11 @@ pub fn orphan_paths() -> Vec<String> {
     // One pass over readable notes: who links out, and who gets linked to.
     let mut has_outgoing: HashSet<String> = HashSet::new();
     let mut is_target: HashSet<String> = HashSet::new();
-    for note in &notes {
+    for (note, content) in &notes {
         if note.is_encrypted {
             continue;
         }
-        let content = std::fs::read_to_string(&note.path).unwrap_or_default();
-        let (_fm, body) = crate::frontmatter::split(&content);
+        let (_fm, body) = crate::frontmatter::split(content);
         for (link_text, _, _) in scan_wikilinks(body) {
             if let Some(target) = resolve(&link_text, &by_title, &by_slug) {
                 // A note linking to itself doesn't count as being woven in.
@@ -141,12 +142,20 @@ pub fn orphan_paths() -> Vec<String> {
         }
     }
 
-    notes
+    let mut out: Vec<String> = notes
         .iter()
-        .filter(|n| !n.is_encrypted)
-        .filter(|n| !has_outgoing.contains(&n.path) && !is_target.contains(&n.path))
-        .map(|n| n.path.clone())
-        .collect()
+        .filter(|(n, _)| !n.is_encrypted)
+        .filter(|(n, _)| !has_outgoing.contains(&n.path) && !is_target.contains(&n.path))
+        .map(|(n, _)| n.path.clone())
+        .collect();
+    // list_with_content has no inherent order (HashMap-backed); restore the
+    // modified-descending contract the report relies on.
+    let order: HashMap<&str, u64> = notes
+        .iter()
+        .map(|(n, _)| (n.path.as_str(), n.modified))
+        .collect();
+    out.sort_by(|a, b| order.get(b.as_str()).cmp(&order.get(a.as_str())));
+    out
 }
 
 /// Split a wikilink's inner text into `(target, alias)` on the FIRST `|`.
@@ -331,6 +340,10 @@ pub fn cascade_wikilink_rename(
         if count > 0 {
             let full = crate::frontmatter::merge(&fm, &new_body);
             if crate::notes::write_atomic(&p, &full).is_ok() {
+                // Keep the note cache current for the file we just rewrote
+                // — the index/backlink rebuilds right after the rename read
+                // from the cache, not from disk.
+                let _ = crate::notes::refresh_path(&p.to_string_lossy());
                 changed += 1;
             }
         }

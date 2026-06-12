@@ -34,8 +34,12 @@ struct AppState {
 }
 
 #[tauri::command]
-fn list_notes() -> Vec<notes::NoteSummary> {
-    notes::list_notes()
+async fn list_notes() -> Result<Vec<notes::NoteSummary>, String> {
+    // Cache hit is microseconds, but a cold/cross-vault miss re-scans the
+    // whole vault — keep that off the IPC thread.
+    tauri::async_runtime::spawn_blocking(notes::list_notes)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -83,8 +87,11 @@ async fn search_notes(
                 let mut base = by_path.get(&p).cloned()?;
                 // Title matches highlight the *displayed* name (H1 or filename).
                 base.title_matches = notes::find_matches(&base.display_title, &terms);
-                // Re-read body to build a match-context snippet.
-                let content = std::fs::read_to_string(&p).unwrap_or_default();
+                // Body for the match-context snippet comes from the note
+                // cache — this used to be a second per-hit disk read on
+                // every keystroke.
+                let content = notes::cached_content(&p)
+                    .unwrap_or_else(|| std::sync::Arc::from(""));
                 let (_fm, body) = frontmatter::split(&content);
                 let (snippet, snippet_matches) = notes::snippet_around_match(body, &terms, 100);
                 // If no match found in body, keep the original first-line snippet.
@@ -154,39 +161,45 @@ fn read_note(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn save_note(
+async fn save_note(
     path: String,
     content: String,
-    state: tauri::State<AppState>,
+    state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     ensure_in_vault(&path)?;
+    let index = state.index.clone();
+    let embeddings = state.embeddings.clone();
+    // write_atomic fsyncs and the index upsert commits — blocking work that
+    // used to serialize the IPC lane on every 300ms-debounced autosave.
+    tauri::async_runtime::spawn_blocking(move || {
     // Defense in depth (belt-and-suspenders behind the frontend's
     // never-write-plaintext-over-ciphertext rule): if the file on disk is
     // currently an encrypted envelope and the incoming content is NOT one,
     // refuse the write. Otherwise a stray plaintext save would silently
     // destroy the encryption and leak the note's contents. Reads of a
     // not-yet-existing file return Err → nothing to clobber, proceed.
-    if let Ok(existing) = std::fs::read_to_string(&path) {
-        if encryption::is_encrypted(&existing) && !encryption::is_encrypted(&content) {
-            return Err(
-                "refusing to overwrite an encrypted note with plaintext".to_string(),
-            );
+        if let Ok(existing) = std::fs::read_to_string(&path) {
+            if encryption::is_encrypted(&existing) && !encryption::is_encrypted(&content) {
+                return Err(
+                    "refusing to overwrite an encrypted note with plaintext".to_string(),
+                );
+            }
         }
-    }
-    notes::write_atomic(&path, &content).map_err(|e| e.to_string())?;
-    // Update the search index synchronously so the edit is searchable
-    // immediately and doesn't depend on the debounced watcher (which can
-    // drop or coalesce events). Log on failure rather than failing the save
-    // — the note is already safely on disk, and the watcher rebuild is a
-    // backstop.
-    if let Err(e) = state.index.upsert(&path) {
-        eprintln!("save_note: index upsert failed for {path}: {e}");
-    }
-    // Re-embed the changed file. Hash check inside the worker skips no-ops.
-    state
-        .embeddings
-        .enqueue_path(std::path::PathBuf::from(&path));
-    Ok(())
+        notes::write_atomic(&path, &content).map_err(|e| e.to_string())?;
+        // Update the search index (and through it, the note cache) so the
+        // edit is searchable immediately and doesn't depend on the
+        // debounced watcher (which can drop or coalesce events). Log on
+        // failure rather than failing the save — the note is already
+        // safely on disk, and the watcher rebuild is a backstop.
+        if let Err(e) = index.upsert(&path) {
+            eprintln!("save_note: index upsert failed for {path}: {e}");
+        }
+        // Re-embed the changed file. Hash check inside the worker skips no-ops.
+        embeddings.enqueue_path(std::path::PathBuf::from(&path));
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ──────────────────────────── encryption ────────────────────────────
@@ -210,100 +223,120 @@ fn is_note_encrypted(path: String) -> bool {
         .unwrap_or(false)
 }
 
-/// Decrypt + return plaintext for an already-encrypted note.
+/// Decrypt + return plaintext for an already-encrypted note. Async: a
+/// cold-cache decrypt runs Argon2id (~100ms+), which must not stall the
+/// IPC lane.
 #[tauri::command]
-fn read_encrypted_note(path: String, password: String) -> Result<String, String> {
+async fn read_encrypted_note(path: String, password: String) -> Result<String, String> {
     ensure_in_vault(&path)?;
-    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    encryption::decrypt(&content, &password)
+    tauri::async_runtime::spawn_blocking(move || {
+        let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        encryption::decrypt(&content, &password)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Encrypt `content` and write the envelope to `path`. Used for both
 /// the initial encrypt-this-note action and subsequent saves while the
 /// note remains encrypted.
 #[tauri::command]
-fn save_encrypted_note(
+async fn save_encrypted_note(
     path: String,
     content: String,
     password: String,
-    state: tauri::State<AppState>,
+    state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     ensure_in_vault(&path)?;
-    // Reuse the salt from the note's current on-disk envelope so the
-    // derived-key cache hits — turns each autosave into a cheap AES-GCM
-    // pass instead of a fresh Argon2id run. Fresh nonce every time.
-    let prior = std::fs::read_to_string(&path).unwrap_or_default();
-    let envelope = encryption::encrypt_reusing_salt(&content, &password, &prior)?;
-    notes::write_atomic(&path, &envelope).map_err(|e| e.to_string())?;
-    // Reindex now: upsert re-reads the file, sees the MALT-ENC envelope, and
-    // reindexes title-only — dropping the prior plaintext body from search
-    // immediately rather than leaving it exposed until the watcher fires.
-    if let Err(e) = state.index.upsert(&path) {
-        eprintln!("save_encrypted_note: index upsert failed for {path}: {e}");
-    }
-    // Re-enqueue for embedding so the index drops the prior body
-    // representation (embedding worker will see encrypted content + skip
-    // it via the per-path is-encrypted check it inherits from the
-    // updated list_notes result).
-    state
-        .embeddings
-        .enqueue_path(std::path::PathBuf::from(&path));
-    Ok(())
+    let index = state.index.clone();
+    let embeddings = state.embeddings.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // Reuse the salt from the note's current on-disk envelope so the
+        // derived-key cache hits — turns each autosave into a cheap AES-GCM
+        // pass instead of a fresh Argon2id run. Fresh nonce every time.
+        let prior = std::fs::read_to_string(&path).unwrap_or_default();
+        let envelope = encryption::encrypt_reusing_salt(&content, &password, &prior)?;
+        notes::write_atomic(&path, &envelope).map_err(|e| e.to_string())?;
+        // Reindex now: upsert re-reads the file, sees the MALT-ENC envelope,
+        // and reindexes title-only — dropping the prior plaintext body from
+        // search immediately rather than leaving it exposed until the
+        // watcher fires.
+        if let Err(e) = index.upsert(&path) {
+            eprintln!("save_encrypted_note: index upsert failed for {path}: {e}");
+        }
+        // Re-enqueue for embedding so the index drops the prior body
+        // representation (embedding worker will see encrypted content + skip
+        // it via the per-path is-encrypted check it inherits from the
+        // updated list_notes result).
+        embeddings.enqueue_path(std::path::PathBuf::from(&path));
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Permanently remove encryption from a note. Requires the current
 /// password; on success the file is rewritten as plaintext.
 #[tauri::command]
-fn decrypt_existing_note(
+async fn decrypt_existing_note(
     path: String,
     password: String,
-    state: tauri::State<AppState>,
+    state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     ensure_in_vault(&path)?;
-    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let plaintext = encryption::decrypt(&content, &password)?;
-    notes::write_atomic(&path, &plaintext).map_err(|e| e.to_string())?;
-    // Now plaintext on disk — reindex so the body becomes searchable again.
-    if let Err(e) = state.index.upsert(&path) {
-        eprintln!("decrypt_existing_note: index upsert failed for {path}: {e}");
-    }
-    state
-        .embeddings
-        .enqueue_path(std::path::PathBuf::from(&path));
-    Ok(())
+    let index = state.index.clone();
+    let embeddings = state.embeddings.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let plaintext = encryption::decrypt(&content, &password)?;
+        notes::write_atomic(&path, &plaintext).map_err(|e| e.to_string())?;
+        // Now plaintext on disk — reindex so the body becomes searchable again.
+        if let Err(e) = index.upsert(&path) {
+            eprintln!("decrypt_existing_note: index upsert failed for {path}: {e}");
+        }
+        embeddings.enqueue_path(std::path::PathBuf::from(&path));
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Re-encrypt a note with a new password (or set a password on a
 /// previously-plain note when `old_password` is empty).
 #[tauri::command]
-fn change_note_password(
+async fn change_note_password(
     path: String,
     old_password: String,
     new_password: String,
-    state: tauri::State<AppState>,
+    state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     ensure_in_vault(&path)?;
     if new_password.is_empty() {
         return Err("new password is empty".into());
     }
-    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let plaintext = if encryption::is_encrypted(&content) {
-        encryption::decrypt(&content, &old_password)?
-    } else {
-        content
-    };
-    let envelope = encryption::encrypt(&plaintext, &new_password)?;
-    notes::write_atomic(&path, &envelope).map_err(|e| e.to_string())?;
-    // Result is an encrypted envelope; reindex so the search index reflects
-    // encrypted (title-only) state — important when setting a password on a
-    // previously-plain note, so its body stops showing up in results.
-    if let Err(e) = state.index.upsert(&path) {
-        eprintln!("change_note_password: index upsert failed for {path}: {e}");
-    }
-    state
-        .embeddings
-        .enqueue_path(std::path::PathBuf::from(&path));
-    Ok(())
+    let index = state.index.clone();
+    let embeddings = state.embeddings.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let plaintext = if encryption::is_encrypted(&content) {
+            encryption::decrypt(&content, &old_password)?
+        } else {
+            content
+        };
+        let envelope = encryption::encrypt(&plaintext, &new_password)?;
+        notes::write_atomic(&path, &envelope).map_err(|e| e.to_string())?;
+        // Result is an encrypted envelope; reindex so the search index
+        // reflects encrypted (title-only) state — important when setting a
+        // password on a previously-plain note, so its body stops showing up
+        // in results.
+        if let Err(e) = index.upsert(&path) {
+            eprintln!("change_note_password: index upsert failed for {path}: {e}");
+        }
+        embeddings.enqueue_path(std::path::PathBuf::from(&path));
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -522,13 +555,19 @@ async fn semantic_search(
 /// outgoing wikilinks and no backlinks. Powers the `is:orphan` report.
 /// Returned in modified-descending order (same as the default listing).
 #[tauri::command]
-fn list_orphans() -> Vec<notes::NoteSummary> {
-    let orphans: std::collections::HashSet<String> =
-        backlinks::orphan_paths().into_iter().collect();
-    notes::list_notes()
-        .into_iter()
-        .filter(|n| orphans.contains(&n.path))
-        .collect()
+async fn list_orphans() -> Result<Vec<notes::NoteSummary>, String> {
+    // Whole-vault link scan — cache-backed now, but still O(corpus); keep
+    // it off the IPC thread.
+    tauri::async_runtime::spawn_blocking(|| {
+        let orphans: std::collections::HashSet<String> =
+            backlinks::orphan_paths().into_iter().collect();
+        notes::list_notes()
+            .into_iter()
+            .filter(|n| orphans.contains(&n.path))
+            .collect()
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// "Near-duplicates" — notes that have at least one other note within
@@ -1404,7 +1443,12 @@ fn move_note_to_vault(
         std::fs::copy(&src, &dest).map_err(|e| e.to_string())?;
         std::fs::remove_file(&src).map_err(|e| e.to_string())?;
     }
-    // The note left the active vault — drop its embedding + any pin.
+    // The note left the active vault — drop it from the search index +
+    // note cache (it lingered in both until the watcher caught up), its
+    // embedding, and any pin.
+    if let Err(e) = state.index.remove(&path) {
+        eprintln!("move_note_to_vault: index remove failed for {path}: {e}");
+    }
     state.embeddings.forget_path(&path);
     config::remove_pin(&path);
     Ok(dest.to_string_lossy().to_string())
@@ -1427,19 +1471,24 @@ fn set_tag_vocabulary(vocabulary: Vec<String>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn list_all_tags() -> Vec<TagCount> {
-    let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-    for note in notes::list_notes() {
-        for tag in &note.tags {
-            *counts.entry(tag.clone()).or_insert(0) += 1;
+async fn list_all_tags() -> Result<Vec<TagCount>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let mut counts: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+        for note in notes::list_notes() {
+            for tag in &note.tags {
+                *counts.entry(tag.clone()).or_insert(0) += 1;
+            }
         }
-    }
-    let mut out: Vec<TagCount> = counts
-        .into_iter()
-        .map(|(name, count)| TagCount { name, count })
-        .collect();
-    out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
-    out
+        let mut out: Vec<TagCount> = counts
+            .into_iter()
+            .map(|(name, count)| TagCount { name, count })
+            .collect();
+        out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
+        out
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[derive(serde::Serialize)]
@@ -1453,29 +1502,34 @@ struct TagCount {
 /// filtering by a single tag. `tag` is canonicalized first so "Draft",
 /// "#draft", and "draft" all resolve the same.
 #[tauri::command]
-fn tag_cooccurrence(tag: String) -> Vec<TagCount> {
+async fn tag_cooccurrence(tag: String) -> Result<Vec<TagCount>, String> {
     let target = tags::canonicalize(&tag);
     if target.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-    for note in notes::list_notes() {
-        if !note.tags.iter().any(|t| t == &target) {
-            continue;
-        }
-        for t in &note.tags {
-            if t != &target {
-                *counts.entry(t.clone()).or_insert(0) += 1;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut counts: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+        for note in notes::list_notes() {
+            if !note.tags.iter().any(|t| t == &target) {
+                continue;
+            }
+            for t in &note.tags {
+                if t != &target {
+                    *counts.entry(t.clone()).or_insert(0) += 1;
+                }
             }
         }
-    }
-    let mut out: Vec<TagCount> = counts
-        .into_iter()
-        .map(|(name, count)| TagCount { name, count })
-        .collect();
-    out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
-    out.truncate(8);
-    out
+        let mut out: Vec<TagCount> = counts
+            .into_iter()
+            .map(|(name, count)| TagCount { name, count })
+            .collect();
+        out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
+        out.truncate(8);
+        out
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

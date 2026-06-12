@@ -415,28 +415,27 @@ pub fn snippet_around_match(body: &str, terms: &[String], window: usize) -> (Str
 }
 
 /// Build a `NoteSummary` for one already-validated note `path` whose
-/// mtime (`modified`, unix secs) the caller has in hand. Shared by
-/// `list_notes` (passing each DirEntry's mtime) and `summary_for_path`
-/// (passing the file's own mtime) so the listing and the incremental
-/// search-index upsert see identical per-note fields. Returns the summary
-/// unconditionally — callers pre-filter `should_ignore` / non-files.
-fn summarize_path(path: &Path, modified: u64) -> NoteSummary {
+/// mtime (`modified`, unix secs) and full `content` the caller has in
+/// hand. Single source of truth for per-note fields — the cache scan,
+/// the incremental refresh, and (through them) the search index all see
+/// identical summaries. Returns the summary unconditionally — callers
+/// pre-filter `should_ignore` / non-files.
+fn summarize_content(path: &Path, modified: u64, content: &str) -> NoteSummary {
     let title = path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("untitled")
         .to_string();
-    let content = std::fs::read_to_string(path).unwrap_or_default();
-    let is_encrypted = crate::encryption::is_encrypted(&content);
+    let is_encrypted = crate::encryption::is_encrypted(content);
     // Encrypted notes contribute only filename to the listing. No
     // snippet, no tags, no emptiness signal — none of that is
     // meaningful (or knowable) without the password.
     let (snippet, tags, is_empty, display_title) = if is_encrypted {
         (String::from("(encrypted)"), Vec::new(), false, title.clone())
     } else {
-        let (_fm, body) = crate::frontmatter::split(&content);
+        let (_fm, body) = crate::frontmatter::split(content);
         let snip = snippet_from(body);
-        let t = crate::tags::extract_tags_full(&content);
+        let t = crate::tags::extract_tags_full(content);
         // Strip private markup before checking emptiness so a note
         // that's *only* tags / wikilinks still counts as empty
         // content-wise.
@@ -462,12 +461,46 @@ fn summarize_path(path: &Path, modified: u64) -> NoteSummary {
     }
 }
 
-/// Summary for a single note path, or `None` if it isn't an indexable
-/// note (missing, not a regular file, or an ignored/non-`.md` name). Used
-/// by the search index's incremental `upsert` so it can reindex exactly
-/// the note that changed without scanning the whole vault.
-pub fn summary_for_path(path: &str) -> Option<NoteSummary> {
-    let p = Path::new(path);
+// ─────────────────────── in-memory note cache ───────────────────────
+//
+// THE latency keystone. Every keystroke-search, sidebar refresh, tag
+// count, backlink rebuild, and index rebuild used to re-read and re-parse
+// the entire vault from disk — multiple full passes per keystroke while
+// typing. The cache holds each note's summary AND full content (an
+// Arc<str>, so handing copies out is a pointer bump) for the active vault,
+// invalidated surgically:
+//
+//   - in-app writes funnel through NoteIndex::upsert/remove, which call
+//     refresh_path / forget_path_cache here;
+//   - background writers (tagger, rename cascade, link-mention) refresh
+//     the paths they rewrite;
+//   - the watcher refreshes each path in a change batch before reindexing;
+//   - a vault switch is detected by the stored dir mismatching notes_dir()
+//     and triggers a full rescan on next access.
+//
+// Memory: content for every plaintext note. A 10k-note vault of ~2KB notes
+// is ~20MB — the nvalt deal (whole corpus in RAM) and exactly what makes
+// type-to-filter instant.
+
+struct CacheEntry {
+    summary: NoteSummary,
+    content: Arc<str>,
+}
+
+struct NoteCacheState {
+    dir: PathBuf,
+    entries: HashMap<String, CacheEntry>,
+}
+
+fn note_cache() -> &'static std::sync::Mutex<Option<NoteCacheState>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<NoteCacheState>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Read one note off disk into a cache entry. None if it's missing, not a
+/// regular file, or an ignored/non-`.md` name.
+fn read_entry(p: &Path) -> Option<CacheEntry> {
     let filename = p.file_name().and_then(|n| n.to_str())?;
     if should_ignore(filename) {
         return None;
@@ -482,33 +515,87 @@ pub fn summary_for_path(path: &str) -> Option<NoteSummary> {
         .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    Some(summarize_path(p, modified))
+    let content = std::fs::read_to_string(p).unwrap_or_default();
+    let summary = summarize_content(p, modified, &content);
+    Some(CacheEntry {
+        summary,
+        content: Arc::from(content.as_str()),
+    })
+}
+
+/// One full pass over `dir` — the only place the whole vault is read.
+fn scan_vault(dir: &Path) -> HashMap<String, CacheEntry> {
+    let mut out = HashMap::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(e) = read_entry(&path) {
+                out.insert(path.to_string_lossy().to_string(), e);
+            }
+        }
+    }
+    out
+}
+
+/// Run `f` against the cache for the CURRENT vault, (re)scanning first if
+/// the cache is cold or belongs to a different vault. Poison-tolerant —
+/// a panic elsewhere must not permanently kill note listing.
+fn with_cache<R>(f: impl FnOnce(&mut NoteCacheState) -> R) -> R {
+    let mut guard = note_cache().lock().unwrap_or_else(|e| e.into_inner());
+    let dir = notes_dir();
+    let needs_scan = guard.as_ref().map(|c| c.dir != dir).unwrap_or(true);
+    if needs_scan {
+        *guard = Some(NoteCacheState {
+            entries: scan_vault(&dir),
+            dir,
+        });
+    }
+    f(guard.as_mut().expect("cache populated above"))
+}
+
+/// Re-read a single file into the cache, or drop it if it's gone. Returns
+/// the fresh (summary, content) when the path is a live note. This is the
+/// surgical-invalidation entry point for every in-app write.
+pub fn refresh_path(path: &str) -> Option<(NoteSummary, Arc<str>)> {
+    with_cache(|c| match read_entry(Path::new(path)) {
+        Some(e) => {
+            let out = (e.summary.clone(), e.content.clone());
+            c.entries.insert(path.to_string(), e);
+            Some(out)
+        }
+        None => {
+            c.entries.remove(path);
+            None
+        }
+    })
+}
+
+/// Drop a path from the cache (after a delete / move-away).
+pub fn forget_path_cache(path: &str) {
+    with_cache(|c| {
+        c.entries.remove(path);
+    });
+}
+
+/// Cached full content of a note, if present. Pointer-cheap.
+pub fn cached_content(path: &str) -> Option<Arc<str>> {
+    with_cache(|c| c.entries.get(path).map(|e| e.content.clone()))
+}
+
+/// Every note's (summary, content) pair — for whole-vault consumers like
+/// the index/backlink rebuilds, replacing their own disk passes.
+pub fn list_with_content() -> Vec<(NoteSummary, Arc<str>)> {
+    with_cache(|c| {
+        c.entries
+            .values()
+            .map(|e| (e.summary.clone(), e.content.clone()))
+            .collect()
+    })
 }
 
 pub fn list_notes() -> Vec<NoteSummary> {
-    let dir = notes_dir();
-    let mut notes = Vec::new();
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return notes,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(filename) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        if should_ignore(filename) || !path.is_file() {
-            continue;
-        }
-        let modified = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        notes.push(summarize_path(&path, modified));
-    }
+    let mut notes: Vec<NoteSummary> =
+        with_cache(|c| c.entries.values().map(|e| e.summary.clone()).collect());
     notes.sort_by(|a, b| b.modified.cmp(&a.modified));
     notes
 }
@@ -784,6 +871,14 @@ pub fn start_watcher(
                         }
                     }
                     prev_hashes = curr_hashes;
+                }
+
+                // Refresh the cache for exactly the changed paths (handles
+                // create/modify/delete uniformly — a vanished file drops
+                // out) so the rebuilds below read fresh in-memory content
+                // instead of re-scanning the vault from disk.
+                for p in &changed {
+                    let _ = refresh_path(&p.to_string_lossy());
                 }
 
                 // The watcher rebuild is the external-change path (in-app
