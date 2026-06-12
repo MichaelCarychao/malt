@@ -72,6 +72,9 @@ fn unlinked_offsets(body: &str, title_lower: &str, title_len: usize) -> Vec<usiz
     // align exactly. We still verify each slice before trusting it.
     let aligned = body_lower.len() == body.len();
     let spans = wikilink_spans(body);
+    // A title appearing inside a code fence / inline code is documentation,
+    // not a mention — offering to wrap it would edit a code sample.
+    let code = crate::link_suggestions::code_mask(body);
     let bytes = body.as_bytes();
     let mut out = Vec::new();
     for (idx, _) in body_lower.match_indices(title_lower) {
@@ -94,6 +97,10 @@ fn unlinked_offsets(body: &str, title_lower: &str, title_len: usize) -> Vec<usiz
         }
         // Not already inside a wikilink.
         if in_any_span(idx, &spans) {
+            continue;
+        }
+        // Not inside code.
+        if idx < code.len() && code[idx] {
             continue;
         }
         out.push(idx);

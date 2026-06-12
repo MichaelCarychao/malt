@@ -435,7 +435,10 @@
   // any key dismisses (boot path) or Esc dismisses (settings-launch path).
   let tipsOpen = $state(false);
   let tipCurrent = $state<Tip | null>(null);
-  let tipHistory: Tip[] = []; // in-memory back-stack for ←
+  // $state so the back-arrow's disabled={tipHistory.length === 0} actually
+  // updates — as a plain array the button stayed disabled forever (the
+  // compiler warned about exactly this).
+  let tipHistory = $state<Tip[]>([]);
   let tipSkipOnStartup = $state(false);
   // Distinguish boot-time tips (auto-dismiss enabled) from on-demand
   // tips launched from Settings (Esc-only dismiss, no skip checkbox).
@@ -2929,6 +2932,8 @@
   <div class="body" style:grid-template-columns={zenMode ? "minmax(0, 1fr)" : `${sidebarWidth}px 5px minmax(0, 1fr)`}>
     <ul class="notes">
       {#each notes as note (note.path)}
+        {@const accent = flairAccent(note)}
+        {@const icons = flairIcons(note)}
         <li
           class="note"
           class:selected={note.path === selectedPath}
@@ -2936,9 +2941,9 @@
           class:conflict={note.is_conflict}
           class:empty-note={note.is_empty}
           class:encrypted={note.is_encrypted}
-          class:flaired={flairAccent(note) !== ""}
+          class:flaired={accent !== ""}
           class:pinned={pinnedSet.has(note.path)}
-          style={flairAccent(note) ? `--flair-accent: ${flairAccent(note)}` : ""}
+          style={accent ? `--flair-accent: ${accent}` : ""}
           onclick={(e) => handleNoteClick(e, note.path)}
           ondblclick={(e) => {
             // Double-click pops the full actions menu (Rename / Encrypt /
@@ -2955,7 +2960,7 @@
             {#if pinnedSet.has(note.path)}<span class="pin-badge" title="Pinned to top — right-click to unpin">📌</span>{/if}
             {#if note.is_conflict}<span class="conflict-badge" title="Sync conflict — manually merge with the original">⚠</span>{/if}
             {#if note.is_encrypted}<span class="encrypted-badge" title={unlockedPasswords.has(note.path) ? "Unlocked this session" : "Encrypted — click to unlock"}>{unlockedPasswords.has(note.path) ? "🔓" : "🔒"}</span>{/if}
-            {#each flairIcons(note) as ic}<span class="flair-icon" style={flairAccent(note) ? `color: ${flairAccent(note)}` : ""}>{ic}</span>{/each}
+            {#each icons as ic}<span class="flair-icon" style={accent ? `color: ${accent}` : ""}>{ic}</span>{/each}
             {@html highlight(note.display_title ?? note.title, note.title_matches)}
           </span>
           <span class="snippet">{@html highlight(note.snippet, note.snippet_matches)}</span>
@@ -3858,7 +3863,7 @@
       <div class="delete-msg">
         Delete <strong>{getTitleForPath(selectedPath)}</strong>?
       </div>
-      <div class="delete-sub">This removes the .md file from ~/malt/ and cannot be undone. Use ← / → to switch.</div>
+      <div class="delete-sub">This removes the .md file from the vault folder and cannot be undone. Use ← / → to switch.</div>
       <div class="delete-actions">
         <button
           class="delete-btn delete-cancel"

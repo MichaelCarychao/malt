@@ -197,12 +197,43 @@ export function relocateTagsToBottom(body: string): {
     }
   }
   newAbove += aboveText.slice(cursor);
-  // Trim trailing whitespace on every line, collapse runs of >2 blank lines.
-  newAbove = newAbove
-    .split("\n")
-    .map((l) => l.replace(/[ \t]+$/, ""))
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n");
+  // Tidy ONLY the lines a removal touched — never the whole document.
+  // Trailing whitespace is markdown (two trailing spaces = hard break) and
+  // blank-line runs can be intentional; the old global trim+collapse
+  // silently reformatted unrelated parts of the note on every relocation.
+  // Cuts never span newlines, so line indexes are stable old->new.
+  const cutLineIdxs = new Set<number>();
+  for (const [f] of cuts) {
+    let line = 0;
+    for (let i = 0; i < f && i < aboveText.length; i++) {
+      if (aboveText[i] === "\n") line++;
+    }
+    cutLineIdxs.add(line);
+  }
+  const rawLines = newAbove.split("\n").map((l, i) =>
+    cutLineIdxs.has(i) ? l.replace(/[ \t]+$/, "") : l,
+  );
+  // A cut line that became blank (it held only the tag) merges with any
+  // adjacent blank lines down to a single blank — or none at the edges —
+  // reproducing the old tidiness exactly where a tag was removed.
+  const isBlank = (s: string) => s.trim() === "";
+  const tidied: string[] = [];
+  let li = 0;
+  while (li < rawLines.length) {
+    if (cutLineIdxs.has(li) && isBlank(rawLines[li])) {
+      let j = li;
+      while (j + 1 < rawLines.length && isBlank(rawLines[j + 1])) j++;
+      while (tidied.length > 0 && isBlank(tidied[tidied.length - 1])) tidied.pop();
+      const atStart = tidied.length === 0;
+      const atEnd = j === rawLines.length - 1;
+      if (!atStart && !atEnd) tidied.push("");
+      li = j + 1;
+      continue;
+    }
+    tidied.push(rawLines[li]);
+    li++;
+  }
+  newAbove = tidied.join("\n");
 
   // Merge tags: from existing canonical line + freshly extracted.
   const allTags = new Set<string>();

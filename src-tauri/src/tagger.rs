@@ -149,7 +149,9 @@ impl Tagger {
         } else {
             format!("# {}\n\n{}", title, truncated)
         };
-        let new_tags = ai::dispatch_propose_tags(provider, &key, &body_for_api).await?;
+        let model = cfg.model_for(provider);
+        let new_tags =
+            ai::dispatch_propose_tags(provider, &key, &model, &body_for_api).await?;
 
         // The AI call took seconds; the user (or a sync tool) may have
         // edited the note meanwhile. Merging into the snapshot we read

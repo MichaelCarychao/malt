@@ -147,6 +147,24 @@ pub fn is_conflict_filename(stem: &str) -> bool {
     false
 }
 
+/// Remove stale `*.malt-tmp-*` staging files from `dir`. write_atomic
+/// cleans up after itself on failure, but a hard crash between create and
+/// rename leaks the temp — which then syncs via Dropbox and lingers
+/// forever. Swept at startup and on vault switch; any temp present then
+/// is by definition orphaned (in-flight writes don't survive a process
+/// boundary).
+pub fn sweep_tmp_files(dir: &Path) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.contains(".malt-tmp-") {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+}
+
 pub fn notes_dir() -> PathBuf {
     // v0.3.1+: route through the vaults registry. The active vault's
     // path wins; the registry seeds itself from the legacy
@@ -305,19 +323,25 @@ pub fn find_matches(text: &str, terms: &[String]) -> Vec<(usize, usize)> {
 /// term (substring first, then fuzzy). Used to center the snippet on a
 /// real match instead of falling back to position 0 for typo'd queries.
 fn first_match_byte(body: &str, terms: &[String]) -> Option<usize> {
-    // Cheap path: try substring first across all terms.
+    // Cheap path: try substring first across all terms. Only trustworthy
+    // when lowercasing didn't change byte lengths (Unicode folding can:
+    // İ grows, ẞ shrinks) — offsets into `lower` are applied to `body`,
+    // and a drifted offset would center the snippet on the wrong spot.
+    // On drift, fall through to the offset-safe word walk below.
     let lower = body.to_lowercase();
-    let mut best: Option<usize> = None;
-    for term in terms {
-        if term.is_empty() {
-            continue;
+    if lower.len() == body.len() {
+        let mut best: Option<usize> = None;
+        for term in terms {
+            if term.is_empty() {
+                continue;
+            }
+            if let Some(idx) = lower.find(term.as_str()) {
+                best = Some(best.map_or(idx, |prev| prev.min(idx)));
+            }
         }
-        if let Some(idx) = lower.find(term.as_str()) {
-            best = Some(best.map_or(idx, |prev| prev.min(idx)));
+        if best.is_some() {
+            return best;
         }
-    }
-    if best.is_some() {
-        return best;
     }
     // Fallback: scan words for fuzzy matches.
     let mut byte_pos = 0usize;

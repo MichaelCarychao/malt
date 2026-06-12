@@ -69,13 +69,15 @@ impl BacklinkIndex {
             });
         }
 
-        let mut map = self.map.write().expect("backlinks write lock");
+        // Poison-tolerant: a panic elsewhere must not permanently kill
+        // backlinks (matches the index/cache locks).
+        let mut map = self.map.write().unwrap_or_else(|e| e.into_inner());
         *map = new_map;
     }
 
     /// Look up backlinks for the given canonical note path. Empty if none.
     pub fn for_path(&self, target_path: &str) -> Vec<BacklinkInfo> {
-        let map = self.map.read().expect("backlinks read lock");
+        let map = self.map.read().unwrap_or_else(|e| e.into_inner());
         map.get(target_path).cloned().unwrap_or_default()
     }
 }

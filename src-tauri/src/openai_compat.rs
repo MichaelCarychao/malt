@@ -15,6 +15,75 @@ use serde::{Deserialize, Serialize};
 
 const ONESHOT_TIMEOUT_SECS: u64 = 30;
 
+/// Abort a stream if no bytes arrive for this long (mirrors ai.rs).
+const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// Incremental SSE byte assembler shared by the Anthropic and compat
+/// pumps. Three concerns in one place:
+///   - UTF-8: a multibyte char can split across TCP chunks. We buffer raw
+///     bytes and decode only complete sequences — the old per-chunk
+///     `from_utf8_lossy` emitted U+FFFD into ghost text whenever a token
+///     straddled a chunk boundary. A genuinely invalid byte (corrupt
+///     stream) is replaced and skipped so the assembler can't wedge.
+///   - CRLF: some gateways frame events as `\r\n\r\n`, which a naive
+///     find("\n\n") never matches; normalized after each append.
+///   - Framing: yields complete events (blank-line separated), keeping a
+///     partial trailing event buffered for the next chunk.
+pub(crate) struct SseAssembler {
+    pending: Vec<u8>,
+    buffer: String,
+}
+
+impl SseAssembler {
+    pub(crate) fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+            buffer: String::new(),
+        }
+    }
+
+    pub(crate) fn push(&mut self, chunk: &[u8]) -> Vec<String> {
+        self.pending.extend_from_slice(chunk);
+        loop {
+            match std::str::from_utf8(&self.pending) {
+                Ok(s) => {
+                    self.buffer.push_str(s);
+                    self.pending.clear();
+                    break;
+                }
+                Err(e) => {
+                    let valid = e.valid_up_to();
+                    if let Ok(s) = std::str::from_utf8(&self.pending[..valid]) {
+                        self.buffer.push_str(s);
+                    }
+                    match e.error_len() {
+                        // Truly invalid bytes: substitute + skip, keep going.
+                        Some(bad) => {
+                            self.buffer.push('\u{FFFD}');
+                            self.pending.drain(..valid + bad);
+                        }
+                        // Incomplete trailing sequence: keep it for the
+                        // next chunk.
+                        None => {
+                            self.pending.drain(..valid);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if self.buffer.contains('\r') {
+            self.buffer = self.buffer.replace("\r\n", "\n");
+        }
+        let mut events = Vec::new();
+        while let Some(end) = self.buffer.find("\n\n") {
+            events.push(self.buffer[..end].to_string());
+            self.buffer.drain(..end + 2);
+        }
+        events
+    }
+}
+
 #[derive(Serialize)]
 struct ChatCompletionRequest<'a> {
     model: &'a str,
@@ -173,6 +242,7 @@ pub async fn stream<F>(
     user: &str,
     limit: Option<u32>,
     token_param: TokenParam,
+    stream_id: Option<u64>,
     mut on_text: F,
 ) -> Result<(), String>
 where
@@ -211,22 +281,26 @@ where
         return Err(format!("HTTP {}: {}", status, body));
     }
 
-    let mut buffer = String::new();
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| format!("chunk error: {e}"))?
-    {
-        // Normalize CRLF → LF up front. Some gateways (and certain
-        // proxies in front of these APIs) frame SSE events with
-        // `\r\n\r\n`, which `find("\n\n")` would never match — the
-        // buffer would grow forever and emit nothing. SSE is line-
-        // oriented so dropping the carriage returns is safe.
-        buffer.push_str(&String::from_utf8_lossy(&chunk).replace("\r\n", "\n"));
-        // SSE events separated by blank lines.
-        while let Some(end) = buffer.find("\n\n") {
-            let event = buffer[..end].to_string();
-            buffer.drain(..end + 2);
+    // UTF-8 reassembly, CRLF normalization, and event framing live in
+    // SseAssembler (shared with the Anthropic pump). Idle timeout and
+    // cooperative cancellation mirror ai.rs.
+    let mut asm = SseAssembler::new();
+    loop {
+        if crate::ai::is_cancelled(stream_id) {
+            return Ok(());
+        }
+        let chunk = match tokio::time::timeout(IDLE_TIMEOUT, resp.chunk()).await {
+            Ok(Ok(Some(c))) => c,
+            Ok(Ok(None)) => break,
+            Ok(Err(e)) => return Err(format!("chunk error: {e}")),
+            Err(_) => {
+                return Err(format!(
+                    "stream stalled (no data for {}s)",
+                    IDLE_TIMEOUT.as_secs()
+                ))
+            }
+        };
+        for event in asm.push(&chunk) {
             for line in event.lines() {
                 // Accept both "data: {...}" (OpenAI) and "data:{...}"
                 // (some compat forks omit the space).
@@ -238,6 +312,11 @@ where
                 };
                 if data.trim() == "[DONE]" {
                     return Ok(());
+                }
+                // Mid-stream error envelope: surface it rather than ending
+                // the stream as a deceptively clean short completion.
+                if let Ok(err) = serde_json::from_str::<ApiError>(data) {
+                    return Err(err.error.message);
                 }
                 let Ok(parsed) = serde_json::from_str::<StreamChunk>(data) else {
                     continue;

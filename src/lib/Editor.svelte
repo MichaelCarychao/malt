@@ -552,6 +552,21 @@
   let currentIsEncrypted = false;
   let currentPassword: string | null = null;
   let fetchGen = 0;
+  // Id of the in-flight AI stream (completion / rewrite / two-pane prompt)
+  // so dismissing the ghost can cancel it server-side — otherwise the
+  // provider keeps generating (and billing) a completion nobody will see.
+  let activeStreamId: number | null = null;
+  function newStreamId(): number {
+    // Random 48-bit id — unique across panes and the brew module without
+    // shared state.
+    return Math.floor(Math.random() * 2 ** 48);
+  }
+  function cancelActiveStream() {
+    if (activeStreamId !== null) {
+      void invoke("cancel_ai_stream", { streamId: activeStreamId }).catch(() => {});
+      activeStreamId = null;
+    }
+  }
   // Monotonic guard so overlapping external-change handlers can't race:
   // only the most recent disk read is allowed to act on its result.
   let externalChangeGen = 0;
@@ -694,7 +709,10 @@
       onEncryptedAiBlocked?.(currentPath ?? "");
       return;
     }
+    cancelActiveStream();
     const myGen = ++fetchGen;
+    const streamId = newStreamId();
+    activeStreamId = streamId;
     const sel = v.state.selection.main;
     const docLen = v.state.doc.length;
     const hasSelection = sel.from !== sel.to;
@@ -736,7 +754,7 @@
       };
 
       try {
-        await invoke("rewrite_text_streaming", { before, selected, after, direction, onChunk: channel });
+        await invoke("rewrite_text_streaming", { before, selected, after, direction, streamId, onChunk: channel });
         if (myGen === fetchGen && !started && view) {
           v.dispatch({ effects: setGhost.of(null) });
         }
@@ -745,6 +763,8 @@
           v.dispatch({ effects: setGhost.of(null) });
         }
         console.error("rewrite_text_streaming failed", e);
+      } finally {
+        if (activeStreamId === streamId) activeStreamId = null;
       }
       return;
     }
@@ -781,7 +801,7 @@
     };
 
     try {
-      await invoke("complete_text_streaming", { before, after, direction, onChunk: channel });
+      await invoke("complete_text_streaming", { before, after, direction, streamId, onChunk: channel });
       if (myGen === fetchGen && !started && view) {
         v.dispatch({ effects: setGhost.of(null) });
       }
@@ -790,6 +810,8 @@
         v.dispatch({ effects: setGhost.of(null) });
       }
       console.error("complete_text_streaming failed", e);
+    } finally {
+      if (activeStreamId === streamId) activeStreamId = null;
     }
   }
 
@@ -811,7 +833,10 @@
       return;
     }
     if (prePrompt == null || !view) return;
+    cancelActiveStream();
     const myGen = ++fetchGen;
+    const streamId = newStreamId();
+    activeStreamId = streamId;
     // Strip hashtags (+ the canonical tag line and wikilink brackets) from
     // BOTH panes — same hygiene as the other AI paths — so the model never
     // sees our #tag markup and can't echo or invent tags in the reply.
@@ -835,7 +860,7 @@
       }
     };
     try {
-      await invoke("prompt_streaming", { prompt, onChunk: channel });
+      await invoke("prompt_streaming", { prompt, streamId, onChunk: channel });
       if (myGen === fetchGen && !started && view) {
         v.dispatch({ effects: setGhost.of(null) });
       }
@@ -844,6 +869,8 @@
         v.dispatch({ effects: setGhost.of(null) });
       }
       console.error("prompt_streaming failed", e);
+    } finally {
+      if (activeStreamId === streamId) activeStreamId = null;
     }
   }
 
@@ -875,6 +902,9 @@
   function acceptCompletion(v: EditorView): boolean {
     const ghost = v.state.field(ghostField, false);
     if (!ghost) return false;
+    // Accepting mid-stream keeps the text shown so far; stop paying for
+    // tokens that will never render.
+    cancelActiveStream();
     const clean = sanitizeCompletion(ghost.text);
     if (ghost.mode === "rewrite") {
       v.dispatch({
@@ -895,6 +925,7 @@
   function declineGhost(v: EditorView): boolean {
     const ghost = v.state.field(ghostField, false);
     if (!ghost) return false;
+    cancelActiveStream();
     v.dispatch({ effects: setGhost.of(null) });
     return true;
   }
@@ -1521,6 +1552,27 @@
   //   - tagLineHider: hide the canonical tag line at the bottom (replace
   //     decoration so the cursor can't enter it either)
 
+  // CodeMirror Text instances are immutable, so whole-doc derivations can
+  // be cached per doc version. Before this, tagWatcher + tagPillPlugin +
+  // tagLineHider + the protectTagLine transaction filter EACH stringified
+  // and rescanned the entire document on every keystroke AND cursor move.
+  const inlineTagsCache = new WeakMap<object, ReturnType<typeof findInlineTags>>();
+  function cachedInlineTags(doc: { toString(): string }): ReturnType<typeof findInlineTags> {
+    let v = inlineTagsCache.get(doc);
+    if (!v) {
+      v = findInlineTags(doc.toString());
+      inlineTagsCache.set(doc, v);
+    }
+    return v;
+  }
+  const canonicalRangeCache = new WeakMap<object, { from: number; to: number } | null>();
+  function cachedCanonicalRange(doc: { toString(): string }): { from: number; to: number } | null {
+    if (!canonicalRangeCache.has(doc)) {
+      canonicalRangeCache.set(doc, canonicalTagLineRange(doc.toString()));
+    }
+    return canonicalRangeCache.get(doc) ?? null;
+  }
+
   // A hashtag is "in progress" while the caret sits inside it or at its
   // trailing edge — the user is still typing or editing it. An in-progress
   // tag is NOT finalized (no pill in the row, no relocation to the canonical
@@ -1537,7 +1589,7 @@
   // below body text is instantly classified as the (hidden, protected) canonical
   // line, which hid it mid-word AND made protectTagLine drop the next keystroke.
   function liveCanonicalRange(state: EditorState): { from: number; to: number } | null {
-    const range = canonicalTagLineRange(state.doc.toString());
+    const range = cachedCanonicalRange(state.doc);
     if (!range) return null;
     const head = state.selection.main.head;
     const line = state.doc.lineAt(range.from);
@@ -1559,6 +1611,8 @@
         const doc = view.state.doc.toString();
         const caret = view.state.selection.main.head;
         let canonical = findCanonicalTagLine(doc);
+        // (doc string built once here; the heavy per-move rescans below use
+        // the per-Text caches.)
         // The line the caret is on isn't a finalized tag line yet — treat it as
         // ordinary text so its tags don't pop into the row while being typed.
         if (canonical) {
@@ -1570,7 +1624,8 @@
           : doc;
         // Skip the tag the caret is still inside — no pill for a half-typed
         // hashtag; it appears once a boundary follows or the caret moves away.
-        const inline = findInlineTags(aboveText)
+        const inline = cachedInlineTags(view.state.doc)
+          .filter((m) => (canonical ? m.to <= (aboveText.length) : true))
           .filter((m) => !isCaretInTag(m, caret))
           .map((m) => m.tag);
         const set = new Set<string>([...(canonical?.tags ?? []), ...inline]);
@@ -1611,10 +1666,9 @@
       }
       compute(view: EditorView): DecorationSet {
         const builder = new RangeSetBuilder<Decoration>();
-        const doc = view.state.doc.toString();
         const caret = view.state.selection.main.head;
         const canonical = liveCanonicalRange(view.state);
-        const matches = findInlineTags(doc);
+        const matches = cachedInlineTags(view.state.doc);
         for (const m of matches) {
           // Skip matches inside the canonical tag line — that whole line is
           // hidden by tagLineHider, so styling individual pills there is wasted.
@@ -2222,7 +2276,7 @@
           const newHead = u.state.selection.main.head;
           const leftATag =
             !internalSel &&
-            findInlineTags(u.startState.doc.toString()).some(
+            cachedInlineTags(u.startState.doc).some(
               (m) => isCaretInTag(m, prevHead) && !isCaretInTag(m, newHead),
             );
           if (leftATag) {

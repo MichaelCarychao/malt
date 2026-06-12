@@ -261,7 +261,9 @@ impl NoteIndex {
 
     fn build_text_query(&self, term: &str) -> Box<dyn Query> {
         let lower = term.to_lowercase();
-        let dist = fuzzy_distance(lower.len());
+        // Chars, not bytes: a 2-char CJK term is 6 bytes, and byte length
+        // over-fuzzed short non-ASCII queries into noise.
+        let dist = fuzzy_distance(lower.chars().count());
         let title_term = Term::from_field_text(self.title_field, &lower);
         let body_term = Term::from_field_text(self.body_field, &lower);
         let title_q: Box<dyn Query> = Box::new(BoostQuery::new(

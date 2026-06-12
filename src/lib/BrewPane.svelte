@@ -50,6 +50,15 @@
   let error = $state<string | null>(null);
   let scroller: HTMLDivElement | null = $state(null);
   let activeChannel: Channel<string> | null = null;
+  // Server-side cancellation: re-running or closing the pane stops the
+  // in-flight generation (and its billing), not just the UI updates.
+  let activeStreamId: number | null = null;
+  function cancelActiveStream() {
+    if (activeStreamId !== null) {
+      void invoke("cancel_ai_stream", { streamId: activeStreamId }).catch(() => {});
+      activeStreamId = null;
+    }
+  }
   // The brewNonce we last streamed for. Starts at -1 (no real nonce yet)
   // so the first explicit trigger always runs.
   let lastNonce = -1;
@@ -64,11 +73,14 @@
       error = "Nothing to brew — the note is empty.";
       return;
     }
+    cancelActiveStream();
     output = "";
     error = null;
     busy = true;
     const channel = new Channel<string>();
     activeChannel = channel;
+    const streamId = Math.floor(Math.random() * 2 ** 48);
+    activeStreamId = streamId;
     channel.onmessage = (chunk: string) => {
       // Drop late chunks from a previous run if the user navigated away.
       if (activeChannel !== channel) return;
@@ -80,12 +92,13 @@
       // Pass title alongside body — backend prepends it as a `# Title`
       // heading so the model knows what the note is about even when
       // the body is fragmentary.
-      await invoke("brew_streaming", { title: noteTitle, body, onChunk: channel });
+      await invoke("brew_streaming", { title: noteTitle, body, streamId, onChunk: channel });
     } catch (e) {
       if (activeChannel === channel) {
         error = String(e);
       }
     } finally {
+      if (activeStreamId === streamId) activeStreamId = null;
       if (activeChannel === channel) {
         busy = false;
         activeChannel = null;
@@ -136,7 +149,8 @@
   });
   onDestroy(() => {
     // Mark any in-flight stream as superseded so chunks stop applying
-    // to a destroyed component.
+    // to a destroyed component — and stop the upstream generation too.
+    cancelActiveStream();
     activeChannel = null;
   });
 </script>

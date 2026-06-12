@@ -60,6 +60,19 @@
     }
     const path = currentPath;
     try {
+      // Collapsed panel: fetch only the (in-memory, cheap) backlinks for
+      // the header count. The KNN probe + mention scan used to run on
+      // every note switch even with the panel closed; they now wait for
+      // an expand (the `collapsed` $effect below refreshes on open).
+      if (collapsed) {
+        const bls = await invoke<BacklinkInfo[]>("find_backlinks", { path });
+        if (myGen === fetchGen) {
+          backlinks = bls;
+          related = [];
+          unlinked = [];
+        }
+        return;
+      }
       const [bls, rels, mentions] = await Promise.all([
         invoke<BacklinkInfo[]>("find_backlinks", { path }),
         invoke<RelatedNote[]>("find_related", { path }),
@@ -96,6 +109,7 @@
 
   $effect(() => {
     void currentPath;
+    void collapsed; // expanding triggers the full (related + mentions) fetch
     void refresh();
   });
 
@@ -144,7 +158,15 @@
         <div class="section-label">backlinks</div>
         <ul class="bl-list">
           {#each backlinks as bl (bl.source_path + bl.snippet)}
-            <li class="bl-row" onclick={() => onNavigate?.(bl.source_path)}>
+            <li
+              class="bl-row"
+              onclick={() => onNavigate?.(bl.source_path)}
+              onkeydown={(e) => {
+                if (e.key === "Enter") onNavigate?.(bl.source_path);
+              }}
+              role="button"
+              tabindex="0"
+            >
               <span class="bl-title">{bl.source_title}</span>
               <span class="bl-snippet">{bl.snippet}</span>
             </li>
@@ -158,7 +180,15 @@
         <div class="section-label">related <span class="related-hint">by topic similarity</span></div>
         <ul class="bl-list">
           {#each related as r (r.path)}
-            <li class="bl-row" onclick={() => onNavigate?.(r.path)}>
+            <li
+              class="bl-row"
+              onclick={() => onNavigate?.(r.path)}
+              onkeydown={(e) => {
+                if (e.key === "Enter") onNavigate?.(r.path);
+              }}
+              role="button"
+              tabindex="0"
+            >
               <span class="bl-title">
                 {r.title}
                 <span class="sim">{formatSim(r.similarity)}</span>
@@ -279,6 +309,11 @@
     border-bottom: 1px solid #232323;
   }
   .bl-row:hover {
+    background: #232323;
+  }
+  .bl-row:focus-visible {
+    outline: 1px solid #555;
+    outline-offset: -1px;
     background: #232323;
   }
   .bl-title {

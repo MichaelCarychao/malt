@@ -44,29 +44,55 @@ pub fn build_composite_markdown(source_path: &str, append_links: bool) -> Result
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            // Skip encrypted linked notes — appending their "MALT-ENC-v1:"
-            // ciphertext would embed an unreadable (and private) envelope into
-            // the export. Silently omit rather than refuse the whole export.
-            if crate::encryption::is_encrypted(&linked_raw) {
-                continue;
-            }
-            let (_fm, linked_body) = frontmatter::split(&linked_raw);
-            let cleaned = tags::strip_tags_for_ai(linked_body);
-            if cleaned.trim().is_empty() {
-                continue;
-            }
             let title = std::path::Path::new(&path)
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("untitled")
                 .to_string();
+            // Encrypted linked notes can't be exported — but say so in the
+            // output instead of silently omitting them; the reader of a
+            // TOC-style export should know a linked section is missing on
+            // purpose, not lost.
+            if crate::encryption::is_encrypted(&linked_raw) {
+                while out.ends_with('\n') {
+                    out.pop();
+                }
+                out.push_str("\n\n---\n\n# ");
+                out.push_str(&title);
+                out.push_str("\n\n_(encrypted note omitted)_");
+                continue;
+            }
+            let (_fm, linked_body) = frontmatter::split(&linked_raw);
+            let mut cleaned = tags::strip_tags_for_ai(linked_body);
+            if cleaned.trim().is_empty() {
+                continue;
+            }
+            // If the note opens with its own `# H1`, use THAT as the section
+            // heading instead of stacking a second filename heading on top.
+            let mut section_title = title;
+            let trimmed_body = cleaned.trim_start();
+            if let Some(first) = trimmed_body.lines().next() {
+                if let Some(h1) = first.strip_prefix("# ") {
+                    let h1 = h1.trim().trim_end_matches('#').trim();
+                    if !h1.is_empty() {
+                        section_title = h1.to_string();
+                        cleaned = trimmed_body
+                            .lines()
+                            .skip(1)
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                            .trim_start()
+                            .to_string();
+                    }
+                }
+            }
             // Trim trailing newlines from the running output so the
             // separator block has predictable spacing.
             while out.ends_with('\n') {
                 out.pop();
             }
             out.push_str("\n\n---\n\n# ");
-            out.push_str(&title);
+            out.push_str(&section_title);
             out.push_str("\n\n");
             out.push_str(&cleaned);
         }

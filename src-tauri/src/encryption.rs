@@ -32,10 +32,23 @@ const NONCE_LEN: usize = 12;
 const KEY_LEN: usize = 32;
 const TAG_LEN: usize = 16;
 
-/// Cheap detector: a file is encrypted iff its first non-BOM bytes are
-/// the magic prefix. Doesn't allocate; safe to call on huge files.
+/// Cheap detector: a file is encrypted iff its first non-BOM bytes are the
+/// magic prefix FOLLOWED BY a plausible envelope — one unbroken base64 run
+/// of at least salt+nonce+tag (44 bytes -> 59 unpadded chars). The prefix
+/// alone isn't enough: a note that merely *mentions* the magic string
+/// ("MALT-ENC-v1: looks like this") would otherwise be treated as
+/// encrypted and become unopenable (the indexer skips it, the editor
+/// demands a password, decrypt fails). Doesn't allocate.
 pub fn is_encrypted(content: &str) -> bool {
-    content.trim_start_matches('\u{feff}').starts_with(MAGIC)
+    let Some(rest) = content.trim_start_matches('\u{feff}').strip_prefix(MAGIC) else {
+        return false;
+    };
+    let line = rest.lines().next().unwrap_or("").trim_end();
+    const MIN_B64: usize = (SALT_LEN + NONCE_LEN + TAG_LEN) * 4 / 3; // 58 -> need 59
+    line.len() > MIN_B64
+        && line
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
 }
 
 /// Process-wide cache of derived keys. Argon2id is deliberately slow
@@ -212,7 +225,13 @@ mod tests {
     fn detects_non_envelope() {
         assert!(!is_encrypted("# regular markdown"));
         assert!(!is_encrypted("MALT-ENC-v1 but no colon"));
-        assert!(is_encrypted("MALT-ENC-v1:abc"));
+        // A note that merely MENTIONS the magic string is not an envelope —
+        // short or space-broken tails must stay ordinary, openable notes.
+        assert!(!is_encrypted("MALT-ENC-v1:abc"));
+        assert!(!is_encrypted("MALT-ENC-v1: looks like this on disk"));
+        // A real envelope still detects (full round-trip covered elsewhere).
+        let env = encrypt("x", "pw").unwrap();
+        assert!(is_encrypted(&env));
     }
 
     #[test]

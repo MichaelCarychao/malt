@@ -168,7 +168,12 @@ pub fn merge_tags_into_file(
 }
 
 /// Strip canonical tag line + inline #tags only (NOT wikilink brackets),
-/// for cases where we're rewriting the file in place.
+/// for cases where we're rewriting the file in place (auto-tag merge).
+/// Tidying is restricted to the LINES A REMOVAL TOUCHED — trailing
+/// whitespace is markdown (two trailing spaces = hard break) and blank
+/// runs can be intentional, so the old whole-document trim+collapse
+/// silently reformatted unrelated parts of the note. Mirrors the TS
+/// `relocateTagsToBottom` behavior.
 fn strip_only_tags_from_body(body: &str) -> String {
     // Drop the canonical tag line.
     let mut lines: Vec<String> = body.split('\n').map(String::from).collect();
@@ -189,11 +194,15 @@ fn strip_only_tags_from_body(body: &str) -> String {
     }
     let joined = lines.join("\n");
 
-    // Strip inline hashtags via the same shared scanner.
+    // Strip inline hashtags via the same shared scanner, remembering which
+    // LINE each removal touched (tags never span newlines, so line indexes
+    // are stable across the splice).
     let inline = inline_tag_positions(&joined);
+    let mut cut_lines: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut out = String::with_capacity(joined.len());
     let mut cursor = 0usize;
     for (from, to) in inline {
+        cut_lines.insert(joined[..from].matches('\n').count());
         out.push_str(&joined[cursor..from]);
         let after = joined.as_bytes().get(to).copied();
         if matches!(after, Some(b' ') | Some(b'\t')) {
@@ -207,15 +216,45 @@ fn strip_only_tags_from_body(body: &str) -> String {
     }
     out.push_str(&joined[cursor..]);
 
-    let mut result = out
+    // Per-line tidy, cut lines only.
+    let raw_lines: Vec<String> = out
         .split('\n')
-        .map(|l| l.trim_end().to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
-    while result.contains("\n\n\n") {
-        result = result.replace("\n\n\n", "\n\n");
+        .enumerate()
+        .map(|(i, l)| {
+            if cut_lines.contains(&i) {
+                l.trim_end().to_string()
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+
+    // A cut line that became blank (it held only tags) merges with any
+    // adjacent blank lines down to a single blank — or none at the edges.
+    let is_blank = |s: &str| s.trim().is_empty();
+    let mut tidied: Vec<String> = Vec::with_capacity(raw_lines.len());
+    let mut i = 0usize;
+    while i < raw_lines.len() {
+        if cut_lines.contains(&i) && is_blank(&raw_lines[i]) {
+            let mut j = i;
+            while j + 1 < raw_lines.len() && is_blank(&raw_lines[j + 1]) {
+                j += 1;
+            }
+            while tidied.last().map(|l| is_blank(l)).unwrap_or(false) {
+                tidied.pop();
+            }
+            let at_start = tidied.is_empty();
+            let at_end = j == raw_lines.len() - 1;
+            if !at_start && !at_end {
+                tidied.push(String::new());
+            }
+            i = j + 1;
+            continue;
+        }
+        tidied.push(raw_lines[i].clone());
+        i += 1;
     }
-    result
+    tidied.join("\n")
 }
 
 /// Strip `[[X]]` brackets, preserving inner text. The AI sees prose, not
@@ -376,9 +415,7 @@ fn scan_line_positions(line: &str, line_offset: usize, out: &mut Vec<(usize, usi
 }
 
 /// True if `line` is *only* hashtags (and whitespace). Used to detect the
-/// canonical tag line at the bottom of the body. Currently called from
-/// tests + frontend (via IPC); silence dead-code while we wire things up.
-#[allow(dead_code)]
+/// canonical tag line at the bottom of the body.
 pub fn is_canonical_tag_line(line: &str) -> bool {
     let trimmed = line.trim();
     if trimmed.is_empty() {

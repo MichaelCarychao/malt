@@ -495,7 +495,8 @@ async fn suggest_wikilinks_ai(
     let provider = cfg.active_provider;
     let key = secrets::get_api_key_for(provider.id())
         .map_err(|e| format!("no API key for {}: {e:?}", provider.label()))?;
-    let entities = ai::dispatch_propose_entities(provider, &key, &clean).await?;
+    let model = cfg.model_for(provider);
+    let entities = ai::dispatch_propose_entities(provider, &key, &model, &clean).await?;
     Ok(link_suggestions::build_entity_suggestions(&content, &entities))
 }
 
@@ -917,11 +918,21 @@ fn set_daily_note_tag(enabled: bool) -> Result<(), String> {
     config::save(&cfg).map_err(|e| e.to_string())
 }
 
+/// Flag an in-flight AI stream as cancelled. The pumps poll between
+/// chunks and close the connection — the user dismissed the ghost or
+/// superseded the request, so the provider should stop generating
+/// (and billing) immediately.
+#[tauri::command]
+fn cancel_ai_stream(stream_id: u64) {
+    ai::cancel_stream(stream_id);
+}
+
 #[tauri::command]
 async fn complete_text_streaming(
     before: String,
     after: String,
     direction: Option<String>,
+    stream_id: Option<u64>,
     on_chunk: tauri::ipc::Channel<String>,
 ) -> Result<(), String> {
     if before.trim().is_empty() && after.trim().is_empty() {
@@ -933,10 +944,13 @@ async fn complete_text_streaming(
         .map_err(|e| format!("no API key for {}: {e:?}", provider.label()))?;
     let model = cfg.model_for(provider);
     let dir = direction.unwrap_or_default();
-    ai::dispatch_stream_completion(provider, &key, &model, &before, &after, &dir, |text| {
-        let _ = on_chunk.send(text.to_string());
-    })
-    .await
+    let result =
+        ai::dispatch_stream_completion(provider, &key, &model, &before, &after, &dir, stream_id, |text| {
+            let _ = on_chunk.send(text.to_string());
+        })
+        .await;
+    ai::clear_cancel(stream_id);
+    result
 }
 
 #[tauri::command]
@@ -945,6 +959,7 @@ async fn rewrite_text_streaming(
     selected: String,
     after: String,
     direction: Option<String>,
+    stream_id: Option<u64>,
     on_chunk: tauri::ipc::Channel<String>,
 ) -> Result<(), String> {
     if selected.trim().is_empty() {
@@ -956,10 +971,15 @@ async fn rewrite_text_streaming(
         .map_err(|e| format!("no API key for {}: {e:?}", provider.label()))?;
     let model = cfg.model_for(provider);
     let dir = direction.unwrap_or_default();
-    ai::dispatch_stream_rewrite(provider, &key, &model, &before, &selected, &after, &dir, |text| {
-        let _ = on_chunk.send(text.to_string());
-    })
-    .await
+    let result = ai::dispatch_stream_rewrite(
+        provider, &key, &model, &before, &selected, &after, &dir, stream_id,
+        |text| {
+            let _ = on_chunk.send(text.to_string());
+        },
+    )
+    .await;
+    ai::clear_cancel(stream_id);
+    result
 }
 
 /// Build the AI-facing version of a note: title as an H1 heading,
@@ -988,6 +1008,7 @@ fn ai_payload_with_title(title: &str, body: &str) -> String {
 async fn brew_streaming(
     title: String,
     body: String,
+    stream_id: Option<u64>,
     on_chunk: tauri::ipc::Channel<String>,
 ) -> Result<(), String> {
     if body.trim().is_empty() {
@@ -999,10 +1020,12 @@ async fn brew_streaming(
         .map_err(|e| format!("no API key for {}: {e:?}", provider.label()))?;
     let model = cfg.model_for(provider);
     let payload = ai_payload_with_title(&title, &body);
-    ai::dispatch_stream_brew(provider, &key, &model, &payload, |text| {
+    let result = ai::dispatch_stream_brew(provider, &key, &model, &payload, stream_id, |text| {
         let _ = on_chunk.send(text.to_string());
     })
-    .await
+    .await;
+    ai::clear_cancel(stream_id);
+    result
 }
 
 /// Two-pane prompting: stream a completion for a RAW prompt — the
@@ -1012,6 +1035,7 @@ async fn brew_streaming(
 #[tauri::command]
 async fn prompt_streaming(
     prompt: String,
+    stream_id: Option<u64>,
     on_chunk: tauri::ipc::Channel<String>,
 ) -> Result<(), String> {
     if prompt.trim().is_empty() {
@@ -1022,10 +1046,12 @@ async fn prompt_streaming(
     let key = secrets::get_api_key_for(provider.id())
         .map_err(|e| format!("no API key for {}: {e:?}", provider.label()))?;
     let model = cfg.model_for(provider);
-    ai::dispatch_stream_raw(provider, &key, &model, &prompt, |text| {
+    let result = ai::dispatch_stream_raw(provider, &key, &model, &prompt, stream_id, |text| {
         let _ = on_chunk.send(text.to_string());
     })
-    .await
+    .await;
+    ai::clear_cancel(stream_id);
+    result
 }
 
 // ─── Prompts management ────────────────────────────────────────────
@@ -1133,6 +1159,7 @@ async fn switch_vault(
 ) -> Result<vaults::VaultsState, String> {
     let updated = vaults::switch(index as usize)?;
     let new_dir = notes::notes_dir();
+    notes::sweep_tmp_files(&new_dir);
     // The watcher tracks the dir it actually observes, so repointing
     // doesn't depend on re-deriving "old" from the (already-flipped)
     // registry.
@@ -1271,7 +1298,7 @@ You're looking at a plain `.md` file in your notes folder. Everything malt does 
 - **Type to filter.** The search bar at the top filters as you type. Hit Enter on a non-matching query to create a new note with that title.
 - **Wikilinks** like [[Quick Tour]] connect notes. Click one to jump. Type `[[` for autocomplete.
 - **Hashtags** like the ones at the bottom of this file are search shortcuts. The pill row above the editor shows current tags; click to filter.
-- **AI help** lives on `Ctrl+I` (`Cmd+I` on Mac). Bare press continues from the cursor. With a selection, it rewrites.
+- **AI help** lives on `Ctrl+;` (`Cmd+;` on Mac). Bare press continues from the cursor. With a selection, it rewrites.
 - **Settings** is `Ctrl+,` — every keyboard shortcut is documented there.
 
 Open [[Quick Tour]] next for a feature walk-through. When you're done, delete both of these notes and start writing yours.
@@ -1291,7 +1318,7 @@ A working tour of malt's main moves. Tweak this file, delete it, or leave it —
 
 ## Tagging
 
-- Type `#anything` inline and it autoreloacates to a hidden line at the bottom of the file on save. You see pills above the editor instead.
+- Type `#anything` inline and it automatically relocates to a hidden line at the bottom of the file on save. You see pills above the editor instead.
 - Hover a pill, click the `×` to remove it. Right-click for the full menu (filter, remove, promote-to-vocab).
 - Edit your starter vocabulary in Settings → tags & queries.
 
@@ -1300,11 +1327,11 @@ A working tour of malt's main moves. Tweak this file, delete it, or leave it —
 - Type a query like `tag:fleeting modified:<7d` and hit `Ctrl+S` to save it.
 - Activate any saved search via `Ctrl+1` through `Ctrl+9`.
 
-## AI moves (needs an Anthropic API key — set it in Settings → ai)
+## AI moves (bring your own key — Anthropic, OpenAI, DeepSeek, Grok, or Gemini — Settings → ai)
 
-- `Ctrl+I` at end of doc → continue the writing
-- `Ctrl+I` with text selected → rewrite that text, unpacking generalities
-- `Ctrl+I` in the middle of a doc → bridge the gap
+- `Ctrl+;` at end of doc → continue the writing
+- `Ctrl+;` with text selected → rewrite that text, unpacking generalities
+- `Ctrl+;` in the middle of a doc → bridge the gap
 - `Ctrl+Shift+L` → review proposed wikilinks (existing notes + AI-suggested new ones)
 
 ## Other useful bits
@@ -1558,6 +1585,8 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
             seed_welcome_notes_if_first_run();
+            // Reclaim staging files leaked by a hard crash mid-save.
+            notes::sweep_tmp_files(&notes::notes_dir());
             let note_index = Arc::new(index::NoteIndex::new()?);
             note_index.rebuild()?;
             let backlink_index = Arc::new(backlinks::BacklinkIndex::new());
@@ -1650,6 +1679,7 @@ pub fn run() {
             rewrite_text_streaming,
             brew_streaming,
             prompt_streaming,
+            cancel_ai_stream,
             list_prompts,
             set_prompt,
             reset_prompt,
