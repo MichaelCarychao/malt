@@ -581,15 +581,32 @@ fn with_cache<R>(f: impl FnOnce(&mut NoteCacheState) -> R) -> R {
 /// the fresh (summary, content) when the path is a live note. This is the
 /// surgical-invalidation entry point for every in-app write.
 pub fn refresh_path(path: &str) -> Option<(NoteSummary, Arc<str>)> {
-    with_cache(|c| match read_entry(Path::new(path)) {
-        Some(e) => {
-            let out = (e.summary.clone(), e.content.clone());
-            c.entries.insert(path.to_string(), e);
-            Some(out)
+    with_cache(|c| {
+        let p = Path::new(path);
+        // Case-insensitive filesystems (Windows, default macOS) resolve ANY
+        // casing of a name to the same file, so a stale-cased path — e.g.
+        // the watcher event for "Note.md" arriving right after a case-only
+        // rename to "note.md" — would read fine here and resurrect a ghost
+        // cache entry: the sidebar and search would show the note twice
+        // under both casings. Only accept `p` when its file name matches
+        // the on-disk casing exactly (parent components are deliberately
+        // not compared — canonicalize also rewrites symlinked parents).
+        if let (Ok(canon), Some(requested)) = (std::fs::canonicalize(p), p.file_name()) {
+            if canon.file_name().map(|real| real != requested).unwrap_or(false) {
+                c.entries.remove(path);
+                return None;
+            }
         }
-        None => {
-            c.entries.remove(path);
-            None
+        match read_entry(p) {
+            Some(e) => {
+                let out = (e.summary.clone(), e.content.clone());
+                c.entries.insert(path.to_string(), e);
+                Some(out)
+            }
+            None => {
+                c.entries.remove(path);
+                None
+            }
         }
     })
 }

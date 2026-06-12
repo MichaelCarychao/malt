@@ -5,6 +5,7 @@
   import Settings from "$lib/Settings.svelte";
   import Editor from "$lib/Editor.svelte";
   import Linkbacks from "$lib/Linkbacks.svelte";
+  import InlineUnlock from "$lib/InlineUnlock.svelte";
   import BrewPane from "$lib/BrewPane.svelte";
   import { flushAllEditors } from "$lib/editorRegistry";
   import {
@@ -312,13 +313,15 @@
 
   // Password prompt modal. Same modal serves four use cases —
   // distinguished by `kind` — so the user gets one consistent surface:
-  //   unlock:  open an encrypted note (single password field)
   //   encrypt: set initial password on a plaintext note (confirm field)
   //   change:  rotate password on an encrypted note (current + new + confirm)
   //   decrypt: confirm current password to drop encryption
-  type PasswordKind = "unlock" | "encrypt" | "change" | "decrypt";
+  // "unlock" is deliberately NOT a modal kind — unlocking happens in an
+  // inline form inside the editor pane (InlineUnlock), so the note list
+  // and search stay interactive while a note is locked.
+  type PasswordKind = "encrypt" | "change" | "decrypt";
   let pwOpen = $state(false);
-  let pwKind = $state<PasswordKind>("unlock");
+  let pwKind = $state<PasswordKind>("encrypt");
   let pwPath = $state<string | null>(null);
   let pwTitle = $state(""); // display name, for the modal header
   let pwCurrent = $state("");
@@ -331,8 +334,6 @@
   // doesn't allow conditional bind:this, so we keep distinct refs and
   // pick which to focus based on `pwKind`.
   let pwNewInputEl: HTMLInputElement | null = $state(null);
-  // After unlock, where to land. "primary" or "secondary" pane.
-  let pwTargetPane = $state<"primary" | "secondary">("primary");
 
   // Rename modal state.
   let renameOpen = $state(false);
@@ -957,8 +958,27 @@
         cancelDelete();
         return;
       }
+      if (pwOpen) {
+        // This handler runs in the CAPTURE phase, so without this branch
+        // Esc never reached the password modal's own handler — it fell
+        // through to "clear search" and the modal looked undismissable.
+        e.preventDefault();
+        e.stopPropagation();
+        cancelPasswordModal();
+        return;
+      }
       if (settingsOpen) return;
       const active = document.activeElement;
+      // Esc in the inline unlock form backs out to the search bar without
+      // clearing the query.
+      const inUnlockForm =
+        active instanceof HTMLElement && !!active.closest(".locked-overlay");
+      if (inUnlockForm) {
+        e.preventDefault();
+        e.stopPropagation();
+        searchInput?.focus();
+        return;
+      }
       const inEditor =
         active instanceof HTMLElement && !!active.closest(".cm-content");
       if (inEditor) return;
@@ -1158,12 +1178,6 @@
   }
 
   function openNote(path: string) {
-    // Encrypted-note guard: if locked, pop the password modal first.
-    const note = allNotes.find((n) => n.path === path);
-    if (note?.is_encrypted && !unlockedPasswords.has(path)) {
-      openPasswordModal("unlock", path, note.title, "primary");
-      return;
-    }
     pushToHistory("primary", path);
     selectedPath = path;
     focusedPane = "primary";
@@ -1176,6 +1190,11 @@
       secondaryHistory = { stack: [], idx: -1 };
     }
     void scrollSelectedIntoView("nearest");
+    // Locked note: the pane shows the inline unlock form — a click on the
+    // row is an explicit open intent, so put the cursor in it.
+    if (isLocked(path)) {
+      void tick().then(() => primaryUnlockFocus?.());
+    }
   }
 
   // List row click — a plain click ALWAYS opens the note in the primary
@@ -1462,13 +1481,30 @@
     return !!note?.is_encrypted && !unlockedPasswords.has(path);
   }
 
+  // Focus handles for the per-pane inline unlock forms (registered by
+  // InlineUnlock, same pattern as the editor finders).
+  let primaryUnlockFocus: (() => void) | null = $state(null);
+  let secondaryUnlockFocus: (() => void) | null = $state(null);
+
+  /** Verify + cache the password for the inline unlock form. Returns an
+   * error string to display, or null on success (the pane re-renders
+   * unlocked and the editor takes focus on remount). */
+  async function unlockInline(path: string, password: string): Promise<string | null> {
+    try {
+      await invoke<string>("read_encrypted_note", { path, password });
+    } catch (e) {
+      return String(e);
+    }
+    unlockedPasswords = new Map(unlockedPasswords).set(path, password);
+    return null;
+  }
+
   /** Keyboard-first unlock: entering a locked note (Enter / Tab from the
-   * search bar, arrow-nav + Enter) pops the password modal instead of
-   * focusing a silently empty editor. Unlocking previously required a
-   * mouse click on the row — a dead end for keyboard-only use. */
+   * search bar, arrow-nav + Enter) puts the cursor in the pane's inline
+   * unlock form instead of a silently empty editor. */
   function focusEditorOrUnlock() {
     if (selectedPath && isLocked(selectedPath)) {
-      openPasswordModal("unlock", selectedPath, getTitleForPath(selectedPath), "primary");
+      primaryUnlockFocus?.();
       return;
     }
     focusEditor();
@@ -1570,15 +1606,12 @@
   // Open in secondary pane (split). Pushes to secondary history; sidebar
   // highlight stays on primary's note (with green inset on the secondary).
   function openInSecondary(targetPath: string) {
-    // Encrypted-note guard for secondary pane.
-    const note = allNotes.find((n) => n.path === targetPath);
-    if (note?.is_encrypted && !unlockedPasswords.has(targetPath)) {
-      openPasswordModal("unlock", targetPath, note.title, "secondary");
-      return;
-    }
     pushToHistory("secondary", targetPath);
     secondaryPath = targetPath;
     focusedPane = "secondary";
+    if (isLocked(targetPath)) {
+      void tick().then(() => secondaryUnlockFocus?.());
+    }
   }
 
   function closeSecondary() {
@@ -2072,16 +2105,10 @@
 
   // ─── Password modal helpers ────────────────────────────────────────
 
-  function openPasswordModal(
-    kind: PasswordKind,
-    path: string,
-    title: string,
-    targetPane: "primary" | "secondary" = "primary",
-  ) {
+  function openPasswordModal(kind: PasswordKind, path: string, title: string) {
     pwKind = kind;
     pwPath = path;
     pwTitle = title;
-    pwTargetPane = targetPane;
     pwCurrent = "";
     pwNew = "";
     pwConfirm = "";
@@ -2107,18 +2134,7 @@
     pwError = null;
     pwBusy = true;
     try {
-      if (pwKind === "unlock") {
-        // Verify by attempting decryption.
-        await invoke<string>("read_encrypted_note", { path, password: pwCurrent });
-        unlockedPasswords = new Map(unlockedPasswords).set(path, pwCurrent);
-        pwOpen = false;
-        // Finally route to the originally-requested pane.
-        if (pwTargetPane === "secondary") {
-          openInSecondary(path);
-        } else {
-          openNote(path);
-        }
-      } else if (pwKind === "encrypt") {
+      if (pwKind === "encrypt") {
         if (pwNew.length < 4) {
           pwError = "password must be at least 4 characters";
           return;
@@ -3047,22 +3063,18 @@
               onEncryptedAiBlocked={blockAiForEncrypted}
             />
             {#if isLocked(selectedPath)}
+              <!-- Pane-scoped (never window-covering): the note list and
+                   search stay fully interactive while a note is locked. -->
               <div
                 class="locked-overlay"
-                role="button"
-                tabindex="0"
-                onclick={() => focusEditorOrUnlock()}
-                onkeydown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    focusEditorOrUnlock();
-                  }
-                }}
+                role="presentation"
+                onclick={() => primaryUnlockFocus?.()}
               >
-                <div class="locked-overlay-inner">
-                  <span class="locked-overlay-icon">🔒</span>
-                  locked — press <kbd>Enter</kbd> or click to unlock
-                </div>
+                <InlineUnlock
+                  title={getDisplayTitle(selectedPath)}
+                  onUnlock={(pw) => unlockInline(selectedPath!, pw)}
+                  onRegisterFocus={(fn) => (primaryUnlockFocus = fn)}
+                />
               </div>
             {/if}
           </div>
@@ -3131,34 +3143,14 @@
                 {#if isLocked(secondaryPath)}
                   <div
                     class="locked-overlay"
-                    role="button"
-                    tabindex="0"
-                    onclick={() => {
-                      if (secondaryPath) {
-                        openPasswordModal(
-                          "unlock",
-                          secondaryPath,
-                          getTitleForPath(secondaryPath),
-                          "secondary",
-                        );
-                      }
-                    }}
-                    onkeydown={(e) => {
-                      if ((e.key === "Enter" || e.key === " ") && secondaryPath) {
-                        e.preventDefault();
-                        openPasswordModal(
-                          "unlock",
-                          secondaryPath,
-                          getTitleForPath(secondaryPath),
-                          "secondary",
-                        );
-                      }
-                    }}
+                    role="presentation"
+                    onclick={() => secondaryUnlockFocus?.()}
                   >
-                    <div class="locked-overlay-inner">
-                      <span class="locked-overlay-icon">🔒</span>
-                      locked — press <kbd>Enter</kbd> or click to unlock
-                    </div>
+                    <InlineUnlock
+                      title={getDisplayTitle(secondaryPath)}
+                      onUnlock={(pw) => unlockInline(secondaryPath!, pw)}
+                      onRegisterFocus={(fn) => (secondaryUnlockFocus = fn)}
+                    />
                   </div>
                 {/if}
               {/if}
@@ -3371,13 +3363,12 @@
       }}
     >
       <div class="rename-label">
-        {#if pwKind === "unlock"}🔓 unlock — {pwTitle}
-        {:else if pwKind === "encrypt"}🔒 encrypt — {pwTitle}
+        {#if pwKind === "encrypt"}🔒 encrypt — {pwTitle}
         {:else if pwKind === "change"}🔁 change password — {pwTitle}
         {:else}🔓 decrypt — {pwTitle}
         {/if}
       </div>
-      {#if pwKind === "unlock" || pwKind === "decrypt" || pwKind === "change"}
+      {#if pwKind === "decrypt" || pwKind === "change"}
         <input
           class="rename-input"
           type="password"
@@ -3417,8 +3408,7 @@
         <div class="pw-error">{pwError}</div>
       {/if}
       <div class="pw-hint">
-        {#if pwKind === "unlock"}Locked notes use AES-256-GCM with an Argon2id-derived key. Each save round-trips through the password.
-        {:else if pwKind === "encrypt"}Once set, the note's body is unreadable without this password. There's no recovery — losing it loses the note. {securityRepromptOnBlur ? "" : "(Re-prompt on focus loss is OFF.)"}
+        {#if pwKind === "encrypt"}Once set, the note's body is unreadable without this password. There's no recovery — losing it loses the note. {securityRepromptOnBlur ? "" : "(Re-prompt on focus loss is OFF.)"}
         {:else if pwKind === "change"}Re-encrypts the note with a new key. The old password is required to decrypt; both encrypted-on-disk and in-memory cache update.
         {:else}Removes encryption. The note will be written back to disk as plaintext markdown.
         {/if}
@@ -3429,13 +3419,11 @@
           class="rename-btn confirm"
           onclick={() => void confirmPasswordModal()}
           disabled={pwBusy ||
-            (pwKind === "unlock" && !pwCurrent) ||
             (pwKind === "decrypt" && !pwCurrent) ||
             (pwKind === "encrypt" && (!pwNew || !pwConfirm)) ||
             (pwKind === "change" && (!pwCurrent || !pwNew || !pwConfirm))}
         >
           {#if pwBusy}working…
-          {:else if pwKind === "unlock"}unlock
           {:else if pwKind === "encrypt"}encrypt
           {:else if pwKind === "change"}change
           {:else}decrypt
@@ -4863,35 +4851,7 @@
     align-items: center;
     justify-content: center;
     background: rgba(26, 26, 26, 0.82);
-    cursor: pointer;
     z-index: 5;
-  }
-  .locked-overlay:focus-visible {
-    outline: 1px solid #6cb6ff;
-    outline-offset: -1px;
-  }
-  .locked-overlay-inner {
-    color: #888;
-    font-size: 12px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    border: 1px solid #2e2e2e;
-    padding: 10px 16px;
-    border-radius: 4px;
-    background: #1d1d1d;
-  }
-  .locked-overlay-icon {
-    font-size: 14px;
-  }
-  .locked-overlay-inner kbd {
-    border: 1px solid #3a3a3a;
-    border-bottom-width: 2px;
-    border-radius: 3px;
-    padding: 0 5px;
-    font: inherit;
-    font-size: 10px;
-    color: #aaa;
   }
   .editor-wrapper {
     min-width: 0;

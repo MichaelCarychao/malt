@@ -2313,7 +2313,12 @@
     const active = document.activeElement;
     const inputFocused =
       active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement;
-    if (!inputFocused) {
+    // A locked note renders an EMPTY hidden view behind the unlock form —
+    // focusing it would swallow keystrokes (Enter typed newlines into the
+    // void instead of reaching the unlock flow). Leave focus where it is;
+    // unlocking remounts the view and focuses it then.
+    const locked = encForThisLoad && !pwForThisLoad;
+    if (!inputFocused && !locked) {
       view.focus();
     }
 
