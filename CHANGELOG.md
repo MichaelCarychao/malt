@@ -4,6 +4,132 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.20 — 2026-06-13
+
+A correctness-and-speed release: a second full code review, with every
+finding fixed. The headline is felt immediately — **typing and search are
+noticeably faster** — but most of the work is quieter: closing ways your
+notes could be corrupted or lost, and hardening the AI and encryption
+edges. (0.4.19 was a release-plumbing bump with no user-facing changes.)
+
+### Faster
+
+- **Typing, searching, and switching notes no longer re-read your whole
+  vault from disk.** malt now keeps the active vault's notes in memory and
+  updates only what actually changed on each edit, instead of re-reading
+  and re-parsing every file on every keystroke (it was doing several full
+  passes per keypress while you typed). On a large vault the difference is
+  the gap between "laggy" and "instant" — the nvalt feel restored. Search,
+  the sidebar, tag counts, backlinks, and the link graph all read from the
+  same in-memory source now.
+- **Semantic search, "related notes", and the near-duplicates report fill
+  in within seconds of opening a vault**, not minutes. The embedding worker
+  processes its whole backlog each cycle instead of one note at a time.
+- Saves, unlocks, and the vault-wide reports no longer run on the UI's
+  message thread, so they can't briefly freeze the window.
+
+### Your notes are safer
+
+- **A `#tag` next to non-English text in an inline `` `code span` ``
+  can no longer corrupt the note — or break the app.** A subtle offset bug
+  meant a multibyte character (an accented letter, a CJK character, an
+  emoji) inside backticks could shift where malt thought your tags were:
+  at best it mangled a word on save, at worst it crashed the note listing
+  for the whole vault until you hand-edited the file. Fixed on both the
+  Rust and editor sides, with tests.
+- **A transient hiccup reading a config file can no longer wipe your
+  vault list, pins, saved searches, or custom prompts.** Previously any
+  failure to read one of these files was treated as a first run and
+  overwritten with defaults; now a missing file seeds defaults, a corrupt
+  file is set aside as a `.bak` (your bytes preserved) before starting
+  fresh, and a momentarily-unreadable file is left completely alone.
+- **Malformed YAML frontmatter is preserved instead of silently deleted.**
+  If the block at the top of a note didn't parse, malt used to drop it on
+  the next rename / auto-tag / link edit. It now round-trips untouched.
+- **Deleting a note you just typed in no longer brings it back.** A note
+  deleted within the autosave window could be recreated by a stray save to
+  the just-removed path.
+- **Stray temporary files from a hard crash are cleaned up** at startup and
+  on vault switch, so they don't linger (and sync via Dropbox).
+
+### Auto-tagging (when enabled)
+
+- **No longer re-tags your entire vault on every launch.** It remembers
+  what it has already tagged (persisted across restarts) and skips
+  unchanged notes — previously every launch re-sent the whole vault to the
+  AI, twice per note, churning modified dates and triggering sync
+  re-uploads. *One-time note:* the first launch after updating re-checks
+  each note once to build that memory, then goes quiet.
+- **No longer overwrites edits you make while it's thinking.** If you (or a
+  sync tool) change a note during the API call, the tagger now skips its
+  write rather than clobbering your edit with a stale version.
+
+### AI
+
+- **Dismissing a suggestion actually stops it.** Pressing Esc on a ghost
+  completion, accepting it early, re-running a brew, or moving on now
+  cancels the request server-side, so the provider stops generating — and
+  stops billing — instead of finishing a response you'll never see.
+- **Long generations no longer truncate, stall forever, or show `�`.**
+  Streaming responses are reassembled correctly across network chunks
+  (no more replacement characters mid-word), abort cleanly if the
+  connection goes silent, and surface a real error if the provider returns
+  one mid-stream instead of ending as a deceptively short success.
+- **OpenAI's current models (gpt-5 era) work**, and tag/wikilink
+  suggestions now use the model you picked in Settings rather than always
+  the provider default.
+- **AI features can't read or transmit a file outside your vault.** The
+  wikilink-suggestion and export commands are now scoped to the active
+  vault like every other note command.
+
+### Wikilinks, tags & the editor
+
+- **`[[Target|Alias]]` links work.** They display the alias, resolve to the
+  target, follow it on rename, and clicking one opens the right note
+  (instead of creating a junk note named "Target-Alias").
+- **The cursor no longer jumps when a tag relocates.** Typing a `#tag`
+  above where you're working used to teleport the caret to the end of the
+  note on the next autosave.
+- **"Review wikilinks" (`Cmd/Ctrl+Shift+L`) wraps the right text** on notes
+  that have frontmatter — the offsets it inserts now match the editor
+  exactly.
+- **Renaming a note by case only ("note" → "Note") works**, and no longer
+  leaves a ghost duplicate in the list.
+- Tag relocation and auto-tagging only tidy the lines they actually
+  touched, so trailing-space hard breaks and intentional blank lines
+  elsewhere in the note survive.
+- A note that merely *mentions* `MALT-ENC-v1:` in its text is no longer
+  mistaken for an encrypted file and rendered unopenable.
+
+### Encryption
+
+- **Unlocking a note is now an inline form in the editor pane, not a
+  window-covering modal** — the note list, search, and the other pane stay
+  fully usable while a note is locked, and you can always get back out.
+- **You can unlock from the keyboard:** arrow to a locked note and press
+  Enter (it used to require a mouse click on the row, and the empty editor
+  swallowed the keystroke).
+
+### Other fixes & polish
+
+- **Settings → notes folder works again** — picking a folder repoints the
+  active vault live, instead of writing a setting nothing read and snapping
+  back. No restart needed.
+- A restrictive Content-Security-Policy is now set on the app window
+  (defense-in-depth for synced/AI-authored content).
+- Switching or removing a vault is more robust: the file watcher always
+  follows the active vault, and a hiccup reindexing one subsystem no longer
+  leaves the others pointed at the wrong vault.
+- Exports that append linked notes use each note's own `# H1` as its
+  section heading (no doubled titles) and leave a clear
+  *(encrypted note omitted)* marker instead of silently skipping a locked
+  target.
+- Backlinks and related-notes rows are keyboard-focusable; the related /
+  unlinked-mention scans don't run while the panel is collapsed.
+- Fuzzy search no longer over-matches short non-English queries.
+- The welcome and quick-tour notes teach the correct AI shortcut
+  (`Ctrl/Cmd+;`) and mention all five supported providers.
+
 ## 0.4.18 — 2026-06-02
 
 - **"Reveal in file manager" now reliably opens the right vault's folder.**
