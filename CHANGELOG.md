@@ -4,6 +4,36 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.21 — 2026-06-18
+
+A small editing-comfort release: control how wide the writing column is,
+drop into a full-screen focus mode, and a fix so a locked note no longer
+gets in your way.
+
+### New
+
+- **Set the width of the editor text.** A slider in the bottom-right caps
+  the writing column to a comfortable measure and centers it, instead of
+  letting prose run the full width of the window. Drag it all the way right
+  for edge-to-edge (the previous behavior); your setting is remembered
+  between launches.
+- **Full-screen focus mode (`Ctrl/⌘+Shift+Enter`).** Collapses everything —
+  note list, search, panes, backlinks, chrome — down to just the current
+  note's text, with a minimal bar showing the word/character count and the
+  width slider. `Esc` brings the workspace back. (Deeper than zen mode,
+  `Ctrl/⌘+Shift+F`, which only hides the note list.)
+
+### Fixed
+
+- **A locked note no longer takes over the whole window.** The password
+  prompt for an encrypted note was being drawn over the entire app, so you
+  couldn't click another note or the search bar until you dealt with it.
+  It's now confined to its own editor pane — navigate away to any other
+  note freely; the encrypted one stays locked until you enter its password.
+- **`Esc` in that password prompt no longer bounces you back to search.**
+  For an encrypted note the password field stands in for the note's
+  content, so there's nothing to escape to — the key is inert there now.
+
 ## 0.4.20 — 2026-06-13
 
 A correctness-and-speed release: a second full code review, with every
