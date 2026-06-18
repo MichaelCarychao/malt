@@ -384,6 +384,57 @@
       localStorage.setItem("malt.countMode", countMode);
     }
   }
+
+  // ─── Editor text width ────────────────────────────────────────────
+  // Caps the editable text column (applied via Editor.svelte's
+  // --editor-text-width var, set on <main> and inherited by every
+  // .cm-content). TEXT_WIDTH_MAX means "unconstrained" (full pane width) —
+  // the default, so existing notes look exactly as before until the user
+  // drags the bottom-bar slider in.
+  const TEXT_WIDTH_MIN = 480;
+  const TEXT_WIDTH_MAX = 1400;
+  function readInitialTextWidth(): number {
+    if (typeof localStorage === "undefined") return TEXT_WIDTH_MAX;
+    const raw = parseInt(localStorage.getItem("malt.editorTextWidth") ?? "", 10);
+    if (Number.isNaN(raw)) return TEXT_WIDTH_MAX;
+    return Math.min(TEXT_WIDTH_MAX, Math.max(TEXT_WIDTH_MIN, raw));
+  }
+  let editorTextWidth = $state(readInitialTextWidth());
+  // CSS value for --editor-text-width: a px cap, or `none` at the top of the
+  // range (full width). $derived so both sliders + the var stay in lockstep.
+  let editorTextWidthCss = $derived(
+    editorTextWidth >= TEXT_WIDTH_MAX ? "none" : `${editorTextWidth}px`
+  );
+  $effect(() => {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("malt.editorTextWidth", String(editorTextWidth));
+    }
+  });
+
+  // ─── Full-screen (distraction-free) editing ───────────────────────
+  // Cmd/Ctrl+Shift+Enter promotes the primary editor to fill the window,
+  // hiding the list, search, panes, linkbacks and chrome — leaving only the
+  // text and a minimal bar (word/char count + width slider). Esc exits. The
+  // existing primary <Editor> is reused (not remounted), so cursor, scroll
+  // and undo history survive entering/leaving. See `main.fullscreen` CSS.
+  let fullscreen = $state(false);
+  function toggleFullscreen() {
+    // Entering only makes sense with a note open; otherwise it's a blank
+    // screen whose only escape hatch is Esc. Leaving is always allowed.
+    if (!fullscreen && !selectedPath) return;
+    fullscreen = !fullscreen;
+    if (fullscreen) {
+      // Land focus in the editor so typing goes there and Esc routing (which
+      // defers to a focused editor) stays predictable.
+      void tick().then(() => {
+        const el = document.querySelector(
+          ".editor-wrapper.primary-pane .cm-content"
+        ) as HTMLElement | null;
+        el?.focus();
+      });
+    }
+  }
+
   let searchInput: HTMLInputElement | null = $state(null);
   // Tracks whether the user has explicitly arrowed in the result list since
   // the last query edit. When true, Enter opens the highlighted match.
@@ -968,15 +1019,32 @@
         return;
       }
       if (settingsOpen) return;
+      // Full-screen mode: Esc leaves it — but only once the editor has no Esc
+      // target of its own. If the find panel is open or a ghost completion is
+      // showing, let the editor consume this Esc first (close panel / decline
+      // ghost); a second Esc then exits full-screen.
+      if (fullscreen) {
+        const ae = document.activeElement;
+        const root = ae instanceof HTMLElement ? ae.closest(".editor-wrapper") : null;
+        const editorBusy = !!root && !!root.querySelector(".cm-search, .cm-ghost");
+        if (editorBusy) return; // don't consume — let CodeMirror handle it
+        e.preventDefault();
+        e.stopPropagation();
+        fullscreen = false;
+        return;
+      }
       const active = document.activeElement;
-      // Esc in the inline unlock form backs out to the search bar without
-      // clearing the query.
+      // Esc inside the inline unlock form is a no-op: for an encrypted note
+      // the password field IS the note's content, so there's nothing to
+      // "escape" to. Swallow it (so it doesn't fall through to clear-search)
+      // and leave focus where it is. To leave a locked note the user clicks
+      // another note or focuses search (Cmd/Ctrl+L) — both stay reachable
+      // now that the unlock overlay is pane-scoped, not app-covering.
       const inUnlockForm =
         active instanceof HTMLElement && !!active.closest(".locked-overlay");
       if (inUnlockForm) {
         e.preventDefault();
         e.stopPropagation();
-        searchInput?.focus();
         return;
       }
       const inEditor =
@@ -1051,6 +1119,14 @@
         e.preventDefault();
         e.stopPropagation();
         zenMode = !zenMode;
+      }
+      if (sKey === "enter") {
+        // Cmd/Ctrl+Shift+Enter toggles full-screen distraction-free editing
+        // of the current note (deeper than zen: also hides search/chrome,
+        // leaving just the text + a word-count/width bar). Esc exits.
+        e.preventDefault();
+        e.stopPropagation();
+        toggleFullscreen();
       }
       return;
     }
@@ -2809,7 +2885,7 @@
   });
 </script>
 
-<main class:zen={zenMode}>
+<main class:zen={zenMode} class:fullscreen={fullscreen} style:--editor-text-width={editorTextWidthCss}>
   <header>
     <input
       bind:this={searchInput}
@@ -2945,7 +3021,7 @@
       {/each}
     </span>
   </div>
-  <div class="body" style:grid-template-columns={zenMode ? "minmax(0, 1fr)" : `${sidebarWidth}px 5px minmax(0, 1fr)`}>
+  <div class="body" style:grid-template-columns={(zenMode || fullscreen) ? "minmax(0, 1fr)" : `${sidebarWidth}px 5px minmax(0, 1fr)`}>
     <ul class="notes">
       {#each notes as note (note.path)}
         {@const accent = flairAccent(note)}
@@ -3023,7 +3099,7 @@
       {#if selectedPath}
         <div class="editors-row" bind:this={editorsRowEl}>
           <div
-            class="editor-wrapper"
+            class="editor-wrapper primary-pane"
             style:flex={secondaryPath ? `${splitFraction} 1 0` : "1 1 0"}
             onmousedowncapture={() => (focusedPane = "primary")}
             onfocusincapture={() => (focusedPane = "primary")}
@@ -3087,7 +3163,7 @@
               title="Drag to resize"
             ></div>
             <div
-              class="editor-wrapper"
+              class="editor-wrapper secondary-pane"
               style:flex={`${1 - splitFraction} 1 0`}
               onmousedowncapture={() => (focusedPane = "secondary")}
               onfocusincapture={() => (focusedPane = "secondary")}
@@ -3180,6 +3256,24 @@
       {/if}
     </div>
   </div>
+  {#snippet widthSliderControl()}
+    <span
+      class="width-slider"
+      title={`Editor text width: ${editorTextWidth >= TEXT_WIDTH_MAX ? "full" : editorTextWidth + "px"} — drag to narrow the writing column`}
+    >
+      <span class="width-ico" aria-hidden="true">↔</span>
+      <input
+        class="width-range"
+        type="range"
+        min={TEXT_WIDTH_MIN}
+        max={TEXT_WIDTH_MAX}
+        step="20"
+        bind:value={editorTextWidth}
+        aria-label="Editor text width"
+        tabindex="-1"
+      />
+    </span>
+  {/snippet}
   <div class="bottom-bar">
     <span
       class="status-dot api-dot"
@@ -3196,7 +3290,30 @@
     {#if justSaved}
       <span class="saved-flash" title="Note autosaved">saved</span>
     {/if}
+    {#if selectedPath}
+      {@render widthSliderControl()}
+    {/if}
   </div>
+  {#if fullscreen}
+    <!-- Minimal bar for full-screen mode: just the count + width slider, as
+         requested. The normal bottom-bar is hidden by `main.fullscreen` CSS. -->
+    <div class="fullscreen-bar">
+      <button
+        class="wordcount"
+        onclick={toggleCountMode}
+        title="Click to switch between word count and character count"
+        tabindex="-1"
+      >
+        {#if countMode === "words"}
+          <span class="wc-num">{editorWords.toLocaleString()}</span><span class="wc-unit">w</span>
+        {:else}
+          <span class="wc-num">{editorChars.toLocaleString()}</span><span class="wc-unit">c</span>
+        {/if}
+      </button>
+      <span class="fullscreen-spacer"></span>
+      {@render widthSliderControl()}
+    </div>
+  {/if}
 </main>
 
 <Settings
@@ -4248,6 +4365,47 @@
   .bottom-bar-spacer {
     flex: 1 1 auto;
   }
+  /* Minimal bar shown only in full-screen mode (word/char count + width
+     slider). Mirrors .bottom-bar's look but sits at the foot of the
+     full-window editor. */
+  .fullscreen-bar {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 16px;
+    border-top: 1px solid #2a2a2a;
+    background: #161616;
+    min-height: 22px;
+    font-size: 11px;
+    color: #6a6a6a;
+  }
+  .fullscreen-spacer {
+    flex: 1 1 auto;
+  }
+  /* Editor text-width slider (bottom bar + full-screen bar). */
+  .width-slider {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: #5a5a5a;
+    flex: 0 0 auto;
+  }
+  .width-ico {
+    font-size: 11px;
+    line-height: 1;
+  }
+  .width-range {
+    width: 96px;
+    height: 12px;
+    margin: 0;
+    cursor: pointer;
+    accent-color: #4d6b86;
+    background: transparent;
+  }
+  .width-range:hover {
+    accent-color: #6cb6ff;
+  }
   .saved-flash {
     color: #6c6;
     margin-left: 6px;
@@ -4544,6 +4702,23 @@
   main.zen .notes,
   main.zen .sidebar-resize-handle {
     display: none;
+  }
+  /* Full-screen (distraction-free) mode (Cmd/Ctrl+Shift+Enter): strip
+     everything but the primary editor's text + the .fullscreen-bar. The
+     <Editor> instance is reused, so this is pure show/hide — no remount. */
+  main.fullscreen > header,
+  main.fullscreen > .saved-row,
+  main.fullscreen > .cotag-row,
+  main.fullscreen > .status,
+  main.fullscreen > .bottom-bar,
+  main.fullscreen .notes,
+  main.fullscreen .sidebar-resize-handle,
+  main.fullscreen .pane-title,
+  main.fullscreen .secondary-pane,
+  main.fullscreen .vresize-handle,
+  main.fullscreen .resize-handle,
+  main.fullscreen .linkbacks-wrapper {
+    display: none !important;
   }
   .note {
     display: grid;
@@ -4854,6 +5029,12 @@
     z-index: 5;
   }
   .editor-wrapper {
+    /* Positioning context for .locked-overlay. Without this the overlay's
+       `position:absolute; inset:0` resolves against the viewport and covers
+       the ENTIRE app — blocking the note list + search while a note is
+       locked. Scoped here, the unlock UI stays inside its own editor pane,
+       so the user can still click away to a different (unencrypted) note. */
+    position: relative;
     min-width: 0;
     min-height: 0;
     overflow: hidden;

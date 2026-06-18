@@ -3155,9 +3155,17 @@
     font-family: "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
     font-size: 14px;
     line-height: 1.55;
+    /* Center the [gutter | text] group when the text column is narrower
+       than the pane (see --editor-text-width below). No-op at full width:
+       the content flex-grows to fill, leaving no free space to distribute. */
+    justify-content: center;
   }
   :global(.editor .cm-content) {
     padding: 10px 0;
+    /* Cap the editable column to the user's chosen width. The variable is
+       set on <main> (inherited down here) by the bottom-bar width slider;
+       `none` (its default / max setting) means full-width as before. */
+    max-width: var(--editor-text-width, none);
   }
   :global(.editor .cm-editor),
   :global(.editor .cm-scroller),
