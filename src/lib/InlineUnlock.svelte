@@ -57,7 +57,8 @@
           e.preventDefault();
           void submit();
         }
-        // Esc is handled by the page-level router (returns focus to search).
+        // Esc is intentionally inert here (the page-level router swallows it):
+        // for an encrypted note this field stands in for the note's content.
       }}
     />
     <button class="unlock-btn" onclick={() => void submit()} disabled={busy || !pw}>
@@ -68,7 +69,7 @@
     <div class="unlock-error">{error}</div>
   {/if}
   <div class="unlock-hint">
-    AES-256-GCM · Argon2id — no recovery without the password. <kbd>Esc</kbd> back to search.
+    AES-256-GCM · Argon2id — no recovery without the password. <kbd>Enter</kbd> to unlock.
   </div>
 </div>
 
