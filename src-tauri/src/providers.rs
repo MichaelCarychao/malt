@@ -137,7 +137,10 @@ impl Provider {
     /// control and their reasoning models budget separately).
     pub fn token_limit(self, visible: u32) -> u32 {
         match self {
-            Provider::LmStudio => visible + 4096,
+            // 8192: Qwen-style thinkers can exceed 4096 reasoning tokens
+            // on ordinary prompts, and running out surfaces as an empty
+            // response. The idle timeout still bounds runaway generation.
+            Provider::LmStudio => visible + 8192,
             _ => visible,
         }
     }

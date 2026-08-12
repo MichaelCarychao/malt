@@ -585,24 +585,53 @@
   // ---------------------------------------------------------------
 
   type Ghost =
-    | { mode: "insert"; text: string; pos: number }
-    | { mode: "rewrite"; text: string; from: number; to: number };
+    | { mode: "insert"; text: string; pos: number; pending?: boolean; error?: boolean }
+    | { mode: "rewrite"; text: string; from: number; to: number; pending?: boolean; error?: boolean };
 
   const setGhost = StateEffect.define<Ghost | null>();
 
   class GhostWidget extends WidgetType {
     readonly text: string;
     readonly isRewrite: boolean;
-    constructor(text: string, isRewrite: boolean) {
+    readonly pending: boolean;
+    readonly isError: boolean;
+    constructor(text: string, isRewrite: boolean, pending: boolean, isError: boolean) {
       super();
       this.text = text;
       this.isRewrite = isRewrite;
+      this.pending = pending;
+      this.isError = isError;
     }
     eq(other: GhostWidget): boolean {
-      return other.text === this.text && other.isRewrite === this.isRewrite;
+      return (
+        other.text === this.text &&
+        other.isRewrite === this.isRewrite &&
+        other.pending === this.pending &&
+        other.isError === this.isError
+      );
     }
     toDOM(): HTMLElement {
       const span = document.createElement("span");
+      if (this.isError) {
+        // A failed generation, shown briefly where the dots were — the
+        // answer to "the dots vanished and I don't know why".
+        span.className = "cm-ghost cm-ghost-error";
+        span.textContent = `⚠ ${this.text}`;
+        return span;
+      }
+      if (this.pending) {
+        // Waiting for the model (a thinking model can take 20-30s): three
+        // pulsing accent-colored dots, deliberately louder than ghost grey
+        // so the pending spot stays findable while the user writes elsewhere.
+        span.className = "cm-ghost cm-ghost-pending";
+        for (let i = 0; i < 3; i++) {
+          const dot = document.createElement("span");
+          dot.className = "dot";
+          dot.textContent = "●";
+          span.appendChild(dot);
+        }
+        return span;
+      }
       span.className = this.isRewrite ? "cm-ghost cm-ghost-rewrite" : "cm-ghost";
       span.textContent = this.text;
       return span;
@@ -655,10 +684,6 @@
     }
   }
 
-  function ghostStablePos(g: Ghost): number {
-    return g.mode === "rewrite" ? g.from : g.pos;
-  }
-
   const ghostField = StateField.define<Ghost | null>({
     create() {
       return null;
@@ -667,19 +692,33 @@
       for (const effect of tr.effects) {
         if (effect.is(setGhost)) return effect.value;
       }
-      if (tr.docChanged) return null;
-      // If user moves cursor away from the ghost anchor, clear it.
-      if (value && tr.selection) {
-        const anchor = ghostStablePos(value);
-        const head = tr.newSelection.main.head;
-        const start = tr.newSelection.main.from;
-        const end = tr.newSelection.main.to;
-        if (value.mode === "insert" && head !== anchor) {
-          return null;
+      // Edits elsewhere in the note slide the anchor along instead of
+      // killing the ghost — generation can take 20-30s on a local
+      // thinking model, and the user shouldn't have to freeze for it.
+      // Only an edit that touches the anchor itself (or the rewrite
+      // range) dismisses: there the context the model saw is stale.
+      // Cursor movement never dismisses; Esc declines, Tab/arrows accept
+      // only at the anchor, Mod-Enter accepts from anywhere.
+      if (tr.docChanged && value) {
+        let touched = false;
+        if (value.mode === "insert") {
+          const pos = value.pos;
+          tr.changes.iterChangedRanges((fromA, toA) => {
+            if (fromA <= pos && toA >= pos) touched = true;
+          });
+          if (touched) return null;
+          return { ...value, pos: tr.changes.mapPos(value.pos) };
         }
-        if (value.mode === "rewrite" && (start !== value.from || end !== value.to)) {
-          return null;
-        }
+        const { from, to } = value;
+        tr.changes.iterChangedRanges((fromA, toA) => {
+          if (fromA <= to && toA >= from) touched = true;
+        });
+        if (touched) return null;
+        return {
+          ...value,
+          from: tr.changes.mapPos(from, 1),
+          to: tr.changes.mapPos(to, -1),
+        };
       }
       return value;
     },
@@ -689,13 +728,13 @@
         if (ghost.mode === "rewrite") {
           return Decoration.set([
             Decoration.replace({
-              widget: new GhostWidget(ghost.text, true),
+              widget: new GhostWidget(ghost.text, true, ghost.pending ?? false, ghost.error ?? false),
             }).range(ghost.from, ghost.to),
           ]);
         }
         return Decoration.set([
           Decoration.widget({
-            widget: new GhostWidget(ghost.text, false),
+            widget: new GhostWidget(ghost.text, false, ghost.pending ?? false, ghost.error ?? false),
             side: 1,
           }).range(ghost.pos),
         ]);
@@ -727,7 +766,7 @@
       const after = stripTagsForAI(v.state.doc.sliceString(sel.to, docLen));
 
       v.dispatch({
-        effects: setGhost.of({ mode: "rewrite", text: "…", from: sel.from, to: sel.to }),
+        effects: setGhost.of({ mode: "rewrite", text: "…", from: sel.from, to: sel.to, pending: true }),
       });
 
       let accumulated = "";
@@ -735,9 +774,12 @@
       const channel = new Channel<string>();
       channel.onmessage = (chunk: string) => {
         if (myGen !== fetchGen || !view) return;
-        const cur = view.state.selection.main;
-        if (cur.from !== sel.from || cur.to !== sel.to) {
-          v.dispatch({ effects: setGhost.of(null) });
+        // The field is the source of truth for the anchor — it slides as
+        // the user edits elsewhere. Gone means an edit touched the range:
+        // stop paying for tokens that will never render.
+        const g = view.state.field(ghostField, false);
+        if (!g || g.mode !== "rewrite") {
+          cancelActiveStream();
           return;
         }
         accumulated += chunk;
@@ -748,7 +790,7 @@
         if (display) {
           started = true;
           v.dispatch({
-            effects: setGhost.of({ mode: "rewrite", text: display, from: sel.from, to: sel.to }),
+            effects: setGhost.of({ ...g, text: display, pending: false }),
           });
         }
       };
@@ -759,9 +801,7 @@
           v.dispatch({ effects: setGhost.of(null) });
         }
       } catch (e) {
-        if (myGen === fetchGen && view) {
-          v.dispatch({ effects: setGhost.of(null) });
-        }
+        showGhostError(myGen, e);
         console.error("rewrite_text_streaming failed", e);
       } finally {
         if (activeStreamId === streamId) activeStreamId = null;
@@ -776,15 +816,18 @@
     const after = stripTagsForAI(v.state.doc.sliceString(cursor, docLen));
     if (!before.trim() && !after.trim()) return;
 
-    v.dispatch({ effects: setGhost.of({ mode: "insert", text: "…", pos: cursor }) });
+    v.dispatch({ effects: setGhost.of({ mode: "insert", text: "…", pos: cursor, pending: true }) });
 
     let accumulated = "";
     let started = false;
     const channel = new Channel<string>();
     channel.onmessage = (chunk: string) => {
       if (myGen !== fetchGen || !view) return;
-      if (view.state.selection.main.head !== cursor) {
-        v.dispatch({ effects: setGhost.of(null) });
+      // Anchor lives in the field and slides as the user edits elsewhere.
+      // Gone means an edit landed on the anchor itself — stop the stream.
+      const g = view.state.field(ghostField, false);
+      if (!g || g.mode !== "insert") {
+        cancelActiveStream();
         return;
       }
       accumulated += chunk;
@@ -795,7 +838,7 @@
       if (display) {
         started = true;
         v.dispatch({
-          effects: setGhost.of({ mode: "insert", text: display, pos: cursor }),
+          effects: setGhost.of({ ...g, text: display, pending: false }),
         });
       }
     };
@@ -806,9 +849,7 @@
         v.dispatch({ effects: setGhost.of(null) });
       }
     } catch (e) {
-      if (myGen === fetchGen && view) {
-        v.dispatch({ effects: setGhost.of(null) });
-      }
+      showGhostError(myGen, e);
       console.error("complete_text_streaming failed", e);
     } finally {
       if (activeStreamId === streamId) activeStreamId = null;
@@ -845,18 +886,23 @@
     const prompt = `${pre}\n\n${focused}`.trim();
     if (!prompt) return;
     const pos = v.state.doc.length; // append the response at the end
-    v.dispatch({ effects: setGhost.of({ mode: "insert", text: "…", pos }) });
+    v.dispatch({ effects: setGhost.of({ mode: "insert", text: "…", pos, pending: true }) });
 
     let accumulated = "";
     let started = false;
     const channel = new Channel<string>();
     channel.onmessage = (chunk: string) => {
       if (myGen !== fetchGen || !view) return;
+      const g = view.state.field(ghostField, false);
+      if (!g || g.mode !== "insert") {
+        cancelActiveStream();
+        return;
+      }
       accumulated += chunk;
       const display = accumulated.replace(/\r/g, "").replace(/^\s+|\s+$/g, "");
       if (display) {
         started = true;
-        v.dispatch({ effects: setGhost.of({ mode: "insert", text: display, pos }) });
+        v.dispatch({ effects: setGhost.of({ ...g, text: display, pending: false }) });
       }
     };
     try {
@@ -865,9 +911,7 @@
         v.dispatch({ effects: setGhost.of(null) });
       }
     } catch (e) {
-      if (myGen === fetchGen && view) {
-        v.dispatch({ effects: setGhost.of(null) });
-      }
+      showGhostError(myGen, e);
       console.error("prompt_streaming failed", e);
     } finally {
       if (activeStreamId === streamId) activeStreamId = null;
@@ -899,9 +943,29 @@
     return t;
   }
 
+  // Whether the cursor is at the ghost: exactly on the insert anchor, or
+  // inside the rewrite range. Gates the "accept" gestures that double as
+  // ordinary editing keys (Tab, arrows) now that the ghost survives the
+  // cursor wandering off to write elsewhere.
+  function cursorAtGhost(v: EditorView): boolean {
+    const ghost = v.state.field(ghostField, false);
+    if (!ghost) return false;
+    const head = v.state.selection.main.head;
+    return ghost.mode === "insert"
+      ? head === ghost.pos
+      : head >= ghost.from && head <= ghost.to;
+  }
+
   function acceptCompletion(v: EditorView): boolean {
     const ghost = v.state.field(ghostField, false);
     if (!ghost) return false;
+    // Nothing to accept: pending dots are a placeholder and an error
+    // notice is not text. Let the key fall through to normal editing.
+    if (ghost.pending || ghost.error) return false;
+    // Accepting from a cursor parked elsewhere (Mod-Enter) inserts the
+    // text but leaves the cursor where the user is writing; accepting at
+    // the anchor moves the cursor past the inserted text as before.
+    const atGhost = cursorAtGhost(v);
     // Accepting mid-stream keeps the text shown so far; stop paying for
     // tokens that will never render.
     cancelActiveStream();
@@ -909,17 +973,36 @@
     if (ghost.mode === "rewrite") {
       v.dispatch({
         changes: { from: ghost.from, to: ghost.to, insert: clean },
-        selection: { anchor: ghost.from + clean.length },
+        ...(atGhost ? { selection: { anchor: ghost.from + clean.length } } : {}),
         effects: setGhost.of(null),
       });
     } else {
       v.dispatch({
         changes: { from: ghost.pos, to: ghost.pos, insert: clean },
-        selection: { anchor: ghost.pos + clean.length },
+        ...(atGhost ? { selection: { anchor: ghost.pos + clean.length } } : {}),
         effects: setGhost.of(null),
       });
     }
     return true;
+  }
+
+  // Replace a pending/streaming ghost with a short inline error notice at
+  // the same spot, auto-dismissed after a few seconds. Always insert-style
+  // (a rewrite error must not keep the user's selected text hidden behind
+  // a replace decoration). No-op if the ghost is already gone.
+  function showGhostError(myGen: number, e: unknown) {
+    if (myGen !== fetchGen || !view) return;
+    const g = view.state.field(ghostField, false);
+    if (!g) return;
+    const msg = String(e).replace(/\s+/g, " ").trim().slice(0, 140);
+    if (!msg) return;
+    const pos = g.mode === "insert" ? g.pos : g.to;
+    view.dispatch({ effects: setGhost.of({ mode: "insert", text: msg, pos, error: true }) });
+    setTimeout(() => {
+      if (myGen !== fetchGen || !view) return;
+      const cur = view.state.field(ghostField, false);
+      if (cur?.error) view.dispatch({ effects: setGhost.of(null) });
+    }, 6000);
   }
 
   function declineGhost(v: EditorView): boolean {
@@ -930,12 +1013,12 @@
     return true;
   }
 
-  // Any "I want to interact with what I see" gesture accepts the ghost.
-  // Arrow keys and mouse click pass through so the cursor still moves
-  // afterward. Tab accepts and consumes (no tab character inserted).
-  // Esc is the only explicit decline.
+  // Arrow keys accept the ghost only when the cursor is AT it (then pass
+  // through so the cursor still moves). When the user has wandered off to
+  // write elsewhere, arrows are just navigation — the ghost stays pending.
+  // Esc declines from anywhere; Mod-Enter accepts from anywhere.
   function acceptThenPassThrough(v: EditorView): boolean {
-    acceptCompletion(v);
+    if (cursorAtGhost(v)) acceptCompletion(v);
     return false; // let the key's default behavior also run
   }
 
@@ -1109,7 +1192,10 @@
       },
       { key: "Mod-Enter", run: (v) => acceptCompletion(v) },
       { key: "Escape", run: (v) => declineGhost(v) },
-      { key: "Tab", run: (v) => acceptCompletion(v) },
+      // Tab accepts only at the anchor — elsewhere it stays an ordinary
+      // Tab so writing in another paragraph isn't hijacked by a pending
+      // completion.
+      { key: "Tab", run: (v) => (cursorAtGhost(v) ? acceptCompletion(v) : false) },
       { key: "ArrowLeft", run: acceptThenPassThrough },
       { key: "ArrowRight", run: acceptThenPassThrough },
       { key: "ArrowUp", run: acceptThenPassThrough },
@@ -3192,6 +3278,40 @@
     font-style: italic;
     white-space: pre-wrap;
     pointer-events: none;
+  }
+  :global(.editor .cm-ghost-pending) {
+    color: #6cb6ff;
+    font-style: normal;
+    letter-spacing: 0.35em;
+    padding-left: 0.15em;
+  }
+  :global(.editor .cm-ghost-pending .dot) {
+    display: inline-block;
+    font-size: 0.7em;
+    animation: ghost-pulse 1.2s ease-in-out infinite;
+  }
+  :global(.editor .cm-ghost-pending .dot:nth-child(2)) {
+    animation-delay: 0.2s;
+  }
+  :global(.editor .cm-ghost-pending .dot:nth-child(3)) {
+    animation-delay: 0.4s;
+  }
+  @keyframes -global-ghost-pulse {
+    0%,
+    100% {
+      opacity: 0.25;
+    }
+    50% {
+      opacity: 1;
+    }
+  }
+  :global(.editor .cm-ghost-error) {
+    color: #e0885f;
+    font-style: normal;
+    font-size: 0.85em;
+    background: rgba(224, 136, 95, 0.1);
+    border-radius: 3px;
+    padding: 0 4px;
   }
   :global(.editor .cm-ghost-rewrite) {
     color: #b8b8b8;

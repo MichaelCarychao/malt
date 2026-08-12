@@ -491,6 +491,11 @@ where
     // cooperative cancellation mirror ai.rs.
     let mut asm = SseAssembler::new();
     let mut think = ThinkFilter::new();
+    // A stream that ends cleanly having produced zero visible text is a
+    // failure the user would otherwise never see (dots, then nothing):
+    // typically a reasoning model that spent the whole token budget
+    // thinking. Cancelled streams are exempt — ending early is the point.
+    let mut emitted = false;
     loop {
         if crate::ai::is_cancelled(stream_id) {
             return Ok(());
@@ -502,6 +507,7 @@ where
             Ok(Ok(None)) => {
                 let tail = think.finish();
                 if !tail.is_empty() {
+                    emitted = true;
                     on_text(&tail);
                 }
                 break;
@@ -527,7 +533,11 @@ where
                 if data.trim() == "[DONE]" {
                     let tail = think.finish();
                     if !tail.is_empty() {
+                        emitted = true;
                         on_text(&tail);
+                    }
+                    if !emitted {
+                        return Err(EMPTY_STREAM_MSG.to_string());
                     }
                     return Ok(());
                 }
@@ -544,6 +554,7 @@ where
                         if let Some(text) = delta.content {
                             let visible = think.push(&text);
                             if !visible.is_empty() {
+                                emitted = true;
                                 on_text(&visible);
                             }
                         }
@@ -553,5 +564,13 @@ where
         }
     }
 
+    if !emitted {
+        return Err(EMPTY_STREAM_MSG.to_string());
+    }
     Ok(())
 }
+
+const EMPTY_STREAM_MSG: &str = "the model finished without producing any visible text — \
+     a reasoning model likely spent its whole token budget thinking. \
+     Try 'skip thinking' in Settings → AI, or raise the model's context \
+     length in LM Studio.";

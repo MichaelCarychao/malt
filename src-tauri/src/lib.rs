@@ -882,6 +882,15 @@ fn set_provider_base_url(provider: providers::Provider, base_url: String) -> Res
     config::save(&cfg).map_err(|e| e.to_string())
 }
 
+/// Toggle "skip thinking" for LM Studio calls (appends Qwen's /no_think
+/// soft switch to prompts — see `ai::no_think_suffix`).
+#[tauri::command]
+fn set_lmstudio_no_think(enabled: bool) -> Result<(), String> {
+    let mut cfg = config::load_for_update()?;
+    cfg.lmstudio_no_think = enabled;
+    config::save(&cfg).map_err(|e| e.to_string())
+}
+
 #[derive(serde::Serialize)]
 struct ProviderInfo {
     id: &'static str,
@@ -1678,6 +1687,7 @@ pub fn run() {
             set_active_provider,
             set_provider_model,
             set_provider_base_url,
+            set_lmstudio_no_think,
             list_providers,
             get_config,
             set_tagging_enabled,

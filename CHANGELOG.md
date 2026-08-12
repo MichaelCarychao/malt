@@ -4,6 +4,46 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.25 — 2026-08-12
+
+Keep writing while the AI thinks. Built for local reasoning models,
+where a completion can take 20-30 seconds — but every AI feature
+benefits.
+
+### New
+
+- **Write anywhere while a completion is pending.** The insertion point
+  now rides along as you edit elsewhere in the note, and the response
+  streams into the original spot when it arrives — no more freezing in
+  place waiting for the model. Only an edit that touches the insertion
+  point itself (or the selected range, for a rewrite) dismisses the
+  pending completion, since the model's context is stale there — and
+  dismissal also cancels the generation.
+- **Gestures, updated to match.** `Tab` and arrow keys accept only when
+  the cursor is at the completion — elsewhere they're ordinary editing
+  keys. `Ctrl/⌘+Enter` accepts from anywhere without yanking your
+  cursor to the insertion; `Esc` declines from anywhere.
+- **A visible thinking indicator.** The pending marker is now three
+  pulsing dots in the accent blue instead of a faint grey ellipsis —
+  findable at a glance, even from the far end of the note.
+- **Skip thinking (Settings → AI → LM Studio).** Appends Qwen's
+  `/no_think` soft switch to every LM Studio prompt, asking hybrid
+  reasoning models to answer directly — much faster completions when
+  the direct answer is good enough. Best-effort: models without the
+  convention ignore it.
+
+### Fixed
+
+- **Failed generations say why, where you're looking.** When a
+  generation fails, a brief inline `⚠` notice appears where the dots
+  were (auto-dismisses after a few seconds) instead of the dots
+  silently vanishing.
+- **Empty responses are errors, not silence.** A stream that finishes
+  without visible text — typically a reasoning model that spent its
+  whole token budget thinking — now reports exactly that, with
+  remedies. Reasoning headroom for LM Studio also doubled (4096 →
+  8192 tokens) so it happens far less.
+
 ## 0.4.24 — 2026-08-11
 
 LM Studio actually works now, including with local reasoning models

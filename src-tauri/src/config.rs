@@ -45,6 +45,12 @@ pub struct Config {
     /// Empty/absent means "use `Provider::openai_base_url()`".
     #[serde(default)]
     pub provider_base_urls: HashMap<String, String>,
+    /// When true, LM Studio calls append Qwen's `/no_think` soft switch
+    /// to the prompt, asking hybrid reasoning models to answer directly.
+    /// Best-effort: models without the switch (e.g. gpt-oss, whose
+    /// reasoning effort is set in LM Studio itself) ignore it.
+    #[serde(default)]
+    pub lmstudio_no_think: bool,
     /// When true (default), a freshly-created daily note (Cmd/Ctrl+D)
     /// is seeded with a #journal tag. Turn off if you'd rather start
     /// the daily note blank.
@@ -97,6 +103,7 @@ impl Default for Config {
             active_provider: default_provider(),
             provider_models: HashMap::new(),
             provider_base_urls: HashMap::new(),
+            lmstudio_no_think: false,
             daily_note_tag: true,
             tag_styles: Vec::new(),
             pinned_paths: Vec::new(),

@@ -311,6 +311,7 @@
   let providerTestResults = $state<Record<string, string>>({});
   let providerTestErrors = $state<Record<string, boolean>>({});
   let providerTesting = $state<Record<string, boolean>>({});
+  let lmstudioNoThink = $state(false);
 
   async function loadProviders() {
     try {
@@ -327,9 +328,10 @@
       const urls: Record<string, string> = {};
       for (const p of list) if (p.base_url !== null) urls[p.id] = p.base_url;
       providerBaseUrlInputs = urls;
-      // Discover active provider from config.
-      const cfg = await invoke<{ active_provider: ProviderId }>("get_config");
+      // Discover active provider + LM Studio prefs from config.
+      const cfg = await invoke<{ active_provider: ProviderId; lmstudio_no_think: boolean }>("get_config");
       activeProviderId = cfg.active_provider;
+      lmstudioNoThink = cfg.lmstudio_no_think;
     } catch (e) {
       console.error("loadProviders failed", e);
     } finally {
@@ -403,6 +405,16 @@
     } catch (e) {
       providerTestResults = { ...providerTestResults, [id]: String(e) };
       providerTestErrors = { ...providerTestErrors, [id]: true };
+    }
+  }
+  async function toggleLmstudioNoThink() {
+    const next = !lmstudioNoThink;
+    lmstudioNoThink = next;
+    try {
+      await invoke("set_lmstudio_no_think", { enabled: next });
+    } catch (e) {
+      lmstudioNoThink = !next; // roll back on failure
+      console.error("set_lmstudio_no_think failed", e);
     }
   }
   function pickSuggestedModel(id: ProviderId, model: string) {
@@ -1122,6 +1134,17 @@
                     onblur={() => void saveProviderBaseUrl(p.id)}
                     onkeydown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
                   />
+                </div>
+                <div class="provider-row">
+                  <label class="toggle-label">
+                    <input
+                      type="checkbox"
+                      checked={lmstudioNoThink}
+                      onchange={() => void toggleLmstudioNoThink()}
+                    />
+                    skip thinking — ask reasoning models to answer directly
+                    (faster; Qwen-style models honor it, others ignore it)
+                  </label>
                 </div>
               {/if}
               <div class="provider-row">

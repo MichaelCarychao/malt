@@ -327,6 +327,21 @@ fn compat_base_url(provider: Provider) -> Result<String, String> {
         .ok_or_else(|| "provider lacks base URL".to_string())
 }
 
+/// Qwen's "answer directly" soft switch, appended to LM Studio prompts
+/// when "skip thinking" is on in Settings → AI. Best-effort: hybrid
+/// reasoning models honor `/no_think`; models without the convention
+/// (e.g. gpt-oss, whose effort is set in LM Studio itself) see a few
+/// harmless extra characters. Empty for every other provider, so hosted
+/// prompts are untouched. Called only on compat paths (after the
+/// Anthropic early-return), keeping the config read off Anthropic calls.
+fn no_think_suffix(provider: Provider) -> &'static str {
+    if provider == Provider::LmStudio && crate::config::load().lmstudio_no_think {
+        "\n\n/no_think"
+    } else {
+        ""
+    }
+}
+
 pub async fn dispatch_stream_completion<F>(
     provider: Provider,
     api_key: &str,
@@ -360,6 +375,7 @@ where
         return stream_anthropic(api_key, req, stream_id, on_text).await;
     }
     let base_url = compat_base_url(provider)?;
+    let system_prompt = format!("{system_prompt}{}", no_think_suffix(provider));
     openai_compat::stream(
         &base_url,
         api_key,
@@ -407,6 +423,7 @@ where
         return stream_anthropic(api_key, req, stream_id, on_text).await;
     }
     let base_url = compat_base_url(provider)?;
+    let system_prompt = format!("{system_prompt}{}", no_think_suffix(provider));
     openai_compat::stream(
         &base_url,
         api_key,
@@ -447,6 +464,7 @@ where
         return stream_anthropic(api_key, req, stream_id, on_text).await;
     }
     let base_url = compat_base_url(provider)?;
+    let system_prompt = format!("{system_prompt}{}", no_think_suffix(provider));
     openai_compat::stream(
         &base_url,
         api_key,
@@ -490,12 +508,13 @@ where
         return stream_anthropic(api_key, req, stream_id, on_text).await;
     }
     let base_url = compat_base_url(provider)?;
+    let prompt = format!("{prompt}{}", no_think_suffix(provider));
     openai_compat::stream(
         &base_url,
         api_key,
         model,
         None, // no system prompt — the notes are the whole prompt
-        prompt,
+        &prompt,
         Some(provider.token_limit(2048)),
         provider.token_param(),
         stream_id,
@@ -561,6 +580,7 @@ pub async fn dispatch_propose_tags(
         send(req, api_key).await?
     } else {
         let base_url = compat_base_url(provider)?;
+        let system_prompt = format!("{system_prompt}{}", no_think_suffix(provider));
         openai_compat::send(
             &base_url,
             api_key,
@@ -598,6 +618,7 @@ pub async fn dispatch_propose_entities(
         send(req, api_key).await?
     } else {
         let base_url = compat_base_url(provider)?;
+        let system_prompt = format!("{system_prompt}{}", no_think_suffix(provider));
         openai_compat::send(
             &base_url,
             api_key,
@@ -625,12 +646,16 @@ pub async fn dispatch_test(
         return test_call(api_key).await;
     }
     let base_url = compat_base_url(provider)?;
+    let user_msg = format!(
+        "Reply with the single word: malt{}",
+        no_think_suffix(provider)
+    );
     openai_compat::send(
         &base_url,
         api_key,
         model,
         None,
-        "Reply with the single word: malt",
+        &user_msg,
         Some(provider.token_limit(32)),
         provider.token_param(),
     )
