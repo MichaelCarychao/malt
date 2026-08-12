@@ -4,6 +4,19 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.23 — 2026-08-11
+
+Hotfix for 0.4.22's LM Studio support.
+
+### Fixed
+
+- **LM Studio provider was unselectable.** Every command taking a provider
+  argument (test key, set provider) rejected `lmstudio` because the Rust
+  enum serialized the variant as `lm_studio`. The wire name is now pinned
+  to the canonical `lmstudio` id (the old spelling is still accepted when
+  reading existing config files), and a round-trip test guards every
+  provider id against future drift.
+
 ## 0.4.22 — 2026-08-11
 
 Run malt's AI on your own hardware: LM Studio joins the provider list.

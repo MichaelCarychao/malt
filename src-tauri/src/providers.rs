@@ -26,6 +26,9 @@ pub enum Provider {
     /// providers it has a user-configurable endpoint (the default
     /// localhost URL, or a LAN/Tailscale hostname — see
     /// `Config::base_url_for`) and requires no API key.
+    // The canonical id is "lmstudio" (keyring slot, config keys, frontend);
+    // snake_case would otherwise split this two-word variant into "lm_studio".
+    #[serde(rename = "lmstudio", alias = "lm_studio")]
     LmStudio,
 }
 
@@ -145,5 +148,30 @@ impl Provider {
             Provider::Gemini => "OpenAI-compat subset — safety filters can null-out responses.",
             Provider::LmStudio => "Local server, no key needed. Endpoint takes a LAN/Tailscale host; model must match an ID loaded in LM Studio.",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The serde wire name must match `Provider::id()` for every variant —
+    /// the frontend, keyring slots, and config keys all use `id()`, so any
+    /// drift breaks command deserialization (the "unknown variant lmstudio,
+    /// expected ... lm_studio" bug).
+    #[test]
+    fn serde_name_matches_id() {
+        for &p in ALL {
+            let wire = serde_json::to_string(&p).unwrap();
+            assert_eq!(wire, format!("\"{}\"", p.id()));
+            let back: Provider = serde_json::from_str(&format!("\"{}\"", p.id())).unwrap();
+            assert_eq!(back, p);
+        }
+    }
+
+    #[test]
+    fn lm_studio_legacy_spelling_still_accepted() {
+        let p: Provider = serde_json::from_str("\"lm_studio\"").unwrap();
+        assert_eq!(p, Provider::LmStudio);
     }
 }
