@@ -4,6 +4,25 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.22 — 2026-08-11
+
+Run malt's AI on your own hardware: LM Studio joins the provider list.
+
+### New
+
+- **LM Studio as an AI provider.** Point malt at any machine running
+  [LM Studio](https://lmstudio.ai)'s local server and every AI feature —
+  ghost completion, rewrite, brew, two-pane prompting, auto-tag, link
+  suggestions — runs on your own hardware. The endpoint is configurable
+  in Settings → AI (defaults to `http://localhost:1234/v1`), so a LAN or
+  Tailscale hostname works just as well as localhost: run the model on
+  your desktop, write on your laptop. No API key required — the **test**
+  button doubles as a connectivity check — though a key is still sent if
+  you store one (say, for an auth proxy in front of the server). The
+  model field must match an ID loaded in LM Studio (its server lists
+  them under `/v1/models`); keep the model loaded to avoid cold-start
+  timeouts on one-shot calls like auto-tag.
+
 ## 0.4.21 — 2026-06-18
 
 A small editing-comfort release: control how wide the writing column is,
