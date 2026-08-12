@@ -206,11 +206,16 @@ pub async fn send(
         max_completion_tokens,
         stream: None,
     };
-    let resp = client()
+    let mut builder = client()
         .post(&url)
-        .header("Authorization", format!("Bearer {api_key}"))
         .header("Content-Type", "application/json")
-        .json(&req)
+        .json(&req);
+    // Keyless providers (LM Studio) get no Authorization header at all —
+    // a "Bearer " with nothing after it trips strict proxies.
+    if !api_key.is_empty() {
+        builder = builder.header("Authorization", format!("Bearer {api_key}"));
+    }
+    let resp = builder
         .send()
         .await
         .map_err(|e| format!("network error: {e}"))?;
@@ -263,11 +268,14 @@ where
         stream: Some(true),
     };
 
-    let mut resp = streaming_client()
+    let mut builder = streaming_client()
         .post(&url)
-        .header("Authorization", format!("Bearer {api_key}"))
         .header("Content-Type", "application/json")
-        .json(&req)
+        .json(&req);
+    if !api_key.is_empty() {
+        builder = builder.header("Authorization", format!("Bearer {api_key}"));
+    }
+    let mut resp = builder
         .send()
         .await
         .map_err(|e| format!("network error: {e}"))?;

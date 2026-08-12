@@ -14,6 +14,9 @@ fn user_for(provider: &str) -> &'static str {
         "deepseek" => "deepseek-api-key",
         "grok" => "grok-api-key",
         "gemini" => "gemini-api-key",
+        // Optional for LM Studio (local server) — only used if the user
+        // fronts their endpoint with an auth proxy.
+        "lmstudio" => "lmstudio-api-key",
         // Unknown providers fall back to a namespaced slot rather than
         // silently aliasing onto Anthropic's key.
         _ => "unknown-api-key",

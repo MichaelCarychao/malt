@@ -290,7 +290,7 @@
   let configLoaded = $state(false);
 
   // ── Multi-provider AI state ───────────────────────────────────────
-  type ProviderId = "anthropic" | "openai" | "deepseek" | "grok" | "gemini";
+  type ProviderId = "anthropic" | "openai" | "deepseek" | "grok" | "gemini" | "lmstudio";
   type ProviderInfo = {
     id: ProviderId;
     label: string;
@@ -299,12 +299,15 @@
     note: string;
     has_key: boolean;
     model: string;
+    requires_key: boolean;
+    base_url: string | null;
   };
   let providersList = $state<ProviderInfo[]>([]);
   let activeProviderId = $state<ProviderId>("anthropic");
   let providersLoaded = $state(false);
   let providerKeyInputs = $state<Record<string, string>>({});
   let providerModelInputs = $state<Record<string, string>>({});
+  let providerBaseUrlInputs = $state<Record<string, string>>({});
   let providerTestResults = $state<Record<string, string>>({});
   let providerTestErrors = $state<Record<string, boolean>>({});
   let providerTesting = $state<Record<string, boolean>>({});
@@ -319,6 +322,11 @@
       const models: Record<string, string> = {};
       for (const p of list) models[p.id] = p.model;
       providerModelInputs = models;
+      // Same mirror for the endpoint override (LM Studio's Tailscale /
+      // LAN URL) — the backend reports the effective URL either way.
+      const urls: Record<string, string> = {};
+      for (const p of list) if (p.base_url !== null) urls[p.id] = p.base_url;
+      providerBaseUrlInputs = urls;
       // Discover active provider from config.
       const cfg = await invoke<{ active_provider: ProviderId }>("get_config");
       activeProviderId = cfg.active_provider;
@@ -383,6 +391,18 @@
       await loadProviders();
     } catch (e) {
       console.error("set_provider_model failed", e);
+    }
+  }
+  async function saveProviderBaseUrl(id: ProviderId) {
+    // Empty string is a valid submit — it clears the override and the
+    // backend falls back to the provider default (localhost for LM Studio).
+    const baseUrl = providerBaseUrlInputs[id]?.trim() ?? "";
+    try {
+      await invoke("set_provider_base_url", { provider: id, baseUrl });
+      await loadProviders();
+    } catch (e) {
+      providerTestResults = { ...providerTestResults, [id]: String(e) };
+      providerTestErrors = { ...providerTestErrors, [id]: true };
     }
   }
   function pickSuggestedModel(id: ProviderId, model: string) {
@@ -1091,6 +1111,19 @@
                 </label>
               </div>
               <div class="provider-note">{p.note}</div>
+              {#if p.id === "lmstudio"}
+                <div class="provider-row">
+                  <span class="provider-row-label">endpoint</span>
+                  <input
+                    class="ai-input"
+                    type="text"
+                    bind:value={providerBaseUrlInputs[p.id]}
+                    placeholder="http://localhost:1234/v1"
+                    onblur={() => void saveProviderBaseUrl(p.id)}
+                    onkeydown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                  />
+                </div>
+              {/if}
               <div class="provider-row">
                 <span class="provider-row-label">key</span>
                 {#if p.has_key}
@@ -1105,7 +1138,7 @@
                   <input
                     type="password"
                     class="ai-input"
-                    placeholder={p.id === "anthropic" ? "sk-ant-…" : p.id === "openai" ? "sk-…" : "key"}
+                    placeholder={p.id === "anthropic" ? "sk-ant-…" : p.id === "openai" ? "sk-…" : p.requires_key ? "key" : "optional"}
                     bind:value={providerKeyInputs[p.id]}
                     onkeydown={(e) => { if (e.key === "Enter") void saveProviderKey(p.id); }}
                   />
@@ -1114,6 +1147,13 @@
                     onclick={() => void saveProviderKey(p.id)}
                     disabled={!providerKeyInputs[p.id]?.trim()}
                   >save</button>
+                  {#if !p.requires_key}
+                    <button
+                      class="ai-btn"
+                      onclick={() => void testProviderKey(p.id)}
+                      disabled={providerTesting[p.id]}
+                    >{providerTesting[p.id] ? "testing…" : "test"}</button>
+                  {/if}
                 {/if}
               </div>
               {#if providerTestResults[p.id]}

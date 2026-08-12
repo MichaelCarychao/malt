@@ -132,7 +132,7 @@ impl Tagger {
 
         let cfg = crate::config::load();
         let provider = cfg.active_provider;
-        let key = crate::secrets::get_api_key_for(provider.id()).map_err(|e| e.to_string())?;
+        let key = crate::api_key_for_call(provider)?;
         // Strip existing hashtags/canonical line before sending — don't want
         // the AI to anchor on tags we already have when proposing new ones.
         // Prepend `# Title` (from filename stem) so the tagger sees what
@@ -218,7 +218,11 @@ pub fn start(tagger: Arc<Tagger>, app_handle: AppHandle) {
             if !cfg.tagging_enabled {
                 continue;
             }
-            if !secrets::has_api_key_for(cfg.active_provider.id()) {
+            // Keyless providers (LM Studio) skip the gate — reachability
+            // failures surface per-note in process() instead.
+            if cfg.active_provider.requires_key()
+                && !secrets::has_api_key_for(cfg.active_provider.id())
+            {
                 continue;
             }
             let Some(path) = tagger.next() else { continue };

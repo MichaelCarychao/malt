@@ -493,8 +493,7 @@ async fn suggest_wikilinks_ai(
     let clean = tags::strip_tags_for_ai(&content);
     let cfg = config::load();
     let provider = cfg.active_provider;
-    let key = secrets::get_api_key_for(provider.id())
-        .map_err(|e| format!("no API key for {}: {e:?}", provider.label()))?;
+    let key = api_key_for_call(provider)?;
     let model = cfg.model_for(provider);
     let entities = ai::dispatch_propose_entities(provider, &key, &model, &clean).await?;
     Ok(link_suggestions::build_entity_suggestions(&content, &entities))
@@ -787,6 +786,19 @@ async fn test_api_key() -> Result<String, String> {
     ai::test_call(&key).await
 }
 
+/// Fetch the API key for an AI call. Providers that don't require one
+/// (LM Studio — a local server) fall back to an empty key instead of
+/// failing, so a keyless endpoint just works; a key the user DID store
+/// (auth proxy in front of the endpoint) is still sent.
+pub(crate) fn api_key_for_call(provider: providers::Provider) -> Result<String, String> {
+    match secrets::get_api_key_for(provider.id()) {
+        Ok(k) if !k.is_empty() => Ok(k),
+        _ if !provider.requires_key() => Ok(String::new()),
+        Ok(_) => Err(format!("empty API key for {}", provider.label())),
+        Err(e) => Err(format!("no API key for {}: {e:?}", provider.label())),
+    }
+}
+
 // ── Provider-aware key + test commands ─────────────────────────────
 
 #[tauri::command]
@@ -823,11 +835,9 @@ fn clear_api_key_for(provider: providers::Provider) -> Result<(), String> {
 
 #[tauri::command]
 async fn test_api_key_for(provider: providers::Provider) -> Result<String, String> {
-    let key = secrets::get_api_key_for(provider.id())
-        .map_err(|e| format!("no key for {}: {e:?}", provider.label()))?;
-    if key.is_empty() {
-        return Err(format!("no key set for {}", provider.label()));
-    }
+    // Keyless providers (LM Studio) get an empty key — this doubles as
+    // the endpoint connectivity test.
+    let key = api_key_for_call(provider)?;
     let model = config::load().model_for(provider);
     ai::dispatch_test(provider, &key, &model).await
 }
@@ -851,6 +861,27 @@ fn set_provider_model(provider: providers::Provider, model: String) -> Result<()
     config::save(&cfg).map_err(|e| e.to_string())
 }
 
+/// Set (or clear, with an empty string) the endpoint override for an
+/// OpenAI-compat provider. How LM Studio gets pointed at a LAN or
+/// Tailscale host instead of localhost.
+#[tauri::command]
+fn set_provider_base_url(provider: providers::Provider, base_url: String) -> Result<(), String> {
+    let trimmed = base_url.trim().trim_end_matches('/').to_string();
+    if !trimmed.is_empty()
+        && !(trimmed.starts_with("http://") || trimmed.starts_with("https://"))
+    {
+        return Err("endpoint must start with http:// or https://".into());
+    }
+    let mut cfg = config::load_for_update()?;
+    if trimmed.is_empty() {
+        cfg.provider_base_urls.remove(provider.id());
+    } else {
+        cfg.provider_base_urls
+            .insert(provider.id().to_string(), trimmed);
+    }
+    config::save(&cfg).map_err(|e| e.to_string())
+}
+
 #[derive(serde::Serialize)]
 struct ProviderInfo {
     id: &'static str,
@@ -860,6 +891,10 @@ struct ProviderInfo {
     note: &'static str,
     has_key: bool,
     model: String,
+    /// False for local servers (LM Studio) — the key row becomes optional.
+    requires_key: bool,
+    /// Effective compat endpoint (override or default); None for Anthropic.
+    base_url: Option<String>,
 }
 
 #[tauri::command]
@@ -875,6 +910,8 @@ fn list_providers() -> Vec<ProviderInfo> {
             note: p.note(),
             has_key: secrets::has_api_key_for(p.id()),
             model: cfg.model_for(p),
+            requires_key: p.requires_key(),
+            base_url: cfg.base_url_for(p),
         })
         .collect()
 }
@@ -940,8 +977,7 @@ async fn complete_text_streaming(
     }
     let cfg = config::load();
     let provider = cfg.active_provider;
-    let key = secrets::get_api_key_for(provider.id())
-        .map_err(|e| format!("no API key for {}: {e:?}", provider.label()))?;
+    let key = api_key_for_call(provider)?;
     let model = cfg.model_for(provider);
     let dir = direction.unwrap_or_default();
     let result =
@@ -967,8 +1003,7 @@ async fn rewrite_text_streaming(
     }
     let cfg = config::load();
     let provider = cfg.active_provider;
-    let key = secrets::get_api_key_for(provider.id())
-        .map_err(|e| format!("no API key for {}: {e:?}", provider.label()))?;
+    let key = api_key_for_call(provider)?;
     let model = cfg.model_for(provider);
     let dir = direction.unwrap_or_default();
     let result = ai::dispatch_stream_rewrite(
@@ -1016,8 +1051,7 @@ async fn brew_streaming(
     }
     let cfg = config::load();
     let provider = cfg.active_provider;
-    let key = secrets::get_api_key_for(provider.id())
-        .map_err(|e| format!("no API key for {}: {e:?}", provider.label()))?;
+    let key = api_key_for_call(provider)?;
     let model = cfg.model_for(provider);
     let payload = ai_payload_with_title(&title, &body);
     let result = ai::dispatch_stream_brew(provider, &key, &model, &payload, stream_id, |text| {
@@ -1043,8 +1077,7 @@ async fn prompt_streaming(
     }
     let cfg = config::load();
     let provider = cfg.active_provider;
-    let key = secrets::get_api_key_for(provider.id())
-        .map_err(|e| format!("no API key for {}: {e:?}", provider.label()))?;
+    let key = api_key_for_call(provider)?;
     let model = cfg.model_for(provider);
     let result = ai::dispatch_stream_raw(provider, &key, &model, &prompt, stream_id, |text| {
         let _ = on_chunk.send(text.to_string());
@@ -1644,6 +1677,7 @@ pub fn run() {
             test_api_key_for,
             set_active_provider,
             set_provider_model,
+            set_provider_base_url,
             list_providers,
             get_config,
             set_tagging_enabled,

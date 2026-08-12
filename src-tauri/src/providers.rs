@@ -22,6 +22,11 @@ pub enum Provider {
     Deepseek,
     Grok,
     Gemini,
+    /// LM Studio's local OpenAI-compatible server. Unlike the hosted
+    /// providers it has a user-configurable endpoint (the default
+    /// localhost URL, or a LAN/Tailscale hostname — see
+    /// `Config::base_url_for`) and requires no API key.
+    LmStudio,
 }
 
 pub const ALL: &[Provider] = &[
@@ -30,6 +35,7 @@ pub const ALL: &[Provider] = &[
     Provider::Gemini,
     Provider::Deepseek,
     Provider::Grok,
+    Provider::LmStudio,
 ];
 
 impl Provider {
@@ -41,6 +47,7 @@ impl Provider {
             Provider::Deepseek => "deepseek",
             Provider::Grok => "grok",
             Provider::Gemini => "gemini",
+            Provider::LmStudio => "lmstudio",
         }
     }
 
@@ -51,6 +58,7 @@ impl Provider {
             Provider::Deepseek => "DeepSeek",
             Provider::Grok => "xAI (Grok)",
             Provider::Gemini => "Google (Gemini)",
+            Provider::LmStudio => "LM Studio (local)",
         }
     }
 
@@ -63,6 +71,10 @@ impl Provider {
             Provider::Deepseek => "deepseek-v4-flash",
             Provider::Grok => "grok-4.3",
             Provider::Gemini => "gemini-2.5-flash",
+            // Whatever the user has loaded; this seed just matches a
+            // commonly-run local model. The model field must match an ID
+            // LM Studio's server lists (its /v1/models endpoint).
+            Provider::LmStudio => "openai/gpt-oss-20b",
         }
     }
 
@@ -76,11 +88,16 @@ impl Provider {
             Provider::Deepseek => &["deepseek-v4-flash", "deepseek-v4-pro"],
             Provider::Grok => &["grok-4.3", "grok-4.20-multi-agent"],
             Provider::Gemini => &["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"],
+            Provider::LmStudio => &["openai/gpt-oss-20b", "qwen/qwen3-8b", "meta-llama-3.1-8b-instruct"],
         }
     }
 
-    /// Base URL for the OpenAI-compat client. Anthropic returns None
-    /// (callers should special-case to the `ai.rs` Anthropic client).
+    /// Default base URL for the OpenAI-compat client. Anthropic returns
+    /// None (callers should special-case to the `ai.rs` Anthropic
+    /// client). This is the compile-time seed — the user can override
+    /// it per provider via `Config::provider_base_urls`, which is how
+    /// LM Studio gets pointed at a non-localhost (e.g. Tailscale) host.
+    /// Dispatch resolves through `Config::base_url_for`, not this.
     pub fn openai_base_url(self) -> Option<&'static str> {
         match self {
             Provider::Anthropic => None,
@@ -88,7 +105,15 @@ impl Provider {
             Provider::Deepseek => Some("https://api.deepseek.com/v1"),
             Provider::Grok => Some("https://api.x.ai/v1"),
             Provider::Gemini => Some("https://generativelanguage.googleapis.com/v1beta/openai"),
+            Provider::LmStudio => Some("http://localhost:1234/v1"),
         }
+    }
+
+    /// False for providers that work without an API key (local servers).
+    /// Key-fetch sites fall back to an empty key instead of erroring,
+    /// and the tagger's has-key gate is skipped.
+    pub fn requires_key(self) -> bool {
+        !matches!(self, Provider::LmStudio)
     }
 
     /// True for providers that go through `openai_compat::stream`.
@@ -118,6 +143,7 @@ impl Provider {
             Provider::Deepseek => "OpenAI-compatible. 1M context. Off-peak pricing.",
             Provider::Grok => "OpenAI-compatible. Older grok-* aliases redirect to grok-4.3.",
             Provider::Gemini => "OpenAI-compat subset — safety filters can null-out responses.",
+            Provider::LmStudio => "Local server, no key needed. Endpoint takes a LAN/Tailscale host; model must match an ID loaded in LM Studio.",
         }
     }
 }

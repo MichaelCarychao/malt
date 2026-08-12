@@ -38,6 +38,13 @@ pub struct Config {
     /// clobbering the other when you switch providers.
     #[serde(default)]
     pub provider_models: HashMap<String, String>,
+    /// Per-provider endpoint overrides for the OpenAI-compat client,
+    /// keyed by `provider.id()`. Exists for LM Studio, whose server
+    /// lives wherever the user runs it (localhost, LAN, Tailscale) —
+    /// but any compat provider can be repointed (e.g. through a proxy).
+    /// Empty/absent means "use `Provider::openai_base_url()`".
+    #[serde(default)]
+    pub provider_base_urls: HashMap<String, String>,
     /// When true (default), a freshly-created daily note (Cmd/Ctrl+D)
     /// is seeded with a #journal tag. Turn off if you'd rather start
     /// the daily note blank.
@@ -89,6 +96,7 @@ impl Default for Config {
             reprompt_on_blur: true,
             active_provider: default_provider(),
             provider_models: HashMap::new(),
+            provider_base_urls: HashMap::new(),
             daily_note_tag: true,
             tag_styles: Vec::new(),
             pinned_paths: Vec::new(),
@@ -152,6 +160,23 @@ impl Config {
             return self.completion_model.clone();
         }
         provider.default_model().to_string()
+    }
+
+    /// Resolve the compat-client base URL for a provider: user override
+    /// first, compile-time default second. None for Anthropic (its
+    /// dedicated client hardcodes the /v1/messages URL), even if an
+    /// override is somehow present.
+    pub fn base_url_for(&self, provider: Provider) -> Option<String> {
+        if provider.openai_base_url().is_none() {
+            return None;
+        }
+        if let Some(u) = self.provider_base_urls.get(provider.id()) {
+            let u = u.trim().trim_end_matches('/');
+            if !u.is_empty() {
+                return Some(u.to_string());
+            }
+        }
+        provider.openai_base_url().map(str::to_string)
     }
 }
 
@@ -260,6 +285,41 @@ pub(crate) fn load_for_update() -> Result<Config, String> {
              (retry in a moment)"
                 .to_string(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base_url_override_and_fallback() {
+        let mut cfg = Config::default();
+        // Defaults: compile-time seed for compat providers, None for Anthropic.
+        assert_eq!(
+            cfg.base_url_for(Provider::LmStudio).as_deref(),
+            Some("http://localhost:1234/v1")
+        );
+        assert_eq!(cfg.base_url_for(Provider::Anthropic), None);
+        // Override wins; trailing slash stripped (the client appends its own).
+        cfg.provider_base_urls.insert(
+            "lmstudio".into(),
+            "http://sync.tailnet.ts.net:1234/v1/".into(),
+        );
+        assert_eq!(
+            cfg.base_url_for(Provider::LmStudio).as_deref(),
+            Some("http://sync.tailnet.ts.net:1234/v1")
+        );
+        // Blank override behaves like no override.
+        cfg.provider_base_urls.insert("lmstudio".into(), "   ".into());
+        assert_eq!(
+            cfg.base_url_for(Provider::LmStudio).as_deref(),
+            Some("http://localhost:1234/v1")
+        );
+        // Anthropic never resolves a compat URL, override or not.
+        cfg.provider_base_urls
+            .insert("anthropic".into(), "http://example.invalid".into());
+        assert_eq!(cfg.base_url_for(Provider::Anthropic), None);
     }
 }
 

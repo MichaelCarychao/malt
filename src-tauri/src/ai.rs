@@ -317,6 +317,16 @@ fn completion_mode(before: &str, after: &str) -> &'static str {
 use crate::openai_compat;
 use crate::providers::Provider;
 
+/// Resolve the compat-client base URL: the user's config override wins
+/// over the provider's compile-time default. This is how LM Studio gets
+/// pointed at a non-localhost (e.g. Tailscale) endpoint. A per-call
+/// config read, like `prompts::get` above — both are tiny JSON files.
+fn compat_base_url(provider: Provider) -> Result<String, String> {
+    crate::config::load()
+        .base_url_for(provider)
+        .ok_or_else(|| "provider lacks base URL".to_string())
+}
+
 pub async fn dispatch_stream_completion<F>(
     provider: Provider,
     api_key: &str,
@@ -349,9 +359,9 @@ where
         };
         return stream_anthropic(api_key, req, stream_id, on_text).await;
     }
-    let base_url = provider.openai_base_url().ok_or("provider lacks base URL")?;
+    let base_url = compat_base_url(provider)?;
     openai_compat::stream(
-        base_url,
+        &base_url,
         api_key,
         model,
         Some(&system_prompt),
@@ -396,9 +406,9 @@ where
         };
         return stream_anthropic(api_key, req, stream_id, on_text).await;
     }
-    let base_url = provider.openai_base_url().ok_or("provider lacks base URL")?;
+    let base_url = compat_base_url(provider)?;
     openai_compat::stream(
-        base_url,
+        &base_url,
         api_key,
         model,
         Some(&system_prompt),
@@ -436,9 +446,9 @@ where
         };
         return stream_anthropic(api_key, req, stream_id, on_text).await;
     }
-    let base_url = provider.openai_base_url().ok_or("provider lacks base URL")?;
+    let base_url = compat_base_url(provider)?;
     openai_compat::stream(
-        base_url,
+        &base_url,
         api_key,
         model,
         Some(&system_prompt),
@@ -479,9 +489,9 @@ where
         };
         return stream_anthropic(api_key, req, stream_id, on_text).await;
     }
-    let base_url = provider.openai_base_url().ok_or("provider lacks base URL")?;
+    let base_url = compat_base_url(provider)?;
     openai_compat::stream(
-        base_url,
+        &base_url,
         api_key,
         model,
         None, // no system prompt — the notes are the whole prompt
@@ -550,9 +560,9 @@ pub async fn dispatch_propose_tags(
         };
         send(req, api_key).await?
     } else {
-        let base_url = provider.openai_base_url().ok_or("provider lacks base URL")?;
+        let base_url = compat_base_url(provider)?;
         openai_compat::send(
-            base_url,
+            &base_url,
             api_key,
             model,
             Some(&system_prompt),
@@ -587,9 +597,9 @@ pub async fn dispatch_propose_entities(
         };
         send(req, api_key).await?
     } else {
-        let base_url = provider.openai_base_url().ok_or("provider lacks base URL")?;
+        let base_url = compat_base_url(provider)?;
         openai_compat::send(
-            base_url,
+            &base_url,
             api_key,
             model,
             Some(&system_prompt),
@@ -614,9 +624,9 @@ pub async fn dispatch_test(
     if provider == Provider::Anthropic {
         return test_call(api_key).await;
     }
-    let base_url = provider.openai_base_url().ok_or("provider lacks base URL")?;
+    let base_url = compat_base_url(provider)?;
     openai_compat::send(
-        base_url,
+        &base_url,
         api_key,
         model,
         None,
