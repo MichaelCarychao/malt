@@ -4,6 +4,32 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.24 — 2026-08-11
+
+LM Studio actually works now, including with local reasoning models
+(gpt-oss, Qwen3-style thinkers).
+
+### Fixed
+
+- **Pasted endpoint URLs work as-is.** Copying the full URL from LM
+  Studio's UI (`…/v1/chat/completions`) no longer doubles the path —
+  the endpoint field accepts the base URL with or without the
+  `/chat/completions` suffix or a trailing slash.
+- **Reasoning models produce output instead of silence.** Thinking
+  tokens count against the response cap, so tight caps ended replies
+  mid-thought — TEST reported `ok — replied: ""` and completions showed
+  dots, then nothing. LM Studio calls now get generous headroom for
+  hidden reasoning (local tokens are free; hosted providers keep exact
+  caps).
+- **Inline `<think>` blocks never reach your note.** If a model emits
+  Qwen-style `<think>…</think>` reasoning inline and LM Studio's
+  reasoning-section parsing is off, malt now strips the leading block
+  client-side — streaming-safe, even when the tags split across
+  network chunks.
+- **The TEST button no longer calls an empty reply "ok".** A response
+  with no visible content now reports an error with a hint about
+  reasoning-model token budgets.
+
 ## 0.4.23 — 2026-08-11
 
 Hotfix for 0.4.22's LM Studio support.

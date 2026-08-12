@@ -366,7 +366,7 @@ where
         model,
         Some(&system_prompt),
         &user_msg,
-        Some(400),
+        Some(provider.token_limit(400)),
         provider.token_param(),
         stream_id,
         on_text,
@@ -413,7 +413,7 @@ where
         model,
         Some(&system_prompt),
         &user_msg,
-        Some(800),
+        Some(provider.token_limit(800)),
         provider.token_param(),
         stream_id,
         on_text,
@@ -453,7 +453,7 @@ where
         model,
         Some(&system_prompt),
         body,
-        Some(1024),
+        Some(provider.token_limit(1024)),
         provider.token_param(),
         stream_id,
         on_text,
@@ -496,7 +496,7 @@ where
         model,
         None, // no system prompt — the notes are the whole prompt
         prompt,
-        Some(2048),
+        Some(provider.token_limit(2048)),
         provider.token_param(),
         stream_id,
         on_text,
@@ -567,7 +567,7 @@ pub async fn dispatch_propose_tags(
             model,
             Some(&system_prompt),
             body,
-            Some(256),
+            Some(provider.token_limit(256)),
             provider.token_param(),
         )
         .await?
@@ -604,7 +604,7 @@ pub async fn dispatch_propose_entities(
             model,
             Some(&system_prompt),
             body,
-            Some(512),
+            Some(provider.token_limit(512)),
             provider.token_param(),
         )
         .await?
@@ -631,8 +631,20 @@ pub async fn dispatch_test(
         model,
         None,
         "Reply with the single word: malt",
-        Some(32),
+        Some(provider.token_limit(32)),
         provider.token_param(),
     )
     .await
+    .and_then(|reply| {
+        // A 200 with empty content means the token cap ran out before any
+        // visible text (reasoning models) or the server returned nothing —
+        // either way "ok" would be a lie the user pays for later.
+        if reply.trim().is_empty() {
+            Err("connected, but the model returned empty content — \
+                 if this is a reasoning model, it may need a larger token budget"
+                .to_string())
+        } else {
+            Ok(reply)
+        }
+    })
 }

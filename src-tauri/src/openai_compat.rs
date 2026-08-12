@@ -84,6 +84,201 @@ impl SseAssembler {
     }
 }
 
+/// Strips a leading `<think>…</think>` reasoning block from a response.
+///
+/// Qwen-style models emit their reasoning inline at the start of the
+/// completion. LM Studio normally parses it out server-side into a
+/// separate `reasoning_content` field, but only when the model's
+/// "reasoning section parsing" setting is on — this is the client-side
+/// fallback so hidden reasoning never lands in a note. Streaming-safe:
+/// the tags themselves can arrive split across deltas.
+pub(crate) struct ThinkFilter {
+    state: ThinkState,
+    buf: String,
+}
+
+enum ThinkState {
+    /// Deciding whether the stream opens with `<think>` (leading
+    /// whitespace tolerated). Buffers until the prefix match resolves.
+    Start,
+    /// Inside the block, watching for `</think>` — keeps only a small
+    /// tail so a tag split across deltas still matches.
+    Suppress,
+    /// Block closed; swallowing the whitespace the model emits between
+    /// `</think>` and the real content.
+    TrimAfterClose,
+    /// Clean passthrough.
+    Pass,
+}
+
+const THINK_OPEN: &str = "<think>";
+const THINK_CLOSE: &str = "</think>";
+
+impl ThinkFilter {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: ThinkState::Start,
+            buf: String::new(),
+        }
+    }
+
+    /// Feed one delta; returns the text that should become visible.
+    pub(crate) fn push(&mut self, text: &str) -> String {
+        match self.state {
+            ThinkState::Pass => text.to_string(),
+            ThinkState::TrimAfterClose => {
+                let trimmed = text.trim_start();
+                if trimmed.is_empty() {
+                    return String::new();
+                }
+                self.state = ThinkState::Pass;
+                trimmed.to_string()
+            }
+            ThinkState::Start => {
+                self.buf.push_str(text);
+                let trimmed = self.buf.trim_start();
+                if trimmed.is_empty() {
+                    return String::new();
+                }
+                if let Some(rest) = trimmed.strip_prefix(THINK_OPEN) {
+                    let rest = rest.to_string();
+                    self.buf.clear();
+                    self.state = ThinkState::Suppress;
+                    return self.push(&rest);
+                }
+                if trimmed.len() < THINK_OPEN.len() && THINK_OPEN.starts_with(trimmed) {
+                    // Could still become the opening tag — keep buffering.
+                    return String::new();
+                }
+                // Not a reasoning block: everything buffered is content.
+                self.state = ThinkState::Pass;
+                std::mem::take(&mut self.buf)
+            }
+            ThinkState::Suppress => {
+                self.buf.push_str(text);
+                if let Some(idx) = self.buf.find(THINK_CLOSE) {
+                    let after = self.buf[idx + THINK_CLOSE.len()..].to_string();
+                    self.buf.clear();
+                    self.state = ThinkState::TrimAfterClose;
+                    return self.push(&after);
+                }
+                // Keep just enough tail to catch a closing tag that
+                // straddles the next delta; drop the rest (it's reasoning).
+                let keep = THINK_CLOSE.len() - 1;
+                if self.buf.len() > keep {
+                    let mut cut = self.buf.len() - keep;
+                    while !self.buf.is_char_boundary(cut) {
+                        cut += 1;
+                    }
+                    self.buf.drain(..cut);
+                }
+                String::new()
+            }
+        }
+    }
+
+    /// Flush at end of stream. Text still buffered in `Start` was a
+    /// false-positive prefix (e.g. a reply of just "<t") — it's content.
+    /// Anything buffered in `Suppress` is unterminated reasoning (the
+    /// token cap ran out mid-think) and stays hidden.
+    pub(crate) fn finish(&mut self) -> String {
+        match self.state {
+            ThinkState::Start => std::mem::take(&mut self.buf),
+            _ => String::new(),
+        }
+    }
+}
+
+/// One-shot variant for non-streaming responses.
+fn strip_think(text: &str) -> String {
+    let mut f = ThinkFilter::new();
+    let mut out = f.push(text);
+    out.push_str(&f.finish());
+    out
+}
+
+#[cfg(test)]
+mod think_tests {
+    use super::*;
+
+    /// Run deltas through the filter the way the stream pump does.
+    fn run(deltas: &[&str]) -> String {
+        let mut f = ThinkFilter::new();
+        let mut out = String::new();
+        for d in deltas {
+            out.push_str(&f.push(d));
+        }
+        out.push_str(&f.finish());
+        out
+    }
+
+    #[test]
+    fn plain_text_passes_through() {
+        assert_eq!(run(&["Hello", " world"]), "Hello world");
+    }
+
+    #[test]
+    fn strips_think_block_in_one_chunk() {
+        assert_eq!(
+            run(&["<think>hidden reasoning</think>\n\nvisible"]),
+            "visible"
+        );
+    }
+
+    #[test]
+    fn strips_think_block_split_across_deltas() {
+        // Both tags straddle delta boundaries, as SSE tokens do.
+        assert_eq!(
+            run(&["<th", "ink>rea", "soning</th", "ink>\n", "\nanswer"]),
+            "answer"
+        );
+    }
+
+    #[test]
+    fn leading_whitespace_before_tag_tolerated() {
+        assert_eq!(run(&["\n <think>x</think> ok"]), "ok");
+    }
+
+    #[test]
+    fn false_positive_prefix_flushes_at_finish() {
+        // A reply that IS just "<t" — never resolves to the tag.
+        assert_eq!(run(&["<t"]), "<t");
+    }
+
+    #[test]
+    fn angle_bracket_content_not_swallowed() {
+        assert_eq!(run(&["<3 you"]), "<3 you");
+    }
+
+    #[test]
+    fn unterminated_reasoning_stays_hidden() {
+        // Token cap ran out mid-think: nothing visible is correct —
+        // the caller surfaces the empty reply as an error.
+        assert_eq!(run(&["<think>still thi", "nking"]), "");
+    }
+
+    #[test]
+    fn multibyte_reasoning_does_not_panic() {
+        assert_eq!(run(&["<think>思考中🤔", "</think>done"]), "done");
+    }
+
+    #[test]
+    fn later_think_tags_are_content() {
+        // Only a LEADING block is reasoning; tags mid-text pass through.
+        assert_eq!(
+            run(&["The tag <think> is used by Qwen"]),
+            "The tag <think> is used by Qwen"
+        );
+    }
+
+    #[test]
+    fn one_shot_strip_think() {
+        assert_eq!(strip_think("<think>x</think>\nanswer"), "answer");
+        assert_eq!(strip_think("plain"), "plain");
+        assert_eq!(strip_think("<think>never closed"), "");
+    }
+}
+
 #[derive(Serialize)]
 struct ChatCompletionRequest<'a> {
     model: &'a str,
@@ -229,12 +424,14 @@ pub async fn send(
     }
     let parsed: ChatCompletionResponse =
         serde_json::from_str(&body).map_err(|e| format!("parse error: {e}: {body}"))?;
-    Ok(parsed
-        .choices
-        .into_iter()
-        .filter_map(|c| c.message.content)
-        .collect::<Vec<_>>()
-        .join(""))
+    Ok(strip_think(
+        &parsed
+            .choices
+            .into_iter()
+            .filter_map(|c| c.message.content)
+            .collect::<Vec<_>>()
+            .join(""),
+    ))
 }
 
 /// Streaming chat completion. Invokes `on_text` with each delta as it
@@ -293,13 +490,22 @@ where
     // SseAssembler (shared with the Anthropic pump). Idle timeout and
     // cooperative cancellation mirror ai.rs.
     let mut asm = SseAssembler::new();
+    let mut think = ThinkFilter::new();
     loop {
         if crate::ai::is_cancelled(stream_id) {
             return Ok(());
         }
         let chunk = match tokio::time::timeout(IDLE_TIMEOUT, resp.chunk()).await {
             Ok(Ok(Some(c))) => c,
-            Ok(Ok(None)) => break,
+            // Stream ended without [DONE] (some compat servers just close):
+            // flush any content still buffered in the think filter.
+            Ok(Ok(None)) => {
+                let tail = think.finish();
+                if !tail.is_empty() {
+                    on_text(&tail);
+                }
+                break;
+            }
             Ok(Err(e)) => return Err(format!("chunk error: {e}")),
             Err(_) => {
                 return Err(format!(
@@ -319,6 +525,10 @@ where
                     continue;
                 };
                 if data.trim() == "[DONE]" {
+                    let tail = think.finish();
+                    if !tail.is_empty() {
+                        on_text(&tail);
+                    }
                     return Ok(());
                 }
                 // Mid-stream error envelope: surface it rather than ending
@@ -332,7 +542,10 @@ where
                 for choice in parsed.choices {
                     if let Some(delta) = choice.delta {
                         if let Some(text) = delta.content {
-                            on_text(&text);
+                            let visible = think.push(&text);
+                            if !visible.is_empty() {
+                                on_text(&visible);
+                            }
                         }
                     }
                 }

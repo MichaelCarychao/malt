@@ -171,7 +171,14 @@ impl Config {
             return None;
         }
         if let Some(u) = self.provider_base_urls.get(provider.id()) {
-            let u = u.trim().trim_end_matches('/');
+            let mut u = u.trim().trim_end_matches('/');
+            // Users paste the full endpoint URL from LM Studio's UI
+            // ("http://host:1234/v1/chat/completions"); the compat client
+            // appends /chat/completions itself, so strip it here or the
+            // path doubles up.
+            if let Some(stripped) = u.strip_suffix("/chat/completions") {
+                u = stripped.trim_end_matches('/');
+            }
             if !u.is_empty() {
                 return Some(u.to_string());
             }
@@ -309,6 +316,24 @@ mod tests {
         assert_eq!(
             cfg.base_url_for(Provider::LmStudio).as_deref(),
             Some("http://sync.tailnet.ts.net:1234/v1")
+        );
+        // A pasted full endpoint URL loses its /chat/completions suffix
+        // (with or without a trailing slash) — the client appends its own.
+        cfg.provider_base_urls.insert(
+            "lmstudio".into(),
+            "http://localhost:1234/v1/chat/completions".into(),
+        );
+        assert_eq!(
+            cfg.base_url_for(Provider::LmStudio).as_deref(),
+            Some("http://localhost:1234/v1")
+        );
+        cfg.provider_base_urls.insert(
+            "lmstudio".into(),
+            "http://localhost:1234/v1/chat/completions/".into(),
+        );
+        assert_eq!(
+            cfg.base_url_for(Provider::LmStudio).as_deref(),
+            Some("http://localhost:1234/v1")
         );
         // Blank override behaves like no override.
         cfg.provider_base_urls.insert("lmstudio".into(), "   ".into());

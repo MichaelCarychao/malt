@@ -127,6 +127,21 @@ impl Provider {
         self.openai_base_url().is_some()
     }
 
+    /// Effective token cap for a call that wants `visible` tokens of
+    /// output. Reasoning models served by LM Studio (gpt-oss, qwen3)
+    /// spend the same budget on hidden reasoning BEFORE any visible
+    /// text, so a tight cap ends the response while it's still
+    /// thinking — the request succeeds with empty content. Local
+    /// tokens are free, so give the local provider generous headroom;
+    /// hosted providers keep the exact cap (there the cap is a cost
+    /// control and their reasoning models budget separately).
+    pub fn token_limit(self, visible: u32) -> u32 {
+        match self {
+            Provider::LmStudio => visible + 4096,
+            _ => visible,
+        }
+    }
+
     /// Which token-cap field this provider's chat endpoint expects.
     /// OpenAI's current models (gpt-5 era) REJECT `max_tokens` outright;
     /// the compat forks (DeepSeek, Grok, Gemini-compat) still take it.
