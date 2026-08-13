@@ -4,6 +4,22 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.26 — 2026-08-12
+
+Make "skip thinking" actually stick for newer Qwen models.
+
+### Fixed
+
+- **Skip thinking now uses both switches.** The `/no_think` soft switch
+  moved from the system prompt into the user message (where Qwen
+  documents it — system-prompt placement is reported ignored), and
+  LM Studio requests additionally send
+  `chat_template_kwargs: {"enable_thinking": false}`, the template-level
+  switch newer Qwen releases respect. Neither is honored by every
+  model/server combination; if thinking still shows up, the reliable
+  fix is one line at the top of the model's prompt template in LM
+  Studio itself: `{%- set enable_thinking = false %}`.
+
 ## 0.4.25 — 2026-08-12
 
 Keep writing while the AI thinks. Built for local reasoning models,

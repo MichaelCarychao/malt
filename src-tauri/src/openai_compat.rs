@@ -272,6 +272,31 @@ mod think_tests {
     }
 
     #[test]
+    fn chat_template_kwargs_only_serialized_when_set() {
+        let req = ChatCompletionRequest {
+            model: "m",
+            messages: vec![],
+            max_tokens: Some(5),
+            max_completion_tokens: None,
+            stream: None,
+            chat_template_kwargs: Some(TemplateKwargs { enable_thinking: false }),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains(r#""chat_template_kwargs":{"enable_thinking":false}"#));
+
+        let req = ChatCompletionRequest {
+            model: "m",
+            messages: vec![],
+            max_tokens: Some(5),
+            max_completion_tokens: None,
+            stream: None,
+            chat_template_kwargs: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("chat_template_kwargs"));
+    }
+
+    #[test]
     fn one_shot_strip_think() {
         assert_eq!(strip_think("<think>x</think>\nanswer"), "answer");
         assert_eq!(strip_think("plain"), "plain");
@@ -292,6 +317,18 @@ struct ChatCompletionRequest<'a> {
     max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+    /// Server-side "answer directly" switch for Qwen-style hybrids:
+    /// LM Studio forwards this into the model's chat template, where
+    /// `enable_thinking = false` renders the no-think prompt form.
+    /// Only sent when the user turns on "skip thinking" for LM Studio;
+    /// servers that don't know the field ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<TemplateKwargs>,
+}
+
+#[derive(Serialize)]
+struct TemplateKwargs {
+    enable_thinking: bool,
 }
 
 /// Which token-cap field a provider's endpoint expects. Exactly one is
@@ -386,6 +423,7 @@ pub async fn send(
     user: &str,
     limit: Option<u32>,
     token_param: TokenParam,
+    disable_thinking: bool,
 ) -> Result<String, String> {
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let mut messages = Vec::with_capacity(2);
@@ -400,6 +438,9 @@ pub async fn send(
         max_tokens,
         max_completion_tokens,
         stream: None,
+        chat_template_kwargs: disable_thinking.then_some(TemplateKwargs {
+            enable_thinking: false,
+        }),
     };
     let mut builder = client()
         .post(&url)
@@ -444,6 +485,7 @@ pub async fn stream<F>(
     user: &str,
     limit: Option<u32>,
     token_param: TokenParam,
+    disable_thinking: bool,
     stream_id: Option<u64>,
     mut on_text: F,
 ) -> Result<(), String>
@@ -463,6 +505,9 @@ where
         max_tokens,
         max_completion_tokens,
         stream: Some(true),
+        chat_template_kwargs: disable_thinking.then_some(TemplateKwargs {
+            enable_thinking: false,
+        }),
     };
 
     let mut builder = streaming_client()

@@ -327,15 +327,22 @@ fn compat_base_url(provider: Provider) -> Result<String, String> {
         .ok_or_else(|| "provider lacks base URL".to_string())
 }
 
-/// Qwen's "answer directly" soft switch, appended to LM Studio prompts
-/// when "skip thinking" is on in Settings → AI. Best-effort: hybrid
-/// reasoning models honor `/no_think`; models without the convention
-/// (e.g. gpt-oss, whose effort is set in LM Studio itself) see a few
-/// harmless extra characters. Empty for every other provider, so hosted
-/// prompts are untouched. Called only on compat paths (after the
-/// Anthropic early-return), keeping the config read off Anthropic calls.
+/// Whether "skip thinking" (Settings → AI) applies to this call. Drives
+/// two mechanisms at once, since neither alone is reliable across
+/// models/servers: `chat_template_kwargs.enable_thinking=false` on the
+/// request (the proper switch, honored when LM Studio forwards template
+/// kwargs) and Qwen's `/no_think` soft switch in the USER message —
+/// Qwen documents it for user prompts, and system-prompt placement is
+/// reported not to work.
+fn no_think_enabled(provider: Provider) -> bool {
+    provider == Provider::LmStudio && crate::config::load().lmstudio_no_think
+}
+
+/// The `/no_think` soft-switch text for user messages; empty when the
+/// toggle is off or the provider is hosted. Models without the
+/// convention (e.g. gpt-oss) see a few harmless extra characters.
 fn no_think_suffix(provider: Provider) -> &'static str {
-    if provider == Provider::LmStudio && crate::config::load().lmstudio_no_think {
+    if no_think_enabled(provider) {
         "\n\n/no_think"
     } else {
         ""
@@ -375,7 +382,7 @@ where
         return stream_anthropic(api_key, req, stream_id, on_text).await;
     }
     let base_url = compat_base_url(provider)?;
-    let system_prompt = format!("{system_prompt}{}", no_think_suffix(provider));
+    let user_msg = format!("{user_msg}{}", no_think_suffix(provider));
     openai_compat::stream(
         &base_url,
         api_key,
@@ -384,6 +391,7 @@ where
         &user_msg,
         Some(provider.token_limit(400)),
         provider.token_param(),
+        no_think_enabled(provider),
         stream_id,
         on_text,
     )
@@ -423,7 +431,7 @@ where
         return stream_anthropic(api_key, req, stream_id, on_text).await;
     }
     let base_url = compat_base_url(provider)?;
-    let system_prompt = format!("{system_prompt}{}", no_think_suffix(provider));
+    let user_msg = format!("{user_msg}{}", no_think_suffix(provider));
     openai_compat::stream(
         &base_url,
         api_key,
@@ -432,6 +440,7 @@ where
         &user_msg,
         Some(provider.token_limit(800)),
         provider.token_param(),
+        no_think_enabled(provider),
         stream_id,
         on_text,
     )
@@ -464,15 +473,16 @@ where
         return stream_anthropic(api_key, req, stream_id, on_text).await;
     }
     let base_url = compat_base_url(provider)?;
-    let system_prompt = format!("{system_prompt}{}", no_think_suffix(provider));
+    let body = format!("{body}{}", no_think_suffix(provider));
     openai_compat::stream(
         &base_url,
         api_key,
         model,
         Some(&system_prompt),
-        body,
+        &body,
         Some(provider.token_limit(1024)),
         provider.token_param(),
+        no_think_enabled(provider),
         stream_id,
         on_text,
     )
@@ -517,6 +527,7 @@ where
         &prompt,
         Some(provider.token_limit(2048)),
         provider.token_param(),
+        no_think_enabled(provider),
         stream_id,
         on_text,
     )
@@ -580,15 +591,16 @@ pub async fn dispatch_propose_tags(
         send(req, api_key).await?
     } else {
         let base_url = compat_base_url(provider)?;
-        let system_prompt = format!("{system_prompt}{}", no_think_suffix(provider));
+        let body = format!("{body}{}", no_think_suffix(provider));
         openai_compat::send(
             &base_url,
             api_key,
             model,
             Some(&system_prompt),
-            body,
+            &body,
             Some(provider.token_limit(256)),
             provider.token_param(),
+            no_think_enabled(provider),
         )
         .await?
     };
@@ -618,15 +630,16 @@ pub async fn dispatch_propose_entities(
         send(req, api_key).await?
     } else {
         let base_url = compat_base_url(provider)?;
-        let system_prompt = format!("{system_prompt}{}", no_think_suffix(provider));
+        let body = format!("{body}{}", no_think_suffix(provider));
         openai_compat::send(
             &base_url,
             api_key,
             model,
             Some(&system_prompt),
-            body,
+            &body,
             Some(provider.token_limit(512)),
             provider.token_param(),
+            no_think_enabled(provider),
         )
         .await?
     };
@@ -658,6 +671,7 @@ pub async fn dispatch_test(
         &user_msg,
         Some(provider.token_limit(32)),
         provider.token_param(),
+        no_think_enabled(provider),
     )
     .await
     .and_then(|reply| {
