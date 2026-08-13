@@ -153,9 +153,16 @@
   // Steer-generation modal (Cmd/Ctrl+Shift+;). The text is injected as a
   // <direction> note into the next completion/rewrite so the user can
   // nudge the model ("make it darker", "pivot to the counterargument").
+  // Notes tagged #prompt appear in a house-style dropdown; the selected
+  // note's body is appended to the system prompt as a standing style
+  // guide. Selection persists across sessions via localStorage.
   let steerOpen = $state(false);
   let steerText = $state("");
   let steerInputEl: HTMLInputElement | null = $state(null);
+  let steerStyleNotes = $state<NoteRef[]>([]);
+  let steerStylePath = $state<string>(
+    localStorage.getItem("malt.steerStylePath") ?? "",
+  );
 
   // Set to the on-disk version when the file changes underneath unsaved
   // edits — a genuine conflict. While non-null we DON'T overwrite the
@@ -181,6 +188,17 @@
   function openSteer() {
     steerText = "";
     steerOpen = true;
+    // Refresh the house-style list each open — cheap (note cache) and
+    // picks up newly-tagged #prompt notes without a restart.
+    void invoke<NoteRef[]>("list_prompt_notes")
+      .then((list) => {
+        steerStyleNotes = list;
+        // Drop a stale selection (note deleted or untagged since).
+        if (steerStylePath && !list.some((n) => n.path === steerStylePath)) {
+          steerStylePath = "";
+        }
+      })
+      .catch(() => (steerStyleNotes = []));
     void tick().then(() => steerInputEl?.focus());
   }
   function cancelSteer() {
@@ -188,12 +206,24 @@
     // Hand focus back to the editor so the user keeps typing.
     view?.focus();
   }
-  function submitSteer() {
+  async function submitSteer() {
     const dir = steerText.trim();
     steerOpen = false;
+    localStorage.setItem("malt.steerStylePath", steerStylePath);
+    let style = "";
+    if (steerStylePath) {
+      try {
+        const body = await invoke<string>("read_note", { path: steerStylePath });
+        style = stripTagsForAI(body);
+      } catch (e) {
+        // Stale/unreadable style note — generate without it rather than
+        // blocking the whole request.
+        console.error("style note read failed", e);
+      }
+    }
     if (view) {
       view.focus();
-      void fetchCompletion(view, dir);
+      void fetchCompletion(view, dir, style);
     }
   }
 
@@ -741,7 +771,7 @@
       }),
   });
 
-  async function fetchCompletion(v: EditorView, direction = "") {
+  async function fetchCompletion(v: EditorView, direction = "", style = "") {
     // AI is disabled on encrypted notes — block and let the parent offer to
     // decrypt (M2). Covers both completion and rewrite (this fn handles both).
     if (isEncrypted) {
@@ -796,7 +826,7 @@
       };
 
       try {
-        await invoke("rewrite_text_streaming", { before, selected, after, direction, streamId, onChunk: channel });
+        await invoke("rewrite_text_streaming", { before, selected, after, direction, style, streamId, onChunk: channel });
         if (myGen === fetchGen && !started && view) {
           v.dispatch({ effects: setGhost.of(null) });
         }
@@ -844,7 +874,7 @@
     };
 
     try {
-      await invoke("complete_text_streaming", { before, after, direction, streamId, onChunk: channel });
+      await invoke("complete_text_streaming", { before, after, direction, style, streamId, onChunk: channel });
       if (myGen === fetchGen && !started && view) {
         v.dispatch({ effects: setGhost.of(null) });
       }
@@ -2635,12 +2665,32 @@
         bind:this={steerInputEl}
         bind:value={steerText}
         onkeydown={(e) => {
-          if (e.key === "Enter") { e.preventDefault(); submitSteer(); }
+          if (e.key === "Enter") { e.preventDefault(); void submitSteer(); }
           else if (e.key === "Escape") { e.preventDefault(); cancelSteer(); }
         }}
       />
+      {#if steerStyleNotes.length > 0}
+        <label class="steer-style-row">
+          <span class="steer-style-label">house style</span>
+          <select
+            class="steer-style-select"
+            bind:value={steerStylePath}
+            onkeydown={(e) => {
+              if (e.key === "Enter") { e.preventDefault(); void submitSteer(); }
+              else if (e.key === "Escape") { e.preventDefault(); cancelSteer(); }
+            }}
+          >
+            <option value="">none</option>
+            {#each steerStyleNotes as n (n.path)}
+              <option value={n.path}>{n.title}</option>
+            {/each}
+          </select>
+        </label>
+      {/if}
       <div class="steer-hint">
-        A one-time nudge for the AI generation at your cursor (or your selection). Enter to generate · Esc to cancel.
+        A one-time nudge for the AI generation at your cursor (or your selection).
+        {#if steerStyleNotes.length > 0}The house style (any note tagged #prompt) rides along as a standing instruction.{/if}
+        Enter to generate · Esc to cancel.
       </div>
     </div>
   </div>
@@ -2976,6 +3026,33 @@
     font-size: 11px;
     margin-top: 8px;
     line-height: 1.4;
+  }
+  .steer-style-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .steer-style-label {
+    color: #888;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+  }
+  .steer-style-select {
+    flex: 1;
+    background: #161616;
+    border: 1px solid #2e2e2e;
+    color: #e0e0e0;
+    font: inherit;
+    font-size: 12px;
+    padding: 4px 6px;
+    border-radius: 2px;
+  }
+  .steer-style-select:focus {
+    outline: none;
+    border-color: #6cb6ff;
   }
   .link-modal-backdrop {
     position: fixed;

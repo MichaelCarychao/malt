@@ -327,6 +327,23 @@ fn compat_base_url(provider: Provider) -> Result<String, String> {
         .ok_or_else(|| "provider lacks base URL".to_string())
 }
 
+/// Append a user-selected "house style" note (a #prompt-tagged note,
+/// picked in the steer popup) to a feature's system prompt. Injected at
+/// the system level so it applies as a standing instruction across all
+/// providers, and AFTER the feature prompt so the output contract
+/// (insert-only text, no chat) stays primary. No-op when empty.
+fn with_style(system_prompt: String, style: &str) -> String {
+    let s = style.trim();
+    if s.is_empty() {
+        return system_prompt;
+    }
+    format!(
+        "{system_prompt}\n\n<style_guide>\nThe user selected this standing \
+         style/persona note. Apply it to the text you produce while still \
+         obeying every output rule above.\n{s}\n</style_guide>"
+    )
+}
+
 /// Whether "skip thinking" (Settings → AI) applies to this call. Drives
 /// two mechanisms at once, since neither alone is reliable across
 /// models/servers: `chat_template_kwargs.enable_thinking=false` on the
@@ -356,6 +373,7 @@ pub async fn dispatch_stream_completion<F>(
     before: &str,
     after: &str,
     direction: &str,
+    style: &str,
     stream_id: Option<u64>,
     on_text: F,
 ) -> Result<(), String>
@@ -367,7 +385,7 @@ where
         format!("<{mode}>{before}{{INSERT HERE}}{after}</{mode}>"),
         direction,
     );
-    let system_prompt = prompts::get(PromptKey::Completion);
+    let system_prompt = with_style(prompts::get(PromptKey::Completion), style);
     if provider == Provider::Anthropic {
         let req = MessagesRequest {
             model,
@@ -406,6 +424,7 @@ pub async fn dispatch_stream_rewrite<F>(
     selected: &str,
     after: &str,
     direction: &str,
+    style: &str,
     stream_id: Option<u64>,
     on_text: F,
 ) -> Result<(), String>
@@ -416,7 +435,7 @@ where
         format!("{before}<rewrite>{selected}</rewrite>{after}"),
         direction,
     );
-    let system_prompt = prompts::get(PromptKey::Rewrite);
+    let system_prompt = with_style(prompts::get(PromptKey::Rewrite), style);
     if provider == Provider::Anthropic {
         let req = MessagesRequest {
             model,

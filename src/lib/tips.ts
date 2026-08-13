@@ -282,16 +282,37 @@ export const TIPS: Tip[] = [
   {
     id: "ai-ghost",
     category: "ai",
-    headline: "Accept a ghost suggestion three different ways",
+    headline: "Accept a ghost suggestion from anywhere",
     story:
-      "After ⌘;, accept the ghost with Tab, Enter, or an arrow key. Esc declines. The cursor lands at the end of the inserted text.",
+      "After ⌘;, accept the ghost with Tab or an arrow key at the cursor — or ⌘Enter from anywhere in the note. Esc declines.",
   },
   {
     id: "ai-model-toggle",
     category: "ai",
-    headline: "Pick fast, smart, or most-literary Claude",
+    headline: "Pick my AI provider and model",
     story:
-      "Settings → AI switches between Haiku (fast/cheap), Sonnet (better at long context), and Opus (most literary attention). Same ⌘; trigger.",
+      "Settings → AI switches between Anthropic, OpenAI, Gemini, DeepSeek, Grok, or a local LM Studio server — each with its own key and model. Same ⌘; trigger everywhere.",
+  },
+  {
+    id: "ai-write-while-thinking",
+    category: "ai",
+    headline: "Keep writing while the AI thinks",
+    story:
+      "The pulsing dots after ⌘; don't freeze you — click anywhere and keep writing. The completion streams into the original spot behind you; ⌘Enter accepts it without moving your cursor.",
+  },
+  {
+    id: "ai-house-style",
+    category: "ai",
+    headline: "Teach the AI my house style",
+    story:
+      "Tag any note #prompt and it appears in a dropdown in the steer box (⌘⇧;) — pick it and its content rides along as a standing style guide for completions and rewrites. Keep a note per voice.",
+  },
+  {
+    id: "ai-local",
+    category: "ai",
+    headline: "Run malt's AI on my own hardware",
+    story:
+      "Settings → AI → LM Studio points every AI feature at a local server — localhost or a LAN/Tailscale box. No key, no cloud. \"Skip thinking\" asks reasoning models to answer directly.",
   },
   {
     id: "ai-suggest-wikilinks",

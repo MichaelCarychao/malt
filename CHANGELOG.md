@@ -4,6 +4,34 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.4.27 — 2026-08-13
+
+Give the AI a house style, and a model-list refresh across every
+provider.
+
+### New
+
+- **House styles from your own notes.** Tag any note `#prompt` and it
+  appears in a dropdown in the steer box (`Ctrl/⌘+Shift+;`). The
+  selected note's body rides along as a standing style guide —
+  injected into the system prompt after the feature prompt, so the
+  output contract stays primary — for both ghost completion and
+  rewrite. The selection persists across sessions; the note is read
+  fresh on every generation, so edits to a style note apply instantly.
+  Keep one note per voice: "Noir", "Spec register", "Punchy marketing".
+- **Tips for the recent features.** New tips cover
+  write-while-thinking, house styles, and the LM Studio provider; the
+  ghost-accept and model-picker tips caught up with current behavior.
+
+### Changed
+
+- **Model suggestions refreshed to the August 2026 lineups.**
+  Anthropic gains Sonnet 5, Opus 5, and Fable 5 (Haiku 4.5 stays the
+  cost-effective default); OpenAI moves to gpt-5.5 with the 5.4
+  mini/nano tiers; Gemini jumps to the 3.x series; Grok to 4.5/4.6;
+  the LM Studio qwen suggestion now names Qwen3.6. These are seeds and
+  quick-pick chips only — any typed model name still works.
+
 ## 0.4.26 — 2026-08-12
 
 Make "skip thinking" actually stick for newer Qwen models.

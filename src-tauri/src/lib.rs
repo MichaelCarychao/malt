@@ -978,6 +978,7 @@ async fn complete_text_streaming(
     before: String,
     after: String,
     direction: Option<String>,
+    style: Option<String>,
     stream_id: Option<u64>,
     on_chunk: tauri::ipc::Channel<String>,
 ) -> Result<(), String> {
@@ -989,13 +990,31 @@ async fn complete_text_streaming(
     let key = api_key_for_call(provider)?;
     let model = cfg.model_for(provider);
     let dir = direction.unwrap_or_default();
+    let style = style.unwrap_or_default();
     let result =
-        ai::dispatch_stream_completion(provider, &key, &model, &before, &after, &dir, stream_id, |text| {
+        ai::dispatch_stream_completion(provider, &key, &model, &before, &after, &dir, &style, stream_id, |text| {
             let _ = on_chunk.send(text.to_string());
         })
         .await;
     ai::clear_cancel(stream_id);
     result
+}
+
+/// Notes tagged #prompt, offered as selectable "house styles" in the
+/// steer popup. Served from the note cache — cheap enough to call on
+/// every popup open.
+#[tauri::command]
+async fn list_prompt_notes() -> Result<Vec<notes::NoteSummary>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let mut prompt_notes: Vec<notes::NoteSummary> = notes::list_notes()
+            .into_iter()
+            .filter(|n| n.tags.iter().any(|t| t == "prompt"))
+            .collect();
+        prompt_notes.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+        Ok(prompt_notes)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1004,6 +1023,7 @@ async fn rewrite_text_streaming(
     selected: String,
     after: String,
     direction: Option<String>,
+    style: Option<String>,
     stream_id: Option<u64>,
     on_chunk: tauri::ipc::Channel<String>,
 ) -> Result<(), String> {
@@ -1015,8 +1035,9 @@ async fn rewrite_text_streaming(
     let key = api_key_for_call(provider)?;
     let model = cfg.model_for(provider);
     let dir = direction.unwrap_or_default();
+    let style = style.unwrap_or_default();
     let result = ai::dispatch_stream_rewrite(
-        provider, &key, &model, &before, &selected, &after, &dir, stream_id,
+        provider, &key, &model, &before, &selected, &after, &dir, &style, stream_id,
         |text| {
             let _ = on_chunk.send(text.to_string());
         },
@@ -1721,6 +1742,7 @@ pub fn run() {
             tag_cooccurrence,
             complete_text_streaming,
             rewrite_text_streaming,
+            list_prompt_notes,
             brew_streaming,
             prompt_streaming,
             cancel_ai_stream,
