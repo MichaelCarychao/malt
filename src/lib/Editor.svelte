@@ -793,6 +793,28 @@
   // ---------------------------------------------------------------
 
   let review = $state<null | { phase: "streaming" | "reviewing" }>(null);
+  // Live feedback while the revision streams: a full-note re-emit on a
+  // local model can take a minute-plus, and a static bar makes "slow"
+  // and "stuck" indistinguishable. Chars climbing = model is writing;
+  // 0 chars = still thinking / prompt-processing; frozen non-zero for
+  // ~90s = the stream stalled (the backend idle-timeout will surface).
+  let reviewChars = $state(0);
+  let reviewSeconds = $state(0);
+  let reviewTimer: number | null = null;
+  function startReviewTimer() {
+    reviewChars = 0;
+    reviewSeconds = 0;
+    stopReviewTimer();
+    reviewTimer = window.setInterval(() => {
+      reviewSeconds += 1;
+    }, 1000) as unknown as number;
+  }
+  function stopReviewTimer() {
+    if (reviewTimer !== null) {
+      clearInterval(reviewTimer);
+      reviewTimer = null;
+    }
+  }
   // Non-reactive companions (only the phase drives markup):
   let reviewOriginalDoc = "";      // full doc incl. canonical tag line, as flushed
   let reviewRevisedVisible = "";   // sanitized model output (visible body only)
@@ -866,10 +888,12 @@
 
     const streamId = newStreamId();
     activeStreamId = streamId;
+    startReviewTimer();
     let buffer = "";
     const channel = new Channel<string>();
     channel.onmessage = (chunk: string) => {
       buffer += chunk;
+      reviewChars = buffer.length;
     };
     try {
       await invoke("implement_streaming", {
@@ -882,6 +906,7 @@
       unlockReview();
       throw e;
     } finally {
+      stopReviewTimer();
       if (activeStreamId === streamId) activeStreamId = null;
     }
     // Cancelled mid-stream (Esc / cancel button / navigation): the
@@ -931,6 +956,7 @@
 
   /** Shared unlock: clear decorations + read-only state. */
   function unlockReview() {
+    stopReviewTimer();
     review = null;
     if (view) {
       view.dispatch({
@@ -961,6 +987,7 @@
 
   function cancelReview() {
     if (!review || !view) return;
+    stopReviewTimer();
     if (review.phase === "streaming") cancelActiveStream();
     const v = view;
     review = null;
@@ -2927,7 +2954,14 @@
 {#if review}
   <div class="review-bar" role="status">
     {#if review.phase === "streaming"}
-      <span class="review-msg">revising<span class="review-dots">…</span></span>
+      <span class="review-msg">
+        revising<span class="review-dots">…</span>
+        {#if reviewChars > 0}
+          {reviewChars.toLocaleString()} chars · {reviewSeconds}s
+        {:else}
+          waiting for the model · {reviewSeconds}s
+        {/if}
+      </span>
       <button class="review-btn" onclick={cancelReview} tabindex="-1">cancel</button>
     {:else}
       <span class="review-msg">

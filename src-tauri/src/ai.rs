@@ -483,12 +483,18 @@ pub async fn dispatch_stream_implement<F>(
 where
     F: FnMut(&str),
 {
+    // Size the output budget to the note: the model re-emits the whole
+    // note plus edits, so ~2x its rough token count (chars/3) is
+    // generous. The floor keeps small notes from being starved; the
+    // ceiling keeps a runaway generation (a local model that never
+    // emits EOS) from grinding toward 16k tokens on a short note.
+    let limit = ((body.len() / 3) * 2 + 1024).clamp(1024, 8192) as u32;
     let user_msg = format!("<note>\n{body}\n</note>\n\n<instruction>\n{instruction}\n</instruction>");
     let system_prompt = prompts::get(PromptKey::Implement);
     if provider == Provider::Anthropic {
         let req = MessagesRequest {
             model,
-            max_tokens: 8192,
+            max_tokens: limit,
             system: Some(&system_prompt),
             stream: Some(true),
             messages: vec![Message {
@@ -506,7 +512,7 @@ where
         model,
         Some(&system_prompt),
         &user_msg,
-        Some(provider.token_limit(8192)),
+        Some(provider.token_limit(limit)),
         provider.token_param(),
         no_think_enabled(provider),
         stream_id,

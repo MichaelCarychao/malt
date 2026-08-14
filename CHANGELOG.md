@@ -4,6 +4,23 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.5.3 — 2026-08-14
+
+### New
+
+- **Live progress while a revision streams.** The "revising…" bar now
+  shows characters received and elapsed seconds, so a slow local model
+  re-emitting a long note no longer looks stuck. Climbing count =
+  working; stuck at "waiting for the model" = still prompt-processing
+  or thinking (a genuine stall errors out via the 90s idle timeout).
+
+### Changed
+
+- **Implement's output budget now scales with the note** (~2× its
+  size, floor 1024 / ceiling 8192 tokens) instead of a flat 8192 —
+  a runaway local generation that never emits an end-of-text can no
+  longer grind toward 16k tokens on a short note.
+
 ## 0.5.2 — 2026-08-14
 
 Implement actually works now — verified end to end against a live
