@@ -7,6 +7,7 @@
   import Linkbacks from "$lib/Linkbacks.svelte";
   import InlineUnlock from "$lib/InlineUnlock.svelte";
   import BrewPane from "$lib/BrewPane.svelte";
+  import { brewSessions, remapSession, dropSession, clearSessions } from "$lib/brewSessions";
   import { flushAllEditors } from "$lib/editorRegistry";
   import {
     type Tip,
@@ -112,6 +113,11 @@
   let brewActive = $state(false);
   let brewSourceTitle = $state("");
   let brewSourceBody = $state("");
+  // The note the brew pane is wed to. Invariant: while the pane is open
+  // this always equals the primary pane's note — brewing from the
+  // secondary promotes that note to primary first, and primary
+  // navigation drags the pane along (see the follow effect below).
+  let brewSourcePath = $state<string | null>(null);
   // Bumped on each EXPLICIT brew invocation (Cmd+Shift+B). BrewPane keys
   // its streaming effect on this nonce alone, so re-firing brew — even on
   // the same note — re-streams, while live body edits passed via
@@ -656,6 +662,10 @@
       vaultGen++;
       rawResults = [];
       allNotes = [];
+      // Brew sessions are per-note within a vault — close the pane and
+      // drop the cache so nothing dangles across the vault change.
+      closeSecondary();
+      clearSessions();
       await Promise.all([refreshAllNotes(), performSearch(query)]);
     }
     if (pane === "primary") {
@@ -1480,6 +1490,7 @@
       if (h.idx >= h.stack.length) h.idx = h.stack.length - 1;
     }
     if (secondaryPath === path) secondaryPath = null;
+    dropSession(path);
     // Pick next selection: next visible note in current list, else previous,
     // else null (auto-select-first will pick whatever survives after the
     // file watcher refreshes).
@@ -1696,8 +1707,24 @@
     brewActive = false;
     brewSourceTitle = "";
     brewSourceBody = "";
+    brewSourcePath = null;
     focusedPane = "primary";
   }
+
+  // The brew pane follows the primary document: navigating the primary
+  // pane while brew is open swaps the pane to the new note's cached
+  // session (or its "no brew yet" state). Sessions are never re-run by
+  // navigation — only Cmd+Shift+B on a session-less note, or re-run.
+  $effect(() => {
+    const p = selectedPath;
+    if (!brewActive || !p || p === brewSourcePath) return;
+    brewSourcePath = p;
+    brewSourceTitle = getTitleForPath(p);
+    // Body snapshot is only consumed by nonce-triggered runs; navigation
+    // never bumps the nonce, so a stale snapshot here is inert (re-runs
+    // fetch fresh content from disk).
+    brewSourceBody = "";
+  });
 
   // Cmd+Shift+B in the primary editor — open the brew pane and stream
   // a brainstorm from the current note body. Reuses the secondary
@@ -1725,31 +1752,37 @@
 
   function openBrewForPrimary(body: string) {
     if (blockAiForEncrypted(selectedPath)) return;
-    const title = selectedPath ? getTitleForPath(selectedPath) : "(untitled)";
+    if (!selectedPath) return;
     secondaryPath = null;
     secondaryHistory = { stack: [], idx: -1 };
-    brewSourceTitle = title;
+    brewSourcePath = selectedPath;
+    brewSourceTitle = getTitleForPath(selectedPath);
     brewSourceBody = body;
     brewActive = true;
-    // Explicit invocation — bump the nonce so BrewPane (re)streams even if
-    // it was already open on this same note body.
-    brewNonce++;
+    // Brew is wed to its note: a note with a cached session just
+    // reopens it — only a session-less note streams a fresh brew.
+    // Re-running an existing session is the pane's explicit re-run.
+    if (!brewSessions.get(selectedPath)?.hasRun) brewNonce++;
     focusedPane = "secondary";
   }
-  // Same as above but triggered from the secondary editor — brews on
-  // the secondary note's body. Output replaces the secondary's editor
-  // view; the primary stays put.
+  // Triggered from the secondary editor. The brew pane replaces the
+  // secondary slot and the implement/diff flow needs its source note
+  // visible, so promote that note to the primary pane first.
   function openBrewForSecondary(body: string) {
     if (blockAiForEncrypted(secondaryPath)) return;
-    const title = secondaryPath ? getTitleForPath(secondaryPath) : "(untitled)";
+    if (!secondaryPath) return;
+    const path = secondaryPath;
+    if (selectedPath !== path) {
+      pushToHistory("primary", path);
+      selectedPath = path;
+    }
     secondaryPath = null;
     secondaryHistory = { stack: [], idx: -1 };
-    brewSourceTitle = title;
+    brewSourcePath = path;
+    brewSourceTitle = getTitleForPath(path);
     brewSourceBody = body;
     brewActive = true;
-    // Explicit invocation — bump the nonce so BrewPane (re)streams even if
-    // it was already open on this same note body.
-    brewNonce++;
+    if (!brewSessions.get(path)?.hasRun) brewNonce++;
     focusedPane = "secondary";
   }
   // Append the streamed brew to the bottom of the source note. Writes
@@ -1765,8 +1798,11 @@
   // save_encrypted_note with the cached password, and if no password is
   // cached we abort (rather than corrupt the file) and tell the user.
   async function appendBrewToSource(brew: string): Promise<string | null> {
-    if (!selectedPath) return "No source note to append to.";
-    const path = selectedPath;
+    // Target the note the pane is wed to (== the primary note under the
+    // invariant, but explicit — fixes the old bug where a brew opened
+    // from the secondary pane appended to whatever primary showed).
+    const path = brewSourcePath ?? selectedPath;
+    if (!path) return "No source note to append to.";
     const encrypted = !!allNotes.find((n) => n.path === path)?.is_encrypted;
     const password = encrypted ? unlockedPasswords.get(path) : undefined;
     if (encrypted && !password) {
@@ -1793,6 +1829,33 @@
       console.error("appendBrewToSource failed", e);
       return `Couldn't append the brew: ${String(e)}`;
     }
+  }
+
+  // The primary editor's implement entry points, registered at mount
+  // (see Editor.onImplementReady). `run` streams a revision and shows
+  // the inline diff review; `cancel` aborts from the brew pane's side.
+  let primaryImplement: {
+    run: (path: string, instruction: string) => Promise<"accepted" | "cancelled" | "nochange">;
+    cancel: () => void;
+  } | null = null;
+
+  // Route a brew-item implement into the primary editor. The brew pane
+  // is wed to the primary note, so the target is (or is navigated back
+  // to be) the visible primary document.
+  async function implementBrewItem(
+    instruction: string,
+  ): Promise<"accepted" | "cancelled" | "nochange"> {
+    const path = brewSourcePath;
+    if (!path) throw "no source note for this brew";
+    const note = allNotes.find((n) => n.path === path);
+    if (!note) throw "the source note no longer exists";
+    if (note.is_encrypted) throw "the note is encrypted — AI is disabled";
+    if (!primaryImplement) throw "editor is not ready";
+    if (selectedPath !== path) {
+      pushToHistory("primary", path);
+      selectedPath = path;
+    }
+    return await primaryImplement.run(path, instruction);
   }
 
   // Save the brew as a brand-new note in the vault. Title is
@@ -1950,6 +2013,8 @@
       }
       if (selectedPath === oldPath) selectedPath = newPath;
       if (secondaryPath === oldPath) secondaryPath = newPath;
+      if (brewSourcePath === oldPath) brewSourcePath = newPath;
+      remapSession(oldPath, newPath);
       // Optimistic update so list reflects rename before the watcher fires.
       const stamp = Math.floor(Date.now() / 1000);
       const remap = (n: Note): Note =>
@@ -2610,6 +2675,10 @@
       secondaryHistory = { stack: [], idx: -1 };
       rawResults = [];
       allNotes = [];
+      // Brew sessions are per-note within a vault — close the pane and
+      // drop the cache so nothing dangles across the vault change.
+      closeSecondary();
+      clearSessions();
       // Drop every cached encrypted-note password — they belong to the
       // vault we're leaving. (Paths are unique so this isn't strictly a
       // correctness bug, but holding another vault's note passwords in
@@ -2690,6 +2759,10 @@
       secondaryHistory = { stack: [], idx: -1 };
       rawResults = [];
       allNotes = [];
+      // Brew sessions are per-note within a vault — close the pane and
+      // drop the cache so nothing dangles across the vault change.
+      closeSecondary();
+      clearSessions();
       vaultsState = await invoke<VaultsState>("add_vault", {
         name: addVaultName.trim(),
         path: addVaultPath.trim(),
@@ -2734,6 +2807,10 @@
       secondaryHistory = { stack: [], idx: -1 };
       rawResults = [];
       allNotes = [];
+      // Brew sessions are per-note within a vault — close the pane and
+      // drop the cache so nothing dangles across the vault change.
+      closeSecondary();
+      clearSessions();
       unlockedPasswords = new Map();
       vaultsState = await invoke<VaultsState>("remove_vault", { index });
       // Active vault may have changed — invalidate in-flight old refreshers.
@@ -3137,6 +3214,7 @@
               onBrew={openBrewForPrimary}
               getPrePrompt={() => getPrePromptFor("primary")}
               onEncryptedAiBlocked={blockAiForEncrypted}
+              onImplementReady={(fns) => (primaryImplement = fns)}
             />
             {#if isLocked(selectedPath)}
               <!-- Pane-scoped (never window-covering): the note list and
@@ -3189,12 +3267,16 @@
               {/if}
               {#if brewActive}
                 <BrewPane
+                  sourcePath={brewSourcePath ?? ""}
                   noteTitle={brewSourceTitle}
                   noteBody={brewSourceBody}
                   brewNonce={brewNonce}
+                  vaultPath={vaultsState.vaults[vaultsState.active_index]?.path ?? ""}
                   onClose={closeSecondary}
                   onAppendToSource={(brew) => appendBrewToSource(brew)}
                   onSaveAsNote={(args) => void saveBrewAsNote(args)}
+                  onImplement={implementBrewItem}
+                  onImplementCancel={() => primaryImplement?.cancel()}
                 />
               {:else}
                 <Editor

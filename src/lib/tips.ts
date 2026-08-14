@@ -331,9 +331,23 @@ export const TIPS: Tip[] = [
   {
     id: "ai-brew",
     category: "ai",
-    headline: "Brew a note into next-step questions",
+    headline: "Brew a note into actionable suggestions",
     story:
-      "⌘⇧B in the editor opens the secondary pane and streams a brainstorm: threads to pull, connections to make, sharper framings. Click \"append\" to fold it into the note.",
+      "⌘⇧B streams a brainstorm into the brew pane — every suggestion carries a concrete edit you can run. Each note keeps its own brew; re-open without re-running, re-run for fresh ideas.",
+  },
+  {
+    id: "ai-implement",
+    category: "ai",
+    headline: "Turn a brew suggestion into an edit",
+    story:
+      "Hit \"implement\" on any brew item and review the revision as an inline diff — struck text leaves, blue text arrives. Accept with ⌘⏎ or cancel with Esc. Click any item's text to reword it first.",
+  },
+  {
+    id: "ai-brew-checklist",
+    category: "ai",
+    headline: "Keep my own editing checklist",
+    story:
+      "The bottom of the brew pane takes your own standing instructions — \"remove passive verbs\", \"tighten the opening\" — implementable on any note, remembered per vault.",
   },
   {
     id: "ai-prompts",

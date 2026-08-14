@@ -454,7 +454,8 @@
     | "entities"
     | "completion"
     | "rewrite"
-    | "brew";
+    | "brew"
+    | "implement";
   type PromptInfo = {
     key: PromptKey;
     label: string;

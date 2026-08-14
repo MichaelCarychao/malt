@@ -1092,6 +1092,37 @@ async fn brew_streaming(
     result
 }
 
+/// Apply one brew-checklist instruction to a note body, streaming the
+/// full revised note back. The body is sent RAW — no tag stripping —
+/// because the model's output replaces the note verbatim; stripping
+/// would destroy [[wikilinks]] and #tags in the revision. The frontend
+/// diffs the result against the original and shows a review UI.
+#[tauri::command]
+async fn implement_streaming(
+    body: String,
+    instruction: String,
+    stream_id: Option<u64>,
+    on_chunk: tauri::ipc::Channel<String>,
+) -> Result<(), String> {
+    if body.trim().is_empty() {
+        return Err("nothing to revise — the note is empty.".into());
+    }
+    if instruction.trim().is_empty() {
+        return Err("the suggestion is empty.".into());
+    }
+    let cfg = config::load();
+    let provider = cfg.active_provider;
+    let key = api_key_for_call(provider)?;
+    let model = cfg.model_for(provider);
+    let result =
+        ai::dispatch_stream_implement(provider, &key, &model, &body, &instruction, stream_id, |text| {
+            let _ = on_chunk.send(text.to_string());
+        })
+        .await;
+    ai::clear_cancel(stream_id);
+    result
+}
+
 /// Two-pane prompting: stream a completion for a RAW prompt — the
 /// caller-concatenated editor contents — with no system prompt and no
 /// scaffolding. The frontend builds `prompt` as [other pane] + [focused
@@ -1744,6 +1775,7 @@ pub fn run() {
             rewrite_text_streaming,
             list_prompt_notes,
             brew_streaming,
+            implement_streaming,
             prompt_streaming,
             cancel_ai_stream,
             list_prompts,

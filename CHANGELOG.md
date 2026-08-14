@@ -4,6 +4,49 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.5.0 — 2026-08-13
+
+Brew grows up: from a read-only brainstorm into an editing cockpit.
+Suggestions you can run, an inline diff to review, and your own
+standing checklist.
+
+### New
+
+- **Implement any brew suggestion.** Every suggestion in the brew pane
+  now carries an **implement** button. Press it and the AI applies
+  that one instruction to your note — you review the result in the
+  editor as an inline diff: removed text struck through and dimmed,
+  added text in blue. Accept (`Ctrl/⌘+Enter`) applies and saves;
+  cancel (`Esc`) restores the original byte-for-byte. The editor is
+  locked while a revision streams and while you review, and the
+  in-between diff preview can never be saved to disk.
+- **Suggestions are proposals now, not just questions.** The brew
+  prompt was rewritten so each item pairs its provocation with a
+  concrete edit ("the ending trails off → replace the last paragraph
+  with a concrete image") — ready to run as-is, or click any item's
+  text to reword it first. Applied items check off and dim, and can be
+  re-run.
+- **Your own editing checklist.** The bottom of the brew pane takes
+  standing instructions of your own — "remove passive verbs", "rename
+  X to Y" — implementable on any note, editable and removable, and
+  remembered per vault across sessions.
+- **Brews are wed to their note.** Each note keeps its own brew
+  session: `Ctrl/⌘+Shift+B` on a brewed note reopens its suggestions
+  (with your edits and checkmarks) instead of re-running; re-run is
+  the explicit fresh-ideas action. Navigating while the pane is open
+  swaps it to the new note's session, and brewing from the secondary
+  pane brings that note into the primary first so the source is
+  always visible beside its brew.
+- **The pane looks like a mode now** — a warm, gold-tinted background
+  distinct from the editor, with suggestions rendered as a real
+  checklist instead of raw markdown.
+
+### Fixed
+
+- **Brew "append" targeted the wrong note** when brew had been opened
+  from the secondary pane. Appends now always land on the note the
+  brew belongs to.
+
 ## 0.4.27 — 2026-08-13
 
 Give the AI a house style, and a model-list refresh across every

@@ -1,101 +1,172 @@
 <script lang="ts">
-  // Brew pane: a read-only streaming markdown view that lives in the
-  // secondary pane while the user is brainstorming on a note.
+  // Brew pane: an editing cockpit that lives in the secondary pane.
   //
-  // The parent passes `noteTitle` (just for the header), `noteBody`
-  // (the source we send to Claude), and `onClose`. We open a streaming
-  // IPC channel to `brew_streaming`, accumulate the response into
-  // `output`, and render it as plain text — the brew prompt asks for
-  // markdown, so visual hierarchy comes through naturally even without
-  // a renderer (## headings, lists, italics-by-asterisks all stay
-  // readable in a monospace block).
+  // The streamed brew response is parsed into discrete suggestion items
+  // (the brew prompt mandates one "- " bullet per suggestion), each with
+  // an "implement" button that has the AI apply that one instruction to
+  // the source note — the parent routes it into the primary editor's
+  // inline diff review. Items are editable in place; applied items get
+  // checked off. Below the AI's suggestions sits the user's own
+  // checklist ("remove passive verbs"), persisted per vault.
   //
-  // The user can scroll. They can also append the whole brew to the
-  // source note via the "append to note" action.
+  // Sessions are per-note (see brewSessions.ts): the pane displays the
+  // session for `sourcePath` and follows it as the parent navigates.
 
   import { Channel, invoke } from "@tauri-apps/api/core";
-  import { onMount, onDestroy } from "svelte";
+  import { onDestroy } from "svelte";
+  import { sessionFor, type BrewItemState } from "./brewSessions";
+  import { flushAllEditors } from "./editorRegistry";
 
   let {
+    sourcePath = "",
     noteTitle = "",
     noteBody = "",
     brewNonce = 0,
+    vaultPath = "",
     onClose,
     onAppendToSource,
     onSaveAsNote,
+    onImplement,
+    onImplementCancel,
   }: {
+    /** Path of the note this pane is currently wed to (the primary
+     * editor's note). Switching it swaps the displayed session. */
+    sourcePath?: string;
     noteTitle?: string;
     noteBody?: string;
-    /** Bumped by the parent each time the user EXPLICITLY invokes brew
-     * (Cmd+Shift+B). Brewing keys on this nonce alone — never on noteBody
-     * — so live editor edits flowing in via noteBody don't fire a fresh
-     * (and costly) brew_streaming call on every keystroke. */
+    /** Bumped by the parent each time an EXPLICIT fresh brew is wanted
+     * (Cmd+Shift+B on a note with no cached session). Brewing keys on
+     * this nonce alone — never on noteBody — so live editor edits don't
+     * fire a brew_streaming call per keystroke. */
     brewNonce?: number;
+    /** Active vault path — keys the persisted personal checklist. */
+    vaultPath?: string;
     onClose?: () => void;
     /** Append the brew to the source note. Resolves to an error string to
      * show the user (e.g. the note is locked), or null on success. */
     onAppendToSource?: (brew: string) => void | Promise<string | null>;
-    /** Save the brew as a new note. The pane decides whether to add a
-     * back-link to the source (the user toggles the checkbox below).
-     * Parent handles `create_note` IPC + navigation to the new note. */
+    /** Save the brew as a new note (parent handles create + navigation). */
     onSaveAsNote?: (args: {
       brew: string;
       sourceTitle: string;
       linkBack: boolean;
     }) => void;
+    /** Run one suggestion against the source note; resolves with the
+     * review outcome ("accepted" checks the item off). */
+    onImplement?: (instruction: string) => Promise<"accepted" | "cancelled" | "nochange">;
+    /** Abort the in-flight implement / pending review from the pane. */
+    onImplementCancel?: () => void;
   } = $props();
 
+  // ── Displayed-session mirrors (reactive) ──────────────────────────
   let output = $state("");
   let busy = $state(false);
   let error = $state<string | null>(null);
+  let hasRun = $state(false);
+  let interrupted = $state(false);
+  let itemState = $state<Record<string, BrewItemState>>({});
   let scroller: HTMLDivElement | null = $state(null);
   let activeChannel: Channel<string> | null = null;
-  // Server-side cancellation: re-running or closing the pane stops the
-  // in-flight generation (and its billing), not just the UI updates.
   let activeStreamId: number | null = null;
+  // Which note the mirrors currently reflect (non-reactive tracker).
+  let currentSource = "";
+
   function cancelActiveStream() {
     if (activeStreamId !== null) {
       void invoke("cancel_ai_stream", { streamId: activeStreamId }).catch(() => {});
       activeStreamId = null;
     }
   }
-  // The brewNonce we last streamed for. Starts at -1 (no real nonce yet)
-  // so the first explicit trigger always runs.
-  let lastNonce = -1;
 
-  // "Save as note" inline form state.
-  let saveLinked = $state(true);
-  let saveFormOpen = $state(false);
+  // Swap the displayed session when the parent navigates the primary
+  // pane. A stream still running for the OLD note is cancelled and the
+  // old session marked interrupted — its partial output is kept.
+  $effect(() => {
+    const p = sourcePath;
+    if (p === currentSource) return;
+    if (activeChannel) {
+      cancelActiveStream();
+      if (currentSource) {
+        const old = sessionFor(currentSource);
+        old.interrupted = true;
+      }
+      activeChannel = null;
+    }
+    currentSource = p;
+    const s = sessionFor(p);
+    output = s.output;
+    error = s.error;
+    hasRun = s.hasRun;
+    interrupted = s.interrupted;
+    itemState = { ...s.itemState };
+    busy = false;
+  });
+
+  // The brewNonce we last streamed for. Starts at -1 (never synced).
+  // On the FIRST sync after mount, a note that already has a cached
+  // session just displays it — the stale global nonce must not re-run
+  // a brew the user only asked to reopen. The parent bumps the nonce
+  // only when a fresh run is wanted.
+  let lastNonce = -1;
+  $effect(() => {
+    const nonce = brewNonce;
+    if (nonce === lastNonce) return;
+    const firstSync = lastNonce === -1;
+    lastNonce = nonce;
+    if (firstSync && sessionFor(sourcePath || currentSource).hasRun) return;
+    // Snapshot the body now so later edits don't mutate the in-flight run.
+    const bodyAtTrigger = noteBody;
+    void runBrew(bodyAtTrigger);
+  });
 
   async function runBrew(body: string) {
+    const p = currentSource || sourcePath;
+    // Claim the display for this note (belt-and-braces vs effect order:
+    // the source-sync effect must not treat this run as a stale stream).
+    currentSource = p;
+    const sess = sessionFor(p);
     if (!body.trim()) {
-      output = "";
       error = "Nothing to brew — the note is empty.";
+      sess.error = error;
+      sess.hasRun = true;
+      hasRun = true;
+      return;
+    }
+    if (body.startsWith("MALT-ENC-v1:")) {
+      error = "This note is encrypted — AI is disabled until it's unlocked.";
+      sess.error = error;
       return;
     }
     cancelActiveStream();
+    sess.output = "";
+    sess.error = null;
+    sess.hasRun = true;
+    sess.interrupted = false;
+    sess.itemState = {}; // re-run resets AI item state; custom items live elsewhere
     output = "";
     error = null;
+    hasRun = true;
+    interrupted = false;
+    itemState = {};
     busy = true;
     const channel = new Channel<string>();
     activeChannel = channel;
     const streamId = Math.floor(Math.random() * 2 ** 48);
     activeStreamId = streamId;
     channel.onmessage = (chunk: string) => {
-      // Drop late chunks from a previous run if the user navigated away.
       if (activeChannel !== channel) return;
-      output += chunk;
-      // Auto-scroll to bottom while streaming so new content stays in view.
-      if (scroller) scroller.scrollTop = scroller.scrollHeight;
+      sess.output += chunk;
+      if (currentSource === p) {
+        output = sess.output;
+        if (scroller) scroller.scrollTop = scroller.scrollHeight;
+      }
     };
     try {
-      // Pass title alongside body — backend prepends it as a `# Title`
-      // heading so the model knows what the note is about even when
-      // the body is fragmentary.
       await invoke("brew_streaming", { title: noteTitle, body, streamId, onChunk: channel });
     } catch (e) {
-      if (activeChannel === channel) {
-        error = String(e);
+      sess.error = String(e);
+      if (activeChannel === channel && currentSource === p) {
+        error = sess.error;
       }
     } finally {
       if (activeStreamId === streamId) activeStreamId = null;
@@ -106,37 +177,169 @@
     }
   }
 
-  // Re-run only on an EXPLICIT trigger: the parent bumps `brewNonce` each
-  // time the user fires Cmd+Shift+B. We deliberately do NOT depend on
-  // noteBody — the parent may stream live editor content into it, and we
-  // must not kick off a brew_streaming call on every keystroke. The body
-  // is captured here (at trigger time) and frozen for this run.
-  $effect(() => {
-    const nonce = brewNonce;
-    if (nonce === lastNonce) return;
-    lastNonce = nonce;
-    // Snapshot the body now so later edits don't mutate the in-flight run.
-    const bodyAtTrigger = noteBody;
-    void runBrew(bodyAtTrigger);
-  });
+  /** Freshest body for re-runs / empty-state brews on a note the pane
+   * navigated to (the nonce path gets the live buffer via noteBody). */
+  async function fetchCurrentBody(): Promise<string> {
+    await flushAllEditors().catch(() => {});
+    return await invoke<string>("read_note", { path: currentSource });
+  }
+  function rerun() {
+    void fetchCurrentBody()
+      .then((b) => runBrew(b))
+      .catch((e) => (error = String(e)));
+  }
 
+  // ── Parsing the streamed markdown into sections + items ───────────
+  type ParsedItem = { id: string; text: string };
+  type ParsedSection = { title: string; intro: string[]; items: ParsedItem[] };
+  type Parsed = { preamble: string[]; sections: ParsedSection[] };
+
+  function parseBrew(text: string): Parsed {
+    const preamble: string[] = [];
+    const sections: ParsedSection[] = [];
+    let current: ParsedSection | null = null;
+    for (const raw of text.split("\n")) {
+      const line = raw.trim();
+      if (!line) continue;
+      if (line.startsWith("## ")) {
+        current = { title: line.slice(3).trim(), intro: [], items: [] };
+        sections.push(current);
+        continue;
+      }
+      const itemMatch = line.match(/^(?:[-*]|\d+\.)\s+(.*)$/);
+      if (itemMatch && current) {
+        current.items.push({
+          id: `ai-${sections.length - 1}-${current.items.length}`,
+          text: itemMatch[1],
+        });
+        continue;
+      }
+      (current ? current.intro : preamble).push(line);
+    }
+    return { preamble, sections };
+  }
+  const parsed = $derived(parseBrew(output));
+
+  function aiText(item: ParsedItem): string {
+    return itemState[item.id]?.text ?? item.text;
+  }
+  function persistAi() {
+    const sess = sessionFor(currentSource);
+    sess.itemState = JSON.parse(JSON.stringify(itemState));
+  }
+
+  // ── Personal checklist (persists per vault) ───────────────────────
+  type CustomItem = { id: string; text: string; done?: boolean };
+  let customItems = $state<CustomItem[]>([]);
+  let newItemText = $state("");
+  const storageKey = () => `malt.brewCustom.${vaultPath || "default"}`;
+  $effect(() => {
+    const k = storageKey();
+    try {
+      const raw = localStorage.getItem(k);
+      customItems = raw ? (JSON.parse(raw) as CustomItem[]) : [];
+    } catch {
+      customItems = [];
+    }
+  });
+  function persistCustom() {
+    try {
+      localStorage.setItem(storageKey(), JSON.stringify(customItems));
+    } catch {
+      /* quota/disabled — non-fatal */
+    }
+  }
+  function addCustomItem() {
+    const text = newItemText.trim();
+    if (!text) return;
+    customItems = [...customItems, { id: `custom-${Date.now()}`, text }];
+    newItemText = "";
+    persistCustom();
+  }
+  function removeCustomItem(id: string) {
+    customItems = customItems.filter((c) => c.id !== id);
+    persistCustom();
+  }
+
+  // ── Shared item interactions (AI + custom) ────────────────────────
+  let implementing = $state<string | null>(null);
+  let rowNote = $state<Record<string, string>>({});
+  let editingId = $state<string | null>(null);
+  let editText = $state("");
+
+  function textFor(id: string, kind: "ai" | "custom", fallback: string): string {
+    if (kind === "custom") return customItems.find((c) => c.id === id)?.text ?? fallback;
+    return itemState[id]?.text ?? fallback;
+  }
+  function isDone(id: string, kind: "ai" | "custom"): boolean {
+    if (kind === "custom") return !!customItems.find((c) => c.id === id)?.done;
+    return !!itemState[id]?.done;
+  }
+  function toggleDone(id: string, kind: "ai" | "custom") {
+    if (kind === "custom") {
+      customItems = customItems.map((c) => (c.id === id ? { ...c, done: !c.done } : c));
+      persistCustom();
+    } else {
+      itemState = { ...itemState, [id]: { ...itemState[id], done: !itemState[id]?.done } };
+      persistAi();
+    }
+  }
+  function startEdit(id: string, kind: "ai" | "custom", current: string) {
+    if (implementing === id) return;
+    editingId = id;
+    editText = textFor(id, kind, current);
+  }
+  function commitEdit(kind: "ai" | "custom") {
+    const id = editingId;
+    if (id === null) return;
+    editingId = null;
+    const text = editText.trim();
+    if (!text) return;
+    if (kind === "custom") {
+      customItems = customItems.map((c) => (c.id === id ? { ...c, text } : c));
+      persistCustom();
+    } else {
+      itemState = { ...itemState, [id]: { ...itemState[id], text } };
+      persistAi();
+    }
+  }
+  async function implementItem(id: string, kind: "ai" | "custom", fallback: string) {
+    if (!onImplement || implementing !== null) return;
+    const instruction = textFor(id, kind, fallback);
+    implementing = id;
+    const { [id]: _drop, ...rest } = rowNote;
+    rowNote = rest;
+    try {
+      const outcome = await onImplement(instruction);
+      if (outcome === "accepted" && !isDone(id, kind)) {
+        toggleDone(id, kind);
+      } else if (outcome === "nochange") {
+        rowNote = { ...rowNote, [id]: "no changes suggested" };
+      }
+    } catch (e) {
+      rowNote = { ...rowNote, [id]: String(e) };
+    } finally {
+      implementing = null;
+    }
+  }
+
+  /** Focus + select a just-mounted inline edit input. */
+  function focusOnMount(node: HTMLInputElement) {
+    node.focus();
+    node.select();
+  }
+
+  // ── Header actions (unchanged behaviors) ──────────────────────────
+  let saveLinked = $state(true);
+  let saveFormOpen = $state(false);
   function copyToClipboard() {
     if (!output.trim()) return;
-    void navigator.clipboard.writeText(output).catch(() => {
-      /* clipboard unavailable — ignore */
-    });
+    void navigator.clipboard.writeText(output).catch(() => {});
   }
   async function appendToSource() {
     if (!output.trim() || !onAppendToSource) return;
-    // The parent may refuse the append (e.g. the source note is locked and
-    // we'd otherwise overwrite its encrypted envelope with plaintext) and
-    // resolve to an error message. Surface it in the existing error slot
-    // instead of silently doing nothing.
     const err = await onAppendToSource(output);
     error = err ?? null;
-  }
-  function rerun() {
-    void runBrew(noteBody);
   }
   function commitSaveAsNote() {
     if (!output.trim() || !onSaveAsNote) return;
@@ -144,16 +347,61 @@
     saveFormOpen = false;
   }
 
-  onMount(() => {
-    // No-op; the $effect above kicks off the initial run.
-  });
   onDestroy(() => {
-    // Mark any in-flight stream as superseded so chunks stop applying
-    // to a destroyed component — and stop the upstream generation too.
+    // Stop the upstream generation; keep whatever streamed in the session.
+    if (activeChannel && currentSource) {
+      sessionFor(currentSource).interrupted = true;
+    }
     cancelActiveStream();
     activeChannel = null;
   });
 </script>
+
+{#snippet itemRow(id: string, fallback: string, kind: "ai" | "custom")}
+  <div class="brew-item" class:done={isDone(id, kind)}>
+    <button
+      class="brew-check"
+      onclick={() => toggleDone(id, kind)}
+      title={isDone(id, kind) ? "Mark as not done" : "Mark as done"}
+    >{isDone(id, kind) ? "✓" : "○"}</button>
+    {#if editingId === id}
+      <input
+        class="brew-item-edit"
+        use:focusOnMount
+        bind:value={editText}
+        onkeydown={(e) => {
+          if (e.key === "Enter") { e.preventDefault(); commitEdit(kind); }
+          else if (e.key === "Escape") { e.preventDefault(); editingId = null; }
+        }}
+        onblur={() => commitEdit(kind)}
+      />
+    {:else}
+      <button
+        class="brew-item-text"
+        onclick={() => startEdit(id, kind, fallback)}
+        title="Click to edit"
+      >{textFor(id, kind, fallback)}</button>
+    {/if}
+    {#if kind === "custom"}
+      <button class="brew-remove" onclick={() => removeCustomItem(id)} title="Remove from checklist">×</button>
+    {/if}
+    {#if implementing === id}
+      <button class="brew-btn implementing" onclick={() => onImplementCancel?.()} title="Cancel this revision">
+        cancel<span class="brew-dots">…</span>
+      </button>
+    {:else}
+      <button
+        class="brew-btn implement"
+        onclick={() => void implementItem(id, kind, fallback)}
+        disabled={busy || implementing !== null || !onImplement}
+        title={isDone(id, kind) ? "Run again" : "Have the AI apply this to the note — you review the diff"}
+      >implement</button>
+    {/if}
+  </div>
+  {#if rowNote[id]}
+    <div class="brew-row-note">{rowNote[id]}</div>
+  {/if}
+{/snippet}
 
 <div class="brew-pane">
   <div class="brew-header">
@@ -163,7 +411,7 @@
       {noteTitle || "(untitled)"}
     </span>
     <span class="brew-actions">
-      <button class="brew-btn" onclick={rerun} disabled={busy} title="Re-run on the current note body">re-run</button>
+      <button class="brew-btn" onclick={rerun} disabled={busy || implementing !== null} title="Re-run for fresh suggestions">re-run</button>
       <button class="brew-btn" onclick={copyToClipboard} disabled={!output} title="Copy the brew to clipboard">copy</button>
       <button class="brew-btn" onclick={appendToSource} disabled={!output} title="Append the brew to the bottom of the source note">append</button>
       <button
@@ -192,21 +440,65 @@
     {#if error}
       <div class="brew-error">{error}</div>
     {/if}
+    {#if interrupted && !busy}
+      <div class="brew-row-note">brew was interrupted — re-run for fresh suggestions</div>
+    {/if}
+    {#if !hasRun && !busy}
+      <div class="brew-empty-state">
+        <p>no brew yet for this note.</p>
+        <button class="brew-btn primary" onclick={rerun}>brew this note</button>
+      </div>
+    {/if}
     {#if !output && busy}
       <div class="brew-empty">brewing<span class="brew-dots">…</span></div>
     {/if}
-    {#if output}
-      <pre class="brew-output">{output}{#if busy}<span class="brew-cursor">▌</span>{/if}</pre>
+    {#each parsed.preamble as line, i (i)}
+      <p class="brew-intro">{line}</p>
+    {/each}
+    {#each parsed.sections as section, si (si)}
+      <h3 class="brew-section">{section.title}</h3>
+      {#each section.intro as line, i (i)}
+        <p class="brew-intro">{line}</p>
+      {/each}
+      {#each section.items as item (item.id)}
+        {@render itemRow(item.id, item.text, "ai")}
+      {/each}
+    {/each}
+    {#if busy && output}
+      <span class="brew-cursor">▌</span>
     {/if}
+    <div class="brew-custom-head">
+      <h3 class="brew-section custom">your checklist</h3>
+      <span class="brew-custom-hint">applies to any note · persists per vault</span>
+    </div>
+    {#if customItems.length === 0}
+      <p class="brew-intro dim">standing editing moves — “tighten passive voice”, “rename X to Y” — add one below.</p>
+    {/if}
+    {#each customItems as c (c.id)}
+      {@render itemRow(c.id, c.text, "custom")}
+    {/each}
+  </div>
+  <div class="brew-add-row">
+    <input
+      class="brew-add-input"
+      placeholder="add your own — e.g. remove passive verbs"
+      bind:value={newItemText}
+      onkeydown={(e) => {
+        if (e.key === "Enter") { e.preventDefault(); addCustomItem(); }
+      }}
+    />
+    <button class="brew-btn" onclick={addCustomItem} disabled={!newItemText.trim()}>add</button>
   </div>
 </div>
 
 <style>
+  /* Warm dark tint — unmistakably a different mode from the #1a1a1a
+     editor, in the gold family of the brew accent. */
   .brew-pane {
     display: flex;
     flex-direction: column;
     height: 100%;
-    background: #1a1a1a;
+    background: #1e1913;
     color: #e0e0e0;
     overflow: hidden;
   }
@@ -215,9 +507,9 @@
     align-items: center;
     gap: 8px;
     padding: 6px 12px 6px 0;
-    border-bottom: 1px solid #2a2a2a;
+    border-bottom: 1px solid #33291a;
     font-size: 12px;
-    background: #181818;
+    background: #241d12;
   }
   .brew-accent {
     width: 3px;
@@ -246,7 +538,7 @@
   }
   .brew-btn {
     background: transparent;
-    border: 1px solid #333;
+    border: 1px solid #3a3020;
     color: #aaa;
     font: inherit;
     font-size: 10px;
@@ -257,7 +549,7 @@
     border-radius: 2px;
   }
   .brew-btn:hover:not(:disabled) {
-    border-color: #555;
+    border-color: #6a5a38;
     color: #e0e0e0;
   }
   .brew-btn:disabled {
@@ -265,9 +557,7 @@
     cursor: not-allowed;
   }
   .brew-btn.close-btn {
-    /* Slightly demoted styling so "close" doesn't fight with re-run /
-       copy / append / save-as-note for attention. */
-    border-color: #2a2a2a;
+    border-color: #2c2418;
     margin-left: 4px;
   }
   .brew-btn.active {
@@ -280,13 +570,25 @@
     color: #e0e0e0;
     background: rgba(108, 198, 108, 0.08);
   }
+  .brew-btn.implement {
+    border-color: #4a6a88;
+    color: #9fc7ec;
+  }
+  .brew-btn.implement:hover:not(:disabled) {
+    border-color: #6cb6ff;
+    color: #6cb6ff;
+  }
+  .brew-btn.implementing {
+    border-color: #d6b06a;
+    color: #d6b06a;
+  }
   .brew-save-form {
     display: flex;
     align-items: center;
     gap: 12px;
     padding: 8px 12px;
-    border-bottom: 1px solid #2a2a2a;
-    background: #161616;
+    border-bottom: 1px solid #33291a;
+    background: #1a1610;
     font-size: 11px;
   }
   .brew-save-link {
@@ -312,13 +614,17 @@
   .brew-body {
     flex: 1;
     overflow-y: auto;
-    padding: 14px 18px;
+    padding: 12px 16px;
     min-height: 0;
   }
-  .brew-empty {
+  .brew-empty,
+  .brew-empty-state {
     color: #888;
     font-size: 12px;
     font-style: italic;
+  }
+  .brew-empty-state p {
+    margin: 0 0 8px;
   }
   .brew-dots {
     display: inline-block;
@@ -328,14 +634,135 @@
     0%, 100% { opacity: 0.3; }
     50% { opacity: 1; }
   }
-  .brew-output {
+  .brew-section {
+    margin: 14px 0 6px;
+    font-size: 11px;
+    font-weight: normal;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #d6b06a;
+  }
+  .brew-section:first-child {
+    margin-top: 0;
+  }
+  .brew-custom-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-top: 18px;
+    padding-top: 10px;
+    border-top: 1px dashed #33291a;
+  }
+  .brew-custom-head .brew-section {
     margin: 0;
-    font-family: "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
-    font-size: 13px;
-    line-height: 1.55;
-    white-space: pre-wrap;
-    word-wrap: break-word;
-    color: #cfcfcf;
+  }
+  .brew-custom-hint {
+    color: #6a5f4a;
+    font-size: 10px;
+  }
+  .brew-intro {
+    margin: 4px 0;
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: #b9b2a4;
+  }
+  .brew-intro.dim {
+    color: #6a5f4a;
+    font-style: italic;
+  }
+  .brew-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 3px 0;
+  }
+  .brew-item.done .brew-item-text {
+    opacity: 0.45;
+  }
+  .brew-check {
+    flex: 0 0 auto;
+    background: transparent;
+    border: none;
+    color: #d6b06a;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    padding: 1px 2px;
+    line-height: 1.5;
+  }
+  .brew-item-text {
+    flex: 1 1 auto;
+    background: transparent;
+    border: none;
+    color: #dcd5c6;
+    font: inherit;
+    font-size: 12.5px;
+    line-height: 1.5;
+    text-align: left;
+    cursor: text;
+    padding: 1px 2px;
+    border-radius: 2px;
+  }
+  .brew-item-text:hover {
+    background: rgba(214, 176, 106, 0.06);
+  }
+  .brew-item-edit {
+    flex: 1 1 auto;
+    background: #16120c;
+    border: 1px solid #6a5a38;
+    color: #e8e2d4;
+    font: inherit;
+    font-size: 12.5px;
+    padding: 1px 4px;
+    border-radius: 2px;
+  }
+  .brew-item-edit:focus {
+    outline: none;
+    border-color: #d6b06a;
+  }
+  .brew-remove {
+    flex: 0 0 auto;
+    background: transparent;
+    border: none;
+    color: #6a5f4a;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    padding: 1px 2px;
+  }
+  .brew-remove:hover {
+    color: #c97a7a;
+  }
+  .brew-row-note {
+    margin: 0 0 4px 24px;
+    font-size: 11px;
+    font-style: italic;
+    color: #8a7d5e;
+  }
+  .brew-add-row {
+    display: flex;
+    gap: 6px;
+    padding: 8px 12px;
+    border-top: 1px solid #33291a;
+    background: #1a1610;
+    flex: 0 0 auto;
+  }
+  .brew-add-input {
+    flex: 1 1 auto;
+    background: #16120c;
+    border: 1px solid #3a3020;
+    color: #e0e0e0;
+    font: inherit;
+    font-size: 12px;
+    padding: 4px 8px;
+    border-radius: 2px;
+  }
+  .brew-add-input:focus {
+    outline: none;
+    border-color: #d6b06a;
+  }
+  .brew-add-input::placeholder {
+    color: #6a5f4a;
   }
   .brew-cursor {
     color: #d6b06a;

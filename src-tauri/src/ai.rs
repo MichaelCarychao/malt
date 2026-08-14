@@ -466,6 +466,55 @@ where
     .await
 }
 
+/// Apply one brew-checklist instruction to a whole note. The model
+/// re-emits the entire revised note (the frontend diffs it against the
+/// original for review), so the token cap is generous. No `with_style`:
+/// a standing style guide mutating a full-note revision would produce
+/// unrequested changes all over the diff.
+pub async fn dispatch_stream_implement<F>(
+    provider: Provider,
+    api_key: &str,
+    model: &str,
+    body: &str,
+    instruction: &str,
+    stream_id: Option<u64>,
+    on_text: F,
+) -> Result<(), String>
+where
+    F: FnMut(&str),
+{
+    let user_msg = format!("<note>\n{body}\n</note>\n\n<instruction>\n{instruction}\n</instruction>");
+    let system_prompt = prompts::get(PromptKey::Implement);
+    if provider == Provider::Anthropic {
+        let req = MessagesRequest {
+            model,
+            max_tokens: 8192,
+            system: Some(&system_prompt),
+            stream: Some(true),
+            messages: vec![Message {
+                role: "user",
+                content: &user_msg,
+            }],
+        };
+        return stream_anthropic(api_key, req, stream_id, on_text).await;
+    }
+    let base_url = compat_base_url(provider)?;
+    let user_msg = format!("{user_msg}{}", no_think_suffix(provider));
+    openai_compat::stream(
+        &base_url,
+        api_key,
+        model,
+        Some(&system_prompt),
+        &user_msg,
+        Some(provider.token_limit(8192)),
+        provider.token_param(),
+        no_think_enabled(provider),
+        stream_id,
+        on_text,
+    )
+    .await
+}
+
 pub async fn dispatch_stream_brew<F>(
     provider: Provider,
     api_key: &str,

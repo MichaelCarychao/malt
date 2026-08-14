@@ -70,8 +70,11 @@
     relocateTagsToBottom,
     stripTagsForAI,
   } from "./tags";
+  import { diffWords } from "./wordDiff";
+  import { renderKeysForOS } from "./tips";
 
   type NoteRef = { path: string; title: string; is_empty?: boolean };
+  type ImplementOutcome = "accepted" | "cancelled" | "nochange";
 
   let {
     path,
@@ -94,6 +97,7 @@
     onBrew,
     getPrePrompt,
     onEncryptedAiBlocked,
+    onImplementReady,
   }: {
     path: string | null;
     query?: string;
@@ -145,6 +149,14 @@
      * brew) on an encrypted note. AI is disabled until the note is decrypted;
      * the parent offers to decrypt (M2). */
     onEncryptedAiBlocked?: (path: string) => void;
+    /** Registration callback for the brew "implement" flow (pattern like
+     * onFinderReady). `run` streams a revision of the note at `path`,
+     * shows the inline diff review, and resolves with the outcome;
+     * `cancel` aborts a pending implement/review from outside. */
+    onImplementReady?: (fns: {
+      run: (path: string, instruction: string) => Promise<ImplementOutcome>;
+      cancel: () => void;
+    }) => void;
   } = $props();
 
   // Right-click pill menu: floating div anchored at cursor.
@@ -275,7 +287,7 @@
   }
 
   async function openLinkSuggestions() {
-    if (!view || !currentPath) return;
+    if (!view || !currentPath || review) return;
     // FLUSH (not just cancel) the pending autosave first: the backend
     // scans the file ON DISK, so buffer and disk must agree or every
     // returned position is shifted by the unsaved edits. Running the tag
@@ -771,6 +783,203 @@
       }),
   });
 
+  // ---------------------------------------------------------------
+  // Implement review mode: brew "implement" streams a full revised
+  // note; the editor shows old-vs-new as an inline word diff
+  // (strikethrough deletions, blue additions) with accept/cancel.
+  // Mirrors the ghost system's shape. The diff is DISPLAY-ONLY:
+  // accept dispatches the pristine revised string, cancel the pristine
+  // original — segments never round-trip into saved text.
+  // ---------------------------------------------------------------
+
+  let review = $state<null | { phase: "streaming" | "reviewing" }>(null);
+  // Non-reactive companions (only the phase drives markup):
+  let reviewOriginalDoc = "";      // full doc incl. canonical tag line, as flushed
+  let reviewRevisedVisible = "";   // sanitized model output (visible body only)
+  let reviewTagSuffix = "";        // exact bytes from end of visible body to doc end
+  let reviewResolve: ((r: ImplementOutcome) => void) | null = null;
+  const readOnlyComp = new Compartment();
+
+  const setReviewDecos = StateEffect.define<DecorationSet | null>();
+  const reviewField = StateField.define<DecorationSet>({
+    create() {
+      return Decoration.none;
+    },
+    update(value, tr) {
+      for (const effect of tr.effects) {
+        if (effect.is(setReviewDecos)) return effect.value ?? Decoration.none;
+      }
+      return value.map(tr.changes);
+    },
+    provide: (f) => EditorView.decorations.from(f),
+  });
+  // Authoritative lock: while a review is active, drop every doc-changing
+  // transaction that isn't ours (vim ops and paste paths don't all check
+  // EditorState.readOnly; the compartment below is belt-and-braces).
+  const reviewLockFilter = EditorState.transactionFilter.of((tr) => {
+    if (!review) return tr;
+    if (tr.annotation(internalDocRewrite)) return tr;
+    if (tr.docChanged) return [];
+    return tr;
+  });
+
+  /** Stream a revision of the note at `path` per `instruction`, then
+   * show the inline diff review. Resolves when the user accepts or
+   * cancels; rejects on stream errors (the brew row shows them). */
+  async function implementInstruction(
+    path: string,
+    instruction: string,
+  ): Promise<ImplementOutcome> {
+    // The parent may have just navigated the pane here — wait briefly
+    // for loadPath to catch up before declaring a mismatch.
+    const deadline = Date.now() + 3000;
+    while ((currentPath !== path || !view) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    if (currentPath !== path || !view) throw "note is not open in this pane";
+    if (review) throw "a review is already in progress";
+    if (isEncrypted) throw "note is encrypted — AI is disabled";
+    const v = view;
+
+    // Clean slate: no ghost, tags canonicalized, disk === buffer, so the
+    // snapshot below is authoritative on every surface.
+    declineGhost(v);
+    relocateTags(true);
+    reviewOriginalDoc = v.state.doc.toString();
+    await flushSave(path, reviewOriginalDoc);
+
+    const r = canonicalTagLineRange(reviewOriginalDoc);
+    const visibleBody = (r ? reviewOriginalDoc.slice(0, r.from) : reviewOriginalDoc)
+      .replace(/\s+$/, "");
+    reviewTagSuffix = reviewOriginalDoc.slice(visibleBody.length);
+    if (!visibleBody.trim()) throw "the note is empty";
+
+    // Lock from click time: an edit made while the model streams would
+    // silently vanish on accept (stale diff base).
+    review = { phase: "streaming" };
+    v.dispatch({
+      effects: readOnlyComp.reconfigure([
+        EditorState.readOnly.of(true),
+        EditorView.editable.of(false),
+      ]),
+    });
+
+    const streamId = newStreamId();
+    activeStreamId = streamId;
+    let buffer = "";
+    const channel = new Channel<string>();
+    channel.onmessage = (chunk: string) => {
+      buffer += chunk;
+    };
+    try {
+      await invoke("implement_streaming", {
+        body: visibleBody,
+        instruction,
+        streamId,
+        onChunk: channel,
+      });
+    } catch (e) {
+      unlockReview();
+      throw e;
+    } finally {
+      if (activeStreamId === streamId) activeStreamId = null;
+    }
+    // Cancelled mid-stream (Esc / cancel button / navigation): the
+    // backend resolves Ok on cancellation, but review is already null.
+    if (!review) return "cancelled";
+
+    const revised = sanitizeCompletion(buffer.replace(/\r/g, "").trim());
+    if (revised === visibleBody || !revised) {
+      unlockReview();
+      return "nochange";
+    }
+
+    // Build the merged doc + decoration ranges in one pass.
+    const segs = diffWords(visibleBody, revised);
+    let merged = "";
+    const ranges: { from: number; to: number; cls: string }[] = [];
+    let firstChange = -1;
+    for (const seg of segs) {
+      if (seg.type !== "same") {
+        if (firstChange < 0) firstChange = merged.length;
+        ranges.push({
+          from: merged.length,
+          to: merged.length + seg.text.length,
+          cls: seg.type === "del" ? "cm-review-del" : "cm-review-add",
+        });
+      }
+      merged += seg.text;
+    }
+    const decos = Decoration.set(
+      ranges.map((r2) => Decoration.mark({ class: r2.cls }).range(r2.from, r2.to)),
+      true,
+    );
+    reviewRevisedVisible = revised;
+    v.dispatch({
+      changes: { from: 0, to: v.state.doc.length, insert: merged + reviewTagSuffix },
+      effects: setReviewDecos.of(decos),
+      annotations: internalDocRewrite.of(true),
+      selection: { anchor: Math.max(0, firstChange) },
+      scrollIntoView: true,
+    });
+    review = { phase: "reviewing" };
+    v.focus();
+    return new Promise<ImplementOutcome>((res) => {
+      reviewResolve = res;
+    });
+  }
+
+  /** Shared unlock: clear decorations + read-only state. */
+  function unlockReview() {
+    review = null;
+    if (view) {
+      view.dispatch({
+        effects: [setReviewDecos.of(null), readOnlyComp.reconfigure([])],
+      });
+    }
+  }
+
+  async function acceptReview() {
+    if (review?.phase !== "reviewing" || !view || !currentPath) return;
+    const final = reviewRevisedVisible + reviewTagSuffix;
+    const v = view;
+    review = null;
+    v.dispatch({
+      changes: { from: 0, to: v.state.doc.length, insert: final },
+      effects: [setReviewDecos.of(null), readOnlyComp.reconfigure([])],
+      annotations: internalDocRewrite.of(true),
+    });
+    try {
+      await flushSave(currentPath, final);
+    } catch (e) {
+      console.error("review save failed", e);
+    }
+    reviewResolve?.("accepted");
+    reviewResolve = null;
+    v.focus();
+  }
+
+  function cancelReview() {
+    if (!review || !view) return;
+    if (review.phase === "streaming") cancelActiveStream();
+    const v = view;
+    review = null;
+    const restore =
+      v.state.doc.toString() !== reviewOriginalDoc
+        ? { changes: { from: 0, to: v.state.doc.length, insert: reviewOriginalDoc } }
+        : {};
+    v.dispatch({
+      ...restore,
+      effects: [setReviewDecos.of(null), readOnlyComp.reconfigure([])],
+      annotations: internalDocRewrite.of(true),
+    });
+    // lastSavedContent still equals reviewOriginalDoc (flushed on entry),
+    // so no save fires and the buffer reads as clean.
+    reviewResolve?.("cancelled");
+    reviewResolve = null;
+    v.focus();
+  }
+
   async function fetchCompletion(v: EditorView, direction = "", style = "") {
     // AI is disabled on encrypted notes — block and let the parent offer to
     // decrypt (M2). Covers both completion and rewrite (this fn handles both).
@@ -778,6 +987,7 @@
       onEncryptedAiBlocked?.(currentPath ?? "");
       return;
     }
+    if (review) return; // no new generations while a diff is under review
     cancelActiveStream();
     const myGen = ++fetchGen;
     const streamId = newStreamId();
@@ -892,7 +1102,7 @@
   // as ghost text appended at the end of this note. No-ops when no second
   // note pane is open (getPrePrompt returns null).
   async function runTwoPanePrompt(v: EditorView) {
-    if (!getPrePrompt) return;
+    if (!getPrePrompt || review) return;
     if (isEncrypted) {
       onEncryptedAiBlocked?.(currentPath ?? "");
       return;
@@ -1215,13 +1425,32 @@
         // brew pane and streams the model's response into it.
         key: "Mod-Shift-b",
         run: (v) => {
-          if (!onBrew) return false;
+          if (!onBrew || review) return false;
           onBrew(v.state.doc.toString());
           return true;
         },
       },
-      { key: "Mod-Enter", run: (v) => acceptCompletion(v) },
-      { key: "Escape", run: (v) => declineGhost(v) },
+      // Review mode takes precedence over the ghost for both keys.
+      {
+        key: "Mod-Enter",
+        run: (v) => {
+          if (review?.phase === "reviewing") {
+            void acceptReview();
+            return true;
+          }
+          return acceptCompletion(v);
+        },
+      },
+      {
+        key: "Escape",
+        run: (v) => {
+          if (review) {
+            cancelReview();
+            return true;
+          }
+          return declineGhost(v);
+        },
+      },
       // Tab accepts only at the anchor — elsewhere it stays an ordinary
       // Tab so writing in another paragraph isn't hijacked by a pending
       // completion.
@@ -2166,7 +2395,10 @@
   // nulls `view` synchronously before this would run).
   function finalizeTagsOnBlur() {
     queueMicrotask(() => {
-      if (!view || !currentPath || externalConflict !== null) return;
+      // review !== null: the buffer holds the merged diff preview —
+      // saving it would write strikethrough soup to disk. (Blur fires
+      // the moment focus moves to the brew pane's accept/cancel UI.)
+      if (!view || !currentPath || externalConflict !== null || review !== null) return;
       // Blur normally ends composition, but if the IME is somehow still
       // composing, don't dispatch a doc-replacing relocate into it (would risk
       // dropping characters). Persist the current text as-is and let the
@@ -2198,7 +2430,8 @@
       }
       // A conflict is pending resolution — don't write either side until
       // the user chooses, or we'd silently clobber the on-disk version.
-      if (externalConflict !== null) {
+      // Same for an active diff review: the buffer is the merged preview.
+      if (externalConflict !== null || review !== null) {
         saveTimer = null;
         return;
       }
@@ -2220,6 +2453,10 @@
     // currentIsEncrypted/currentPassword only once this load wins, below).
     const encForThisLoad = isEncrypted;
     const pwForThisLoad = password;
+    // Navigating away mid-review: restore the original (and resolve the
+    // pending implement as cancelled) BEFORE the outgoing flush below —
+    // otherwise the merged diff preview would be written to disk.
+    if (review) cancelReview();
     if (saveTimer) {
       clearTimeout(saveTimer);
       saveTimer = null;
@@ -2343,6 +2580,9 @@
       EditorView.lineWrapping,
       vimComp.of(getVimEnabled() ? vim() : []),
       ghostField,
+      reviewField,
+      reviewLockFilter,
+      readOnlyComp.of([]),
       highlightField,
       // Prec.highest is the actual fix for wikilink coloring. CodeMirror
       // nests overlapping mark decorations: a HIGHER-precedence decoration
@@ -2397,7 +2637,7 @@
             );
           if (leftATag) {
             queueMicrotask(() => {
-              if (!view || !currentPath || externalConflict !== null) return;
+              if (!view || !currentPath || externalConflict !== null || review !== null) return;
               relocateTags(false);
               void flushSave(currentPath, view.state.doc.toString()).catch(() => {});
             });
@@ -2469,6 +2709,10 @@
 
   async function handleExternalChange() {
     if (!currentPath || !view) return;
+    // The note changed on disk under an active review — the diff base is
+    // invalid. Roll back first; the buffer then reads clean, so the
+    // normal fast-forward (or conflict) logic below applies.
+    if (review) cancelReview();
     // Burst events (sync storms) fire this repeatedly; tag each run so a
     // slower earlier read can't apply its result after a newer one.
     const myGen = ++externalChangeGen;
@@ -2559,6 +2803,15 @@
   let unregisterFlusher: (() => void) | null = null;
 
   onMount(async () => {
+    // Register the brew implement entry points with the parent. The run
+    // fn reads live view/currentPath at call time, so registering once
+    // at mount is safe across note switches.
+    onImplementReady?.({
+      run: implementInstruction,
+      cancel: () => {
+        if (review) cancelReview();
+      },
+    });
     window.addEventListener("malt:vim-changed", handleVimChange);
     window.addEventListener("malt:markdown-toggle-changed", handleMdToggle);
     // Use capture so the pill menu's Esc handling beats the parent's global
@@ -2574,6 +2827,9 @@
     // path-mutating op so we don't write stale content to a renamed file.
     unregisterFlusher = registerEditorFlusher(async () => {
       if (currentPath && view) {
+        // A pending diff review must be rolled back before any flush —
+        // the buffer holds the merged preview, not real note content.
+        if (review) cancelReview();
         if (saveTimer) {
           clearTimeout(saveTimer);
           saveTimer = null;
@@ -2595,7 +2851,12 @@
     window.removeEventListener("malt:note-deleted", handleNoteDeleted);
     unlistenNotes?.();
     unregisterFlusher?.();
-    if (saveTimer && currentPath && view) {
+    // Mid-review teardown: skip the flush entirely — the buffer holds the
+    // merged diff preview, and disk already holds the pre-review original
+    // (flushed when the review started).
+    if (review) {
+      cancelActiveStream();
+    } else if (saveTimer && currentPath && view) {
       flushSave(currentPath, view.state.doc.toString()).catch(() => {});
     }
     view?.destroy();
@@ -2647,6 +2908,23 @@
   </div>
 {/if}
 <div bind:this={container} class="editor"></div>
+
+{#if review}
+  <div class="review-bar" role="status">
+    {#if review.phase === "streaming"}
+      <span class="review-msg">revising<span class="review-dots">…</span></span>
+      <button class="review-btn" onclick={cancelReview} tabindex="-1">cancel</button>
+    {:else}
+      <span class="review-msg">
+        review the revision — <s>struck</s> is removed, <span class="review-add-sample">blue</span> is added
+      </span>
+      <button class="review-btn accept" onclick={() => void acceptReview()} tabindex="-1">
+        {renderKeysForOS("accept ⌘⏎")}
+      </button>
+      <button class="review-btn" onclick={cancelReview} tabindex="-1">cancel esc</button>
+    {/if}
+  </div>
+{/if}
 
 {#if steerOpen}
   <div class="steer-backdrop" role="presentation" onclick={cancelSteer}>
@@ -3306,6 +3584,58 @@
     background: #333;
     color: #fff;
   }
+  /* Implement-review bar: pinned under the editor while a brew revision
+     is streaming or awaiting accept/cancel. Blue = the "addition" accent
+     used by the diff itself. */
+  .review-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 10px;
+    background: #16222f;
+    border-top: 1px solid #2a4a66;
+    color: #9fc7ec;
+    font-size: 11px;
+    flex: 0 0 auto;
+  }
+  .review-msg {
+    flex: 1 1 auto;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .review-msg s {
+    color: #777;
+  }
+  .review-add-sample {
+    color: #6cb6ff;
+  }
+  .review-dots {
+    animation: ghost-pulse 1.2s ease-in-out infinite;
+  }
+  .review-btn {
+    flex: 0 0 auto;
+    background: #1c2936;
+    border: 1px solid #2a4a66;
+    color: #9fc7ec;
+    font: inherit;
+    font-size: 11px;
+    padding: 2px 8px;
+    cursor: pointer;
+    border-radius: 3px;
+  }
+  .review-btn:hover {
+    background: #24364a;
+    color: #fff;
+  }
+  .review-btn.accept {
+    border-color: #6cb6ff;
+    color: #6cb6ff;
+  }
+  .review-btn.accept:hover {
+    background: #1d3a54;
+    color: #fff;
+  }
   :global(.editor .cm-editor) {
     flex: 1 1 auto;
     min-height: 0;
@@ -3381,6 +3711,17 @@
     50% {
       opacity: 1;
     }
+  }
+  /* Implement-review diff marks. Deletions stay in the doc (struck +
+     dimmed) so the reader sees what leaves; additions wear the accent
+     blue. Both are mark decorations over the merged preview text. */
+  :global(.editor .cm-review-del) {
+    color: #6a6a6a;
+    text-decoration: line-through;
+    text-decoration-color: #555;
+  }
+  :global(.editor .cm-review-add) {
+    color: #6cb6ff;
   }
   :global(.editor .cm-ghost-error) {
     color: #e0885f;
