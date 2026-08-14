@@ -301,6 +301,7 @@
     model: string;
     requires_key: boolean;
     base_url: string | null;
+    saved_models: string[];
   };
   let providersList = $state<ProviderInfo[]>([]);
   let activeProviderId = $state<ProviderId>("anthropic");
@@ -420,6 +421,19 @@
   function pickSuggestedModel(id: ProviderId, model: string) {
     providerModelInputs = { ...providerModelInputs, [id]: model };
     void saveProviderModel(id);
+  }
+  /** Saved models minus the built-in suggestions (those already have
+   * chips of their own — no duplicates). */
+  function ownModels(p: ProviderInfo): string[] {
+    return p.saved_models.filter((m) => !p.suggested_models.includes(m));
+  }
+  async function removeSavedModel(id: ProviderId, model: string) {
+    try {
+      await invoke("remove_saved_model", { provider: id, model });
+      await loadProviders();
+    } catch (e) {
+      console.error("remove_saved_model failed", e);
+    }
   }
 
   // Security tab state — same lazy-load pattern as the rest.
@@ -1204,6 +1218,26 @@
                   >{m}</button>
                 {/each}
               </div>
+              {#if ownModels(p).length > 0}
+                <div class="provider-row provider-suggestions">
+                  <span class="provider-row-label">yours</span>
+                  {#each ownModels(p) as m (m)}
+                    <span class="model-chip" class:active={providerModelInputs[p.id] === m}>
+                      <button
+                        class="model-chip-name"
+                        onclick={() => pickSuggestedModel(p.id, m)}
+                        title="Switch to this model"
+                      >{m}</button>
+                      <button
+                        class="model-chip-x"
+                        onclick={() => void removeSavedModel(p.id, m)}
+                        title="Forget this model"
+                        aria-label={`Remove ${m} from saved models`}
+                      >×</button>
+                    </span>
+                  {/each}
+                </div>
+              {/if}
             </div>
           {/each}
         {/if}
@@ -2291,6 +2325,49 @@
   }
   .provider-suggestions {
     gap: 4px;
+    flex-wrap: wrap;
+  }
+  /* Quick-swap chips: every model the user has typed, one click to
+     switch, × to forget. */
+  .model-chip {
+    display: inline-flex;
+    align-items: stretch;
+    border: 1px solid #333;
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .model-chip.active {
+    border-color: #6cb6ff;
+  }
+  .model-chip-name {
+    background: transparent;
+    border: none;
+    color: #aaa;
+    font: inherit;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 2px 4px 2px 8px;
+    cursor: pointer;
+  }
+  .model-chip.active .model-chip-name {
+    color: #6cb6ff;
+  }
+  .model-chip-name:hover {
+    color: #e0e0e0;
+  }
+  .model-chip-x {
+    background: transparent;
+    border: none;
+    border-left: 1px solid #2a2a2a;
+    color: #666;
+    font: inherit;
+    font-size: 11px;
+    padding: 0 6px;
+    cursor: pointer;
+  }
+  .model-chip-x:hover {
+    color: #c97a7a;
   }
   .provider-test-result {
     color: #6c6;

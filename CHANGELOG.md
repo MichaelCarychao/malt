@@ -4,6 +4,34 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.5.2 — 2026-08-14
+
+Implement actually works now — verified end to end against a live
+server — plus a model quick-swap list for local models.
+
+### Fixed
+
+- **Implement no longer cancels itself (for real this time).** The
+  0.5.1 watcher fix was correct but incidental: the actual bug was a
+  reactivity loop — the editor's note-load effect tracked the review
+  state through a guard inside `loadPath`, so locking the editor
+  re-triggered the load, which cancelled the review it was reacting
+  to. `loadPath` is now called untracked. Verified end to end with an
+  automated pipeline test against a local streaming server: revision
+  streamed, diff rendered (with the cursor scrolled to the first
+  change), accept applied and saved the revision byte-for-byte.
+
+### New
+
+- **Model quick-swap list.** Every model name you type into a
+  provider's model field is remembered and shown as a clickable chip
+  under the field — switch between your local models in one click, ×
+  to forget one. Capped at 20 per provider; built-in suggestions
+  aren't duplicated.
+- **LM Studio leads the provider list.** Settings → AI now orders
+  providers local-first: LM Studio, then Anthropic, then the hosted
+  rest.
+
 ## 0.5.1 — 2026-08-13
 
 ### Fixed

@@ -45,6 +45,13 @@ pub struct Config {
     /// Empty/absent means "use `Provider::openai_base_url()`".
     #[serde(default)]
     pub provider_base_urls: HashMap<String, String>,
+    /// Per-provider model quick-swap lists, keyed by `provider.id()`.
+    /// Every model the user types into the model field is remembered
+    /// here (deduped, insertion-ordered, capped) and rendered as
+    /// clickable chips in Settings → AI so switching between local
+    /// models is one click. Removable per chip.
+    #[serde(default)]
+    pub saved_models: HashMap<String, Vec<String>>,
     /// When true, LM Studio calls append Qwen's `/no_think` soft switch
     /// to the prompt, asking hybrid reasoning models to answer directly.
     /// Best-effort: models without the switch (e.g. gpt-oss, whose
@@ -103,6 +110,7 @@ impl Default for Config {
             active_provider: default_provider(),
             provider_models: HashMap::new(),
             provider_base_urls: HashMap::new(),
+            saved_models: HashMap::new(),
             lmstudio_no_think: false,
             daily_note_tag: true,
             tag_styles: Vec::new(),

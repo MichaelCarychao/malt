@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy, tick } from "svelte";
+  import { onMount, onDestroy, tick, untrack } from "svelte";
   import { invoke, Channel } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import {
@@ -2782,12 +2782,19 @@
   }
 
   $effect(() => {
-    // Re-load whenever either the path OR the password changes. The
-    // password change case happens after the user unlocks an encrypted
-    // note: parent flips `password` from null to the actual string,
-    // and we need to re-decrypt and rebuild the view.
+    // Re-load whenever either the path OR the password changes — and
+    // ONLY those. loadPath is called untracked: its body reads reactive
+    // state (notably `review` for the cancel-before-flush guard), and a
+    // tracked call would make those reads dependencies of this effect —
+    // setting `review` would then re-run loadPath, which cancels the
+    // review it was reacting to. (This exact loop shipped in 0.5.1:
+    // every implement self-cancelled the moment it locked the editor.)
+    // The password change case happens after the user unlocks an
+    // encrypted note: parent flips `password` from null to the actual
+    // string, and we need to re-decrypt and rebuild the view.
     const _ = password;
-    void loadPath(path);
+    const p = path;
+    untrack(() => void loadPath(p));
   });
 
   // Push query changes into the open editor so highlights update live.

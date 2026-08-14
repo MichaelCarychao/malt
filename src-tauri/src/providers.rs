@@ -32,13 +32,15 @@ pub enum Provider {
     LmStudio,
 }
 
+// Settings list order. Local-first: LM Studio leads (the most-used
+// provider for this workflow), then Anthropic, then the hosted rest.
 pub const ALL: &[Provider] = &[
+    Provider::LmStudio,
     Provider::Anthropic,
     Provider::Openai,
     Provider::Gemini,
     Provider::Deepseek,
     Provider::Grok,
-    Provider::LmStudio,
 ];
 
 impl Provider {

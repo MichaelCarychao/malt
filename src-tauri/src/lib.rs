@@ -853,10 +853,33 @@ fn set_active_provider(provider: providers::Provider) -> Result<(), String> {
 fn set_provider_model(provider: providers::Provider, model: String) -> Result<(), String> {
     let mut cfg = config::load();
     cfg.provider_models.insert(provider.id().to_string(), model.clone());
+    // Remember every model the user picks in the quick-swap list —
+    // typed once, one click forever after. Deduped, insertion-ordered,
+    // capped so an experimentation spree can't grow it unboundedly.
+    let saved = cfg.saved_models.entry(provider.id().to_string()).or_default();
+    if !saved.iter().any(|m| m == &model) {
+        saved.push(model.clone());
+        const MAX_SAVED_MODELS: usize = 20;
+        if saved.len() > MAX_SAVED_MODELS {
+            saved.remove(0);
+        }
+    }
     // Mirror onto completion_model for legacy code paths when the
     // active provider is Anthropic; harmless otherwise.
     if cfg.active_provider == provider && provider == providers::Provider::Anthropic {
         cfg.completion_model = model;
+    }
+    config::save(&cfg).map_err(|e| e.to_string())
+}
+
+/// Drop a model from a provider's quick-swap list. The provider's
+/// CURRENT model is untouched — removing the active chip just forgets
+/// the shortcut.
+#[tauri::command]
+fn remove_saved_model(provider: providers::Provider, model: String) -> Result<(), String> {
+    let mut cfg = config::load_for_update()?;
+    if let Some(saved) = cfg.saved_models.get_mut(provider.id()) {
+        saved.retain(|m| m != &model);
     }
     config::save(&cfg).map_err(|e| e.to_string())
 }
@@ -904,6 +927,8 @@ struct ProviderInfo {
     requires_key: bool,
     /// Effective compat endpoint (override or default); None for Anthropic.
     base_url: Option<String>,
+    /// The user's quick-swap model list (typed models, remembered).
+    saved_models: Vec<String>,
 }
 
 #[tauri::command]
@@ -921,6 +946,7 @@ fn list_providers() -> Vec<ProviderInfo> {
             model: cfg.model_for(p),
             requires_key: p.requires_key(),
             base_url: cfg.base_url_for(p),
+            saved_models: cfg.saved_models.get(p.id()).cloned().unwrap_or_default(),
         })
         .collect()
 }
@@ -1740,6 +1766,7 @@ pub fn run() {
             set_provider_model,
             set_provider_base_url,
             set_lmstudio_no_think,
+            remove_saved_model,
             list_providers,
             get_config,
             set_tagging_enabled,
