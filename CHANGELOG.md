@@ -4,6 +4,17 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.5.1 — 2026-08-13
+
+### Fixed
+
+- **Implement no longer cancels itself instantly.** The implement flow
+  saves the note before locking the editor, and malt's own file
+  watcher echoed that save back as an "external change" — which the
+  review guard treated as a reason to abort. The guard now recognizes
+  malt's own save echoes and only cancels a review when the file
+  genuinely changed under it (a sync or another app).
+
 ## 0.5.0 — 2026-08-13
 
 Brew grows up: from a read-only brainstorm into an editing cockpit.

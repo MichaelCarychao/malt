@@ -2709,10 +2709,12 @@
 
   async function handleExternalChange() {
     if (!currentPath || !view) return;
-    // The note changed on disk under an active review — the diff base is
-    // invalid. Roll back first; the buffer then reads clean, so the
-    // normal fast-forward (or conflict) logic below applies.
-    if (review) cancelReview();
+    // NOTE: a pending diff review must NOT be cancelled here — not yet.
+    // The implement flow flushes the note to disk right before locking,
+    // and the watcher echoes that very save back into this handler; an
+    // unconditional cancel killed every review milliseconds after it
+    // started. The own-save echo check below (fresh === lastSavedContent)
+    // filters those; only a genuinely external change cancels the review.
     // Burst events (sync storms) fire this repeatedly; tag each run so a
     // slower earlier read can't apply its result after a newer one.
     const myGen = ++externalChangeGen;
@@ -2746,8 +2748,14 @@
     if (myGen !== externalChangeGen) return;
     if (!view || currentPath !== pathAtStart) return;
     // Disk already matches what we last wrote — nothing external happened
-    // (this is also how our own autosave echoes back via the watcher).
+    // (this is also how our own autosave echoes back via the watcher,
+    // including the flush the implement flow performs before locking).
     if (fresh === lastSavedContent) return;
+    // Past this point the disk holds content we did NOT write: a real
+    // external change. A pending review's diff base is now invalid —
+    // roll it back BEFORE the buffer comparisons (the buffer holds the
+    // merged preview until cancelReview restores the original).
+    if (review) cancelReview();
     const current = view.state.doc.toString();
     // Buffer already equals disk — just resync our marker + clear any
     // stale conflict.
