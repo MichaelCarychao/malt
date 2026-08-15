@@ -355,16 +355,40 @@
       implementing = null;
     }
   }
-  function startEdit(id: string, kind: "ai" | "custom", current: string) {
+  // Caret position for entering edit mode: mapped from the click point
+  // so the caret lands where the user aimed, not at a select-all.
+  let editCaret = 0;
+  function startEdit(e: MouseEvent, id: string, kind: "ai" | "custom", current: string) {
     if (implementing === id) return;
+    const text = textFor(id, kind, current);
+    // Map the click coordinates to a character offset in the button's
+    // text node BEFORE swapping to the textarea (identical layout, so
+    // the offset carries over). Chromium's caretRangeFromPoint covers
+    // WebView2/WKWebView; caretPositionFromPoint is the standard form.
+    let caret = text.length;
+    const doc = document as Document & {
+      caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+    };
+    const cp = doc.caretPositionFromPoint?.(e.clientX, e.clientY);
+    if (cp && cp.offsetNode.nodeType === Node.TEXT_NODE) {
+      caret = Math.min(cp.offset, text.length);
+    } else {
+      const range = document.caretRangeFromPoint?.(e.clientX, e.clientY);
+      if (range && range.startContainer.nodeType === Node.TEXT_NODE) {
+        caret = Math.min(range.startOffset, text.length);
+      }
+    }
+    editCaret = caret;
     editingId = id;
-    editText = textFor(id, kind, current);
+    editText = text;
   }
   function commitEdit(kind: "ai" | "custom") {
     const id = editingId;
     if (id === null) return;
     editingId = null;
-    const text = editText.trim();
+    // Items are one-line instructions by contract — collapse any
+    // newline that snuck in (paste) to a space.
+    const text = editText.replace(/\s*\n\s*/g, " ").trim();
     if (!text) return;
     if (kind === "custom") {
       customItems = customItems.map((c) => (c.id === id ? { ...c, text } : c));
@@ -396,10 +420,21 @@
     }
   }
 
-  /** Focus + select a just-mounted inline edit input. */
-  function focusOnMount(node: HTMLInputElement) {
+  /** Wire a just-mounted inline edit textarea: auto-size to content
+   * (keeps the row's exact wrapped layout), focus, and place the caret
+   * where the user clicked. */
+  function editArea(node: HTMLTextAreaElement) {
+    const resize = () => {
+      node.style.height = "0";
+      node.style.height = `${node.scrollHeight}px`;
+    };
+    resize();
     node.focus();
-    node.select();
+    node.setSelectionRange(editCaret, editCaret);
+    node.addEventListener("input", resize);
+    return {
+      destroy: () => node.removeEventListener("input", resize),
+    };
   }
 
   // ── Header actions (unchanged behaviors) ──────────────────────────
@@ -436,28 +471,24 @@
     <button
       class="brew-check"
       onclick={() => toggleCheck(id, kind)}
-      title={isDone(id, kind)
-        ? "Done — click to reset"
-        : selected[id]
-          ? "Uncheck"
-          : "Check for batch implement"}
+      aria-label={isDone(id, kind) ? "Done — click to reset" : "Check for batch implement"}
     >{isDone(id, kind) ? "✓" : selected[id] ? "☑" : "○"}</button>
     {#if editingId === id}
-      <input
+      <textarea
         class="brew-item-edit"
-        use:focusOnMount
+        rows="1"
+        use:editArea
         bind:value={editText}
         onkeydown={(e) => {
           if (e.key === "Enter") { e.preventDefault(); commitEdit(kind); }
           else if (e.key === "Escape") { e.preventDefault(); editingId = null; }
         }}
         onblur={() => commitEdit(kind)}
-      />
+      ></textarea>
     {:else}
       <button
         class="brew-item-text"
-        onclick={() => startEdit(id, kind, fallback)}
-        title="Click to edit"
+        onclick={(e) => startEdit(e, id, kind, fallback)}
       >{textFor(id, kind, fallback)}</button>
     {/if}
     {#if kind === "custom"}
@@ -786,8 +817,16 @@
     font: inherit;
     font-size: 12px;
     cursor: pointer;
-    padding: 1px 2px;
+    padding: 1px 5px;
     line-height: 1.5;
+    border-radius: 50%;
+    transition: background 80ms ease, color 80ms ease;
+  }
+  /* Clickability cue instead of a tooltip (tooltips overlaid the very
+     text being read): a soft gold ring + brighter glyph on hover. */
+  .brew-check:hover {
+    background: rgba(214, 176, 106, 0.16);
+    color: #f0d9a8;
   }
   .brew-item-text {
     flex: 1 1 auto;
@@ -805,19 +844,31 @@
   .brew-item-text:hover {
     background: rgba(214, 176, 106, 0.06);
   }
+  /* In-place edit: a textarea with the IDENTICAL footprint of the text
+     it replaces — same font, size, line-height, padding, wrapping — so
+     entering edit mode doesn't reflow a wrapped row into one line. The
+     edit state announces itself via box-shadow (no border: a border
+     would shift the layout by a pixel). Height is auto-sized by the
+     editArea action. */
   .brew-item-edit {
     flex: 1 1 auto;
-    background: #16120c;
-    border: 1px solid #6a5a38;
+    background: rgba(214, 176, 106, 0.05);
+    border: none;
+    box-shadow: 0 0 0 1px #6a5a38;
     color: #e8e2d4;
     font: inherit;
     font-size: 12.5px;
-    padding: 1px 4px;
+    line-height: 1.5;
+    padding: 1px 2px;
     border-radius: 2px;
+    resize: none;
+    overflow: hidden;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
   }
   .brew-item-edit:focus {
     outline: none;
-    border-color: #d6b06a;
+    box-shadow: 0 0 0 1px #d6b06a;
   }
   .brew-remove {
     flex: 0 0 auto;

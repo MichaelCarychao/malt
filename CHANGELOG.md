@@ -4,6 +4,21 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.5.6 — 2026-08-14
+
+Brew pane feel: quieter affordances, true in-place editing.
+
+### Changed
+
+- **No more tooltips over the checklist.** The check glyphs (and item
+  text) dropped their hover tooltips — they overlaid the very text you
+  were reading. The glyph now signals clickability with a soft gold
+  ring on hover instead.
+- **Editing keeps the row's exact layout.** Clicking a suggestion's
+  text no longer collapses it into a single-line input — the row stays
+  in place with identical wrapping and spacing, and the caret lands at
+  the spot you clicked. Enter commits, Esc reverts, as before.
+
 ## 0.5.5 — 2026-08-14
 
 ### New
