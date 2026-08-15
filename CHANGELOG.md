@@ -4,6 +4,25 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.5.7 — 2026-08-14
+
+No more silently cut-off brews.
+
+### Changed
+
+- **Brew's output ceiling raised 1k → 8k tokens** (≈16k total for LM
+  Studio with reasoning headroom) — a customized brew prompt that runs
+  long no longer gets chopped mid-list.
+- **Truncation is now an error, not a mystery.** When the server stops
+  at a token limit (`finish_reason: "length"` — typically the model's
+  loaded context length in LM Studio being too small for a long note),
+  malt says exactly that, with the fix, instead of presenting a
+  cut-off result as complete. For implement this also protects your
+  note: a truncated revision can never reach the accept stage, where
+  its missing tail would have read as a deletion.
+- The LM Studio provider note now recommends loading models with a
+  16k+ context length.
+
 ## 0.5.6 — 2026-08-14
 
 Brew pane feel: quieter affordances, true in-place editing.

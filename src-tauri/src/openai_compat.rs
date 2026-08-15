@@ -360,6 +360,8 @@ struct ChatCompletionResponse {
 #[derive(Deserialize)]
 struct NonStreamChoice {
     message: NonStreamMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 #[derive(Deserialize)]
 struct NonStreamMessage {
@@ -377,6 +379,8 @@ struct StreamChunk {
 struct StreamChoice {
     #[serde(default)]
     delta: Option<StreamDelta>,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 #[derive(Deserialize)]
 struct StreamDelta {
@@ -465,6 +469,13 @@ pub async fn send(
     }
     let parsed: ChatCompletionResponse =
         serde_json::from_str(&body).map_err(|e| format!("parse error: {e}: {body}"))?;
+    if parsed
+        .choices
+        .iter()
+        .any(|c| c.finish_reason.as_deref() == Some("length"))
+    {
+        return Err(TRUNCATED_MSG.to_string());
+    }
     Ok(strip_think(
         &parsed
             .choices
@@ -541,6 +552,9 @@ where
     // typically a reasoning model that spent the whole token budget
     // thinking. Cancelled streams are exempt — ending early is the point.
     let mut emitted = false;
+    // Token-limit truncation (finish_reason "length") is surfaced as an
+    // error rather than a silently-short result.
+    let mut hit_length = false;
     loop {
         if crate::ai::is_cancelled(stream_id) {
             return Ok(());
@@ -581,6 +595,9 @@ where
                         emitted = true;
                         on_text(&tail);
                     }
+                    if hit_length {
+                        return Err(TRUNCATED_MSG.to_string());
+                    }
                     if !emitted {
                         return Err(EMPTY_STREAM_MSG.to_string());
                     }
@@ -595,6 +612,9 @@ where
                     continue;
                 };
                 for choice in parsed.choices {
+                    if choice.finish_reason.as_deref() == Some("length") {
+                        hit_length = true;
+                    }
                     if let Some(delta) = choice.delta {
                         if let Some(text) = delta.content {
                             let visible = think.push(&text);
@@ -609,6 +629,9 @@ where
         }
     }
 
+    if hit_length {
+        return Err(TRUNCATED_MSG.to_string());
+    }
     if !emitted {
         return Err(EMPTY_STREAM_MSG.to_string());
     }
@@ -619,3 +642,13 @@ const EMPTY_STREAM_MSG: &str = "the model finished without producing any visible
      a reasoning model likely spent its whole token budget thinking. \
      Try 'skip thinking' in Settings → AI, or raise the model's context \
      length in LM Studio.";
+
+/// The server stopped generation at a token limit (`finish_reason:
+/// "length"`) — the output is cut off mid-thought. Surfaced as an error
+/// so a truncated result is never silently treated as complete (for
+/// implement, accepting a truncated full-note revision would delete the
+/// note's tail).
+const TRUNCATED_MSG: &str = "the model hit a token limit mid-response, so the output is cut \
+     off. On LM Studio, raise the model's context length (My Models → \
+     gear icon → Context Length) — a long note plus its revision must \
+     fit inside it.";

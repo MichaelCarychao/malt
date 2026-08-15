@@ -536,7 +536,10 @@ where
     if provider == Provider::Anthropic {
         let req = MessagesRequest {
             model,
-            max_tokens: 1024,
+            // Generous: the brew prompt asks for ~400 words, but a
+            // customized prompt (Settings → Prompts) can run long, and
+            // a hard cut mid-list is worse than an unused ceiling.
+            max_tokens: 8192,
             system: Some(&system_prompt),
             stream: Some(true),
             messages: vec![Message {
@@ -554,7 +557,7 @@ where
         model,
         Some(&system_prompt),
         &body,
-        Some(provider.token_limit(1024)),
+        Some(provider.token_limit(8192)),
         provider.token_param(),
         no_think_enabled(provider),
         stream_id,

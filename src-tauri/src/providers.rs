@@ -182,7 +182,7 @@ impl Provider {
             Provider::Deepseek => "OpenAI-compatible. 1M context on v4-pro. Off-peak pricing.",
             Provider::Grok => "OpenAI-compatible. Older grok-* aliases redirect to the newest 4.x.",
             Provider::Gemini => "OpenAI-compat subset — safety filters can null-out responses.",
-            Provider::LmStudio => "Local server, no key needed. Endpoint takes a LAN/Tailscale host; model must match an ID loaded in LM Studio.",
+            Provider::LmStudio => "Local server, no key needed. Endpoint takes a LAN/Tailscale host; model must match an ID loaded in LM Studio. Load the model with a 16k+ context length — long notes plus their revisions must fit.",
         }
     }
 }
