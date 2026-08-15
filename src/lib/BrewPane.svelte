@@ -100,6 +100,8 @@
     interrupted = s.interrupted;
     itemState = { ...s.itemState };
     busy = false;
+    selected = {};
+    batchNote = null;
   });
 
   // The brewNonce we last streamed for. Starts at -1 (never synced).
@@ -148,6 +150,8 @@
     hasRun = true;
     interrupted = false;
     itemState = {};
+    selected = {};
+    batchNote = null;
     busy = true;
     const channel = new Channel<string>();
     activeChannel = channel;
@@ -266,6 +270,13 @@
   let rowNote = $state<Record<string, string>>({});
   let editingId = $state<string | null>(null);
   let editText = $state("");
+  // Batch selection: check any number of items, then "implement
+  // checked" runs them as ONE combined revision pass — the model
+  // re-emits the whole note either way, so N instructions in one pass
+  // cost the same as one. View-local (not persisted).
+  let selected = $state<Record<string, boolean>>({});
+  let batchNote = $state<string | null>(null);
+  const selectedCount = $derived(Object.values(selected).filter(Boolean).length);
 
   function textFor(id: string, kind: "ai" | "custom", fallback: string): string {
     if (kind === "custom") return customItems.find((c) => c.id === id)?.text ?? fallback;
@@ -282,6 +293,62 @@
     } else {
       itemState = { ...itemState, [id]: { ...itemState[id], done: !itemState[id]?.done } };
       persistAi();
+    }
+  }
+  function setDone(id: string, kind: "ai" | "custom") {
+    if (!isDone(id, kind)) toggleDone(id, kind);
+  }
+  /** The row glyph: ○ idle → ☑ checked (for batch) → ✓ done. Clicking
+   * a done row resets it to idle (re-runnable); otherwise toggles the
+   * batch checkbox. */
+  function toggleCheck(id: string, kind: "ai" | "custom") {
+    if (isDone(id, kind)) {
+      toggleDone(id, kind);
+      const { [id]: _drop, ...rest } = selected;
+      selected = rest;
+      return;
+    }
+    selected = { ...selected, [id]: !selected[id] };
+  }
+  /** Selected items' current texts, in display order (AI sections
+   * first, then the personal checklist). */
+  function selectedInstructions(): string[] {
+    const list: string[] = [];
+    for (const section of parsed.sections) {
+      for (const item of section.items) {
+        if (selected[item.id]) list.push(textFor(item.id, "ai", item.text));
+      }
+    }
+    for (const c of customItems) {
+      if (selected[c.id]) list.push(c.text);
+    }
+    return list;
+  }
+  async function implementChecked() {
+    if (!onImplement || implementing !== null) return;
+    const items = selectedInstructions();
+    if (items.length === 0) return;
+    const instruction =
+      items.length === 1
+        ? items[0]
+        : "Apply ALL of the following revisions in one pass:\n" +
+          items.map((t, i) => `${i + 1}. ${t}`).join("\n");
+    implementing = "batch";
+    batchNote = null;
+    try {
+      const outcome = await onImplement(instruction);
+      if (outcome === "accepted") {
+        for (const [id, on] of Object.entries(selected)) {
+          if (on) setDone(id, id.startsWith("custom-") ? "custom" : "ai");
+        }
+        selected = {};
+      } else if (outcome === "nochange") {
+        batchNote = "no changes suggested";
+      }
+    } catch (e) {
+      batchNote = String(e);
+    } finally {
+      implementing = null;
     }
   }
   function startEdit(id: string, kind: "ai" | "custom", current: string) {
@@ -311,8 +378,10 @@
     rowNote = rest;
     try {
       const outcome = await onImplement(instruction);
-      if (outcome === "accepted" && !isDone(id, kind)) {
-        toggleDone(id, kind);
+      if (outcome === "accepted") {
+        setDone(id, kind);
+        const { [id]: _sel, ...rest } = selected;
+        selected = rest;
       } else if (outcome === "nochange") {
         rowNote = { ...rowNote, [id]: "no changes suggested" };
       }
@@ -358,12 +427,16 @@
 </script>
 
 {#snippet itemRow(id: string, fallback: string, kind: "ai" | "custom")}
-  <div class="brew-item" class:done={isDone(id, kind)}>
+  <div class="brew-item" class:done={isDone(id, kind)} class:checked={!isDone(id, kind) && !!selected[id]}>
     <button
       class="brew-check"
-      onclick={() => toggleDone(id, kind)}
-      title={isDone(id, kind) ? "Mark as not done" : "Mark as done"}
-    >{isDone(id, kind) ? "✓" : "○"}</button>
+      onclick={() => toggleCheck(id, kind)}
+      title={isDone(id, kind)
+        ? "Done — click to reset"
+        : selected[id]
+          ? "Uncheck"
+          : "Check for batch implement"}
+    >{isDone(id, kind) ? "✓" : selected[id] ? "☑" : "○"}</button>
     {#if editingId === id}
       <input
         class="brew-item-edit"
@@ -392,10 +465,11 @@
     {:else}
       <button
         class="brew-btn implement"
+        class:again={isDone(id, kind)}
         onclick={() => void implementItem(id, kind, fallback)}
         disabled={busy || implementing !== null || !onImplement}
-        title={isDone(id, kind) ? "Run again" : "Have the AI apply this to the note — you review the diff"}
-      >implement</button>
+        title={isDone(id, kind) ? "Already applied — run again" : "Have the AI apply this to the note — you review the diff"}
+      >{isDone(id, kind) ? "again" : "implement"}</button>
     {/if}
   </div>
   {#if rowNote[id]}
@@ -478,6 +552,26 @@
       {@render itemRow(c.id, c.text, "custom")}
     {/each}
   </div>
+  {#if selectedCount > 0 || implementing === "batch" || batchNote}
+    <div class="brew-batch-row">
+      {#if implementing === "batch"}
+        <span class="brew-batch-label">implementing checked items<span class="brew-dots">…</span></span>
+        <button class="brew-btn" onclick={() => onImplementCancel?.()}>cancel</button>
+      {:else}
+        <span class="brew-batch-label">{selectedCount} checked</span>
+        <button
+          class="brew-btn implement"
+          onclick={() => void implementChecked()}
+          disabled={busy || implementing !== null || !onImplement || selectedCount === 0}
+          title="Apply all checked items to the note in ONE revision pass — same cost as implementing one"
+        >implement checked</button>
+        <button class="brew-btn" onclick={() => (selected = {})} disabled={selectedCount === 0}>clear</button>
+      {/if}
+      {#if batchNote}
+        <span class="brew-batch-note">{batchNote}</span>
+      {/if}
+    </div>
+  {/if}
   <div class="brew-add-row">
     <input
       class="brew-add-input"
@@ -737,6 +831,36 @@
     margin: 0 0 4px 24px;
     font-size: 11px;
     font-style: italic;
+    color: #8a7d5e;
+  }
+  .brew-batch-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    border-top: 1px solid #33291a;
+    background: #221a0f;
+    flex: 0 0 auto;
+    font-size: 11px;
+  }
+  .brew-batch-label {
+    color: #d6b06a;
+  }
+  .brew-batch-note {
+    color: #8a7d5e;
+    font-style: italic;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .brew-item.checked .brew-item-text {
+    color: #f0e8d8;
+  }
+  .brew-item.checked .brew-check {
+    color: #6cb6ff;
+  }
+  .brew-btn.implement.again {
+    border-color: #3a3020;
     color: #8a7d5e;
   }
   .brew-add-row {

@@ -4,6 +4,22 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.5.4 — 2026-08-14
+
+Batch implement: check several suggestions, apply them in one pass.
+
+### New
+
+- **Implement checked.** Every brew item's circle is now a checkbox:
+  check any number of suggestions (AI or your own), and an "implement
+  checked" bar applies them all in ONE revision pass with one diff
+  review. Since implement re-emits the whole note regardless, five
+  instructions cost the same as one — the answer to local models
+  taking minutes per pass. Accepting marks every checked item done.
+- **Done rows read as done.** After an accepted implement the item's
+  button relabels to "again" (it stays re-runnable); clicking a done
+  item's ✓ resets it.
+
 ## 0.5.3 — 2026-08-14
 
 ### New

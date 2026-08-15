@@ -338,9 +338,9 @@ export const TIPS: Tip[] = [
   {
     id: "ai-implement",
     category: "ai",
-    headline: "Turn a brew suggestion into an edit",
+    headline: "Turn brew suggestions into edits",
     story:
-      "Hit \"implement\" on any brew item and review the revision as an inline diff — struck text leaves, blue text arrives. Accept with ⌘⏎ or cancel with Esc. Click any item's text to reword it first.",
+      "Hit \"implement\" on a brew item — or check several and \"implement checked\" applies them all in ONE pass (same cost as one). Review the inline diff: struck leaves, blue arrives. ⌘⏎ accepts, Esc cancels.",
   },
   {
     id: "ai-brew-checklist",
