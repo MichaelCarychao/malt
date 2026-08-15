@@ -14,7 +14,7 @@
 
   import { Channel, invoke } from "@tauri-apps/api/core";
   import { onDestroy } from "svelte";
-  import { sessionFor, type BrewItemState } from "./brewSessions";
+  import { sessionFor, persistBrewSessions, type BrewItemState } from "./brewSessions";
   import { flushAllEditors } from "./editorRegistry";
 
   let {
@@ -89,6 +89,7 @@
       if (currentSource) {
         const old = sessionFor(currentSource);
         old.interrupted = true;
+        persistBrewSessions();
       }
       activeChannel = null;
     }
@@ -160,6 +161,7 @@
     channel.onmessage = (chunk: string) => {
       if (activeChannel !== channel) return;
       sess.output += chunk;
+      persistBrewSessions(); // debounced — at most 2 writes/sec
       if (currentSource === p) {
         output = sess.output;
         if (scroller) scroller.scrollTop = scroller.scrollHeight;
@@ -173,6 +175,7 @@
         error = sess.error;
       }
     } finally {
+      persistBrewSessions();
       if (activeStreamId === streamId) activeStreamId = null;
       if (activeChannel === channel) {
         busy = false;
@@ -230,6 +233,7 @@
   function persistAi() {
     const sess = sessionFor(currentSource);
     sess.itemState = JSON.parse(JSON.stringify(itemState));
+    persistBrewSessions();
   }
 
   // ── Personal checklist (persists per vault) ───────────────────────
@@ -420,6 +424,7 @@
     // Stop the upstream generation; keep whatever streamed in the session.
     if (activeChannel && currentSource) {
       sessionFor(currentSource).interrupted = true;
+      persistBrewSessions();
     }
     cancelActiveStream();
     activeChannel = null;

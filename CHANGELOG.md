@@ -4,6 +4,18 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.5.5 — 2026-08-14
+
+### New
+
+- **Brews survive restarts and updates.** Brew sessions — suggestions,
+  your in-place edits, checkmarks — now persist to local storage, so
+  `Ctrl/⌘+Shift+B` on a previously-brewed note reopens its session
+  even after quitting or updating malt. Sessions also survive vault
+  switches (they're keyed per note). The store keeps the 40
+  most-recently-touched sessions; re-run still gets fresh suggestions
+  any time.
+
 ## 0.5.4 — 2026-08-14
 
 Batch implement: check several suggestions, apply them in one pass.

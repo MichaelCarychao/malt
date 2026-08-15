@@ -7,7 +7,7 @@
   import Linkbacks from "$lib/Linkbacks.svelte";
   import InlineUnlock from "$lib/InlineUnlock.svelte";
   import BrewPane from "$lib/BrewPane.svelte";
-  import { brewSessions, remapSession, dropSession, clearSessions } from "$lib/brewSessions";
+  import { brewSessions, remapSession, dropSession } from "$lib/brewSessions";
   import { flushAllEditors } from "$lib/editorRegistry";
   import {
     type Tip,
@@ -662,10 +662,11 @@
       vaultGen++;
       rawResults = [];
       allNotes = [];
-      // Brew sessions are per-note within a vault — close the pane and
-      // drop the cache so nothing dangles across the vault change.
+      // Close the brew pane so it can't dangle across the vault change.
+      // Sessions themselves are KEPT — they're keyed by absolute path
+      // (globally unique across vaults) and persist to localStorage, so
+      // each note's brew is waiting when you come back to it.
       closeSecondary();
-      clearSessions();
       await Promise.all([refreshAllNotes(), performSearch(query)]);
     }
     if (pane === "primary") {
@@ -2675,10 +2676,11 @@
       secondaryHistory = { stack: [], idx: -1 };
       rawResults = [];
       allNotes = [];
-      // Brew sessions are per-note within a vault — close the pane and
-      // drop the cache so nothing dangles across the vault change.
+      // Close the brew pane so it can't dangle across the vault change.
+      // Sessions themselves are KEPT — they're keyed by absolute path
+      // (globally unique across vaults) and persist to localStorage, so
+      // each note's brew is waiting when you come back to it.
       closeSecondary();
-      clearSessions();
       // Drop every cached encrypted-note password — they belong to the
       // vault we're leaving. (Paths are unique so this isn't strictly a
       // correctness bug, but holding another vault's note passwords in
@@ -2759,10 +2761,11 @@
       secondaryHistory = { stack: [], idx: -1 };
       rawResults = [];
       allNotes = [];
-      // Brew sessions are per-note within a vault — close the pane and
-      // drop the cache so nothing dangles across the vault change.
+      // Close the brew pane so it can't dangle across the vault change.
+      // Sessions themselves are KEPT — they're keyed by absolute path
+      // (globally unique across vaults) and persist to localStorage, so
+      // each note's brew is waiting when you come back to it.
       closeSecondary();
-      clearSessions();
       vaultsState = await invoke<VaultsState>("add_vault", {
         name: addVaultName.trim(),
         path: addVaultPath.trim(),
@@ -2807,10 +2810,11 @@
       secondaryHistory = { stack: [], idx: -1 };
       rawResults = [];
       allNotes = [];
-      // Brew sessions are per-note within a vault — close the pane and
-      // drop the cache so nothing dangles across the vault change.
+      // Close the brew pane so it can't dangle across the vault change.
+      // Sessions themselves are KEPT — they're keyed by absolute path
+      // (globally unique across vaults) and persist to localStorage, so
+      // each note's brew is waiting when you come back to it.
       closeSecondary();
-      clearSessions();
       unlockedPasswords = new Map();
       vaultsState = await invoke<VaultsState>("remove_vault", { index });
       // Active vault may have changed — invalidate in-flight old refreshers.
