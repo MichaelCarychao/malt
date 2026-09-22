@@ -442,6 +442,26 @@
   }
 
   let searchInput: HTMLInputElement | null = $state(null);
+
+  // "Learn to write with AI" — a header chip that opens the turn-taking
+  // guide. The chip is dismissible (×, persisted); the guide stays
+  // reachable from Settings → AI, which fires malt:open-ai-guide.
+  let aiGuideOpen = $state(false);
+  let aiGuideChipDismissed = $state(
+    typeof localStorage !== "undefined" &&
+      localStorage.getItem("malt.aiGuideDismissed") === "1",
+  );
+  function dismissAiGuideChip() {
+    aiGuideChipDismissed = true;
+    try {
+      localStorage.setItem("malt.aiGuideDismissed", "1");
+    } catch {
+      /* ignore */
+    }
+  }
+  function handleOpenAiGuide() {
+    aiGuideOpen = true;
+  }
   // Tracks whether the user has explicitly arrowed in the result list since
   // the last query edit. When true, Enter opens the highlighted match.
   // When false, Enter falls back to "exact-title-match → open, else create".
@@ -2896,6 +2916,7 @@
     });
     window.addEventListener("keydown", handleGlobalKey, true);
     window.addEventListener("blur", handleWindowBlur);
+    window.addEventListener("malt:open-ai-guide", handleOpenAiGuide);
     window.addEventListener("keydown", handleTipsKey);
     // Settings → Security tab broadcasts when the toggle changes so we
     // sync the in-memory mirror without re-querying.
@@ -2963,6 +2984,7 @@
     window.removeEventListener("keydown", handleGlobalKey, true);
     window.removeEventListener("keydown", handleTipsKey);
     window.removeEventListener("blur", handleWindowBlur);
+    window.removeEventListener("malt:open-ai-guide", handleOpenAiGuide);
   });
 </script>
 
@@ -2980,6 +3002,21 @@
       autocorrect="off"
       autocapitalize="off"
     />
+    {#if !aiGuideChipDismissed}
+      <span class="ai-guide-chip">
+        <button
+          class="ai-guide-open"
+          onclick={() => (aiGuideOpen = true)}
+          tabindex="-1"
+        >✦ learn to write with AI</button>
+        <button
+          class="ai-guide-x"
+          onclick={dismissAiGuideChip}
+          aria-label="Dismiss this button (the guide stays in Settings → AI)"
+          tabindex="-1"
+        >×</button>
+      </span>
+    {/if}
     <button
       class="gear"
       onclick={() => (settingsOpen = true)}
@@ -3838,6 +3875,74 @@
   </div>
 {/if}
 
+{#if aiGuideOpen}
+  <div class="aig-backdrop" role="presentation" onclick={() => (aiGuideOpen = false)}>
+    <div class="aig-modal" role="dialog" aria-modal="true" aria-label="Writing with AI in malt" onclick={(e) => e.stopPropagation()}>
+      <div class="aig-header">
+        <span class="aig-title">✦ writing with AI — the malt method</span>
+        <button class="aig-close" onclick={() => (aiGuideOpen = false)} aria-label="Close guide">×</button>
+      </div>
+      <div class="aig-body">
+        <p class="aig-lead">
+          malt is built for <strong>turn-taking</strong>: you and the model
+          alternate, one short move at a time. The model never writes past
+          you — it proposes, you dispose, and the next move is always yours.
+        </p>
+
+        <h4>the loop</h4>
+        <ol class="aig-loop">
+          <li><strong>Write a paragraph.</strong> Your words, your voice.</li>
+          <li><strong>{renderKeysForOS("⌘;")}</strong> — the model proposes what
+            comes next as ghost text: a few sentences, a short paragraph at most.</li>
+          <li><strong>Keep, reshape, or wave off.</strong>
+            {renderKeysForOS("Tab or an arrow key accepts at the cursor · ⌘Enter accepts from anywhere · Esc dismisses · ⌘; again re-rolls.")}
+            You can keep writing elsewhere while it thinks — the suggestion
+            streams in behind you.</li>
+          <li><strong>Your turn again.</strong> {renderKeysForOS("⌘⇧;")} steers
+            the next turn with a one-line direction ("make it darker",
+            "shorter, punchier") — or pick a standing <em>house style</em> from
+            any note tagged #prompt.</li>
+        </ol>
+
+        <h4>the other moves</h4>
+        <ul class="aig-list">
+          <li><strong>Rewrite</strong> — select a passage, then
+            {renderKeysForOS("⌘;")}. Only the selection is rewritten — more
+            concrete, same voice. Steering works here too.</li>
+          <li><strong>Brew</strong> — {renderKeysForOS("⌘⇧B")} brainstorms a
+            checklist of concrete edits for the note. Check one or several and
+            <em>implement</em>: the revision appears as an inline diff —
+            struck text leaves, colored text arrives —
+            {renderKeysForOS("⌘Enter accepts, Esc cancels.")} Add your own
+            standing items ("remove passive verbs"); they persist per vault.</li>
+          <li><strong>Two-pane prompting</strong> — {renderKeysForOS("⌘-click")}
+            opens a second pane; {renderKeysForOS("⌘⇧'")} sends the other pane
+            as a raw pre-prompt for this one. Notes become reusable prompts.</li>
+          <li><strong>Wikilink suggestions</strong> — {renderKeysForOS("⌘⇧L")}
+            proposes [[links]] for the entities in the note.</li>
+        </ul>
+
+        <h4>where it shines</h4>
+        <ul class="aig-list">
+          <li><strong>Fiction</strong> — the paragraph is the unit of
+            collaboration: big enough to surprise you, small enough to read
+            every word and keep only what belongs.</li>
+          <li><strong>Revision</strong> — brew a note, check the suggestions
+            worth taking, and run your own editing checklist on any draft.</li>
+          <li><strong>Thinking</strong> — steer with reframings ("argue the
+            other side"), or brew a journal entry into threads worth pulling.</li>
+        </ul>
+
+        <p class="aig-foot">
+          Works with a local model (LM Studio — nothing leaves your machine) or
+          your own cloud key. Configure in Settings → AI; every prompt malt
+          sends is readable and editable in Settings → Prompts.
+        </p>
+      </div>
+    </div>
+  </div>
+{/if}
+
 {#if updateState.kind === "available" && !updateToastDismissed && !updateModalOpen}
   <div class="update-toast" role="status">
     <span class="update-toast-text">
@@ -4112,6 +4217,128 @@
   }
   .search::placeholder {
     color: #555;
+  }
+  /* "Learn to write with AI" header chip — dismissible via its ×; the
+     guide stays reachable from Settings → AI. Gold = the AI/brew accent. */
+  .ai-guide-chip {
+    display: flex;
+    align-items: center;
+    align-self: center;
+    margin-right: 4px;
+    border: 1px solid #3a3020;
+    border-radius: 3px;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  .ai-guide-open {
+    background: transparent;
+    border: 0;
+    color: #d6b06a;
+    font: inherit;
+    font-size: 11px;
+    padding: 3px 8px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .ai-guide-open:hover {
+    background: rgba(214, 176, 106, 0.1);
+    color: #f0d9a8;
+  }
+  .ai-guide-x {
+    background: transparent;
+    border: 0;
+    border-left: 1px solid #2c2418;
+    color: #666;
+    font: inherit;
+    font-size: 12px;
+    padding: 3px 7px;
+    cursor: pointer;
+  }
+  .ai-guide-x:hover {
+    color: #c97a7a;
+  }
+  /* The guide modal itself. */
+  .aig-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.7);
+    z-index: 250;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 32px;
+  }
+  .aig-modal {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-top: 2px solid #d6b06a;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+    width: min(640px, 100%);
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+  }
+  .aig-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
+    border-bottom: 1px solid #2a2a2a;
+  }
+  .aig-title {
+    color: #d6b06a;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .aig-close {
+    background: transparent;
+    border: 0;
+    color: #666;
+    font: inherit;
+    font-size: 16px;
+    cursor: pointer;
+    padding: 0 4px;
+  }
+  .aig-close:hover {
+    color: #e0e0e0;
+  }
+  .aig-body {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    min-height: 0;
+    padding: 14px 18px 18px;
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: #cfcfcf;
+  }
+  .aig-body h4 {
+    margin: 16px 0 6px;
+    font-size: 11px;
+    font-weight: normal;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #d6b06a;
+  }
+  .aig-lead {
+    margin: 0;
+  }
+  .aig-body strong {
+    color: #e8e2d4;
+  }
+  .aig-loop,
+  .aig-list {
+    margin: 0;
+    padding-left: 22px;
+  }
+  .aig-loop li,
+  .aig-list li {
+    margin-bottom: 6px;
+  }
+  .aig-foot {
+    margin: 14px 0 0;
+    color: #8a8a8a;
+    font-size: 11.5px;
   }
   .gear {
     background: transparent;

@@ -872,6 +872,34 @@ fn set_provider_model(provider: providers::Provider, model: String) -> Result<()
     config::save(&cfg).map_err(|e| e.to_string())
 }
 
+/// Fetch a provider's LIVE model list from its models endpoint, so the
+/// Settings picker always offers current models without a malt update.
+/// Obvious non-chat models (embeddings, audio, image, moderation) are
+/// filtered out; everything else is left for the user to judge.
+#[tauri::command]
+async fn list_provider_models(provider: providers::Provider) -> Result<Vec<String>, String> {
+    let key = api_key_for_call(provider)?;
+    let mut models = if provider == providers::Provider::Anthropic {
+        ai::list_anthropic_models(&key).await?
+    } else {
+        let base = config::load()
+            .base_url_for(provider)
+            .ok_or_else(|| "provider lacks base URL".to_string())?;
+        openai_compat::list_models(&base, &key).await?
+    };
+    const NON_CHAT: &[&str] = &[
+        "embed", "whisper", "tts", "audio", "realtime", "transcribe", "voice",
+        "moderation", "dall-e", "image", "vision-encoder",
+    ];
+    models.retain(|m| {
+        let lower = m.to_lowercase();
+        !NON_CHAT.iter().any(|frag| lower.contains(frag))
+    });
+    models.sort();
+    models.dedup();
+    Ok(models)
+}
+
 /// Drop a model from a provider's quick-swap list. The provider's
 /// CURRENT model is untouched — removing the active chip just forgets
 /// the shortcut.
@@ -1767,6 +1795,7 @@ pub fn run() {
             set_provider_base_url,
             set_lmstudio_no_think,
             remove_saved_model,
+            list_provider_models,
             list_providers,
             get_config,
             set_tagging_enabled,

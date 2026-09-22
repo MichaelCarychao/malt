@@ -67,7 +67,9 @@ impl Provider {
         }
     }
 
-    /// Sensible default model per provider as of August 2026. Editable per
+    /// Sensible default model per provider as of September 2026. These are
+    /// compile-time seeds only — the Settings picker can also fetch each
+    /// provider's LIVE model list (see `list_provider_models`). Editable per
     /// install via Settings → AI; the value here is just the seed.
     pub fn default_model(self) -> &'static str {
         match self {
@@ -75,10 +77,10 @@ impl Provider {
             // micro-calls (completion, tags, links) where the fast/cheap
             // tier is the right default; Sonnet/Opus are one chip away.
             Provider::Anthropic => "claude-haiku-4-5",
-            Provider::Openai => "gpt-5.5",
+            Provider::Openai => "gpt-6-sol",
             Provider::Deepseek => "deepseek-v4-flash",
-            Provider::Grok => "grok-4.5",
-            Provider::Gemini => "gemini-3.6-flash",
+            Provider::Grok => "grok-4.6",
+            Provider::Gemini => "gemini-3.8-flash",
             // Whatever the user has loaded; this seed just matches a
             // commonly-run local model. The model field must match an ID
             // LM Studio's server lists (its /v1/models endpoint).
@@ -94,17 +96,13 @@ impl Provider {
             Provider::Anthropic => &[
                 "claude-haiku-4-5",
                 "claude-sonnet-5",
-                "claude-opus-5",
-                "claude-fable-5",
+                "claude-opus-5-5",
+                "claude-fable-5-1",
             ],
-            Provider::Openai => &["gpt-5.5", "gpt-5.4-mini", "gpt-5.4-nano"],
+            Provider::Openai => &["gpt-6-sol", "gpt-6-luna", "gpt-6-astra"],
             Provider::Deepseek => &["deepseek-v4-flash", "deepseek-v4-pro"],
-            Provider::Grok => &["grok-4.5", "grok-4.6"],
-            Provider::Gemini => &[
-                "gemini-3.6-flash",
-                "gemini-3.5-flash-lite",
-                "gemini-3.1-pro-preview",
-            ],
+            Provider::Grok => &["grok-4.6", "grok-4.7"],
+            Provider::Gemini => &["gemini-3.8-flash", "gemini-3.5-flash-lite"],
             Provider::LmStudio => &[
                 "openai/gpt-oss-20b",
                 "qwen/qwen3.6-35b-a3b",
@@ -177,8 +175,8 @@ impl Provider {
     /// gotcha to expect with this provider.
     pub fn note(self) -> &'static str {
         match self {
-            Provider::Anthropic => "Streaming via Anthropic's /v1/messages. Haiku for speed; Sonnet/Opus 5 for quality; Fable 5 is premium-priced.",
-            Provider::Openai => "Standard /v1/chat/completions. Default gpt-5.5; gpt-5.4-mini for cost.",
+            Provider::Anthropic => "Streaming via Anthropic's /v1/messages. Haiku for speed; Sonnet/Opus 5.5 for quality; Fable 5.1 is premium-priced.",
+            Provider::Openai => "Standard /v1/chat/completions. Default gpt-6-sol; gpt-6-luna for cost.",
             Provider::Deepseek => "OpenAI-compatible. 1M context on v4-pro. Off-peak pricing.",
             Provider::Grok => "OpenAI-compatible. Older grok-* aliases redirect to the newest 4.x.",
             Provider::Gemini => "OpenAI-compat subset — safety filters can null-out responses.",

@@ -417,6 +417,49 @@ fn streaming_client() -> reqwest::Client {
         .unwrap_or_else(|_| reqwest::Client::new())
 }
 
+// Models-list response shape (GET {base}/models) — shared by OpenAI,
+// DeepSeek, Grok, Gemini's compat endpoint, and LM Studio.
+#[derive(Deserialize)]
+struct ModelsResponse {
+    data: Vec<ModelEntry>,
+}
+#[derive(Deserialize)]
+struct ModelEntry {
+    id: String,
+}
+
+/// Fetch the provider's live model list. Lets the Settings picker offer
+/// current models without shipping a malt update every time a provider
+/// launches one. Gemini's compat endpoint prefixes ids with "models/";
+/// that's stripped so the returned ids are directly usable as the
+/// `model` request field.
+pub async fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, String> {
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let mut builder = client().get(&url);
+    if !api_key.is_empty() {
+        builder = builder.header("Authorization", format!("Bearer {api_key}"));
+    }
+    let resp = builder
+        .send()
+        .await
+        .map_err(|e| format!("network error: {e}"))?;
+    let status = resp.status();
+    let body = resp.text().await.map_err(|e| format!("read error: {e}"))?;
+    if !status.is_success() {
+        if let Ok(api_err) = serde_json::from_str::<ApiError>(&body) {
+            return Err(format!("{} ({})", api_err.error.message, status));
+        }
+        return Err(format!("HTTP {}: {}", status, body));
+    }
+    let parsed: ModelsResponse =
+        serde_json::from_str(&body).map_err(|e| format!("parse error: {e}"))?;
+    Ok(parsed
+        .data
+        .into_iter()
+        .map(|m| m.id.strip_prefix("models/").unwrap_or(&m.id).to_string())
+        .collect())
+}
+
 /// One-shot, non-streaming chat completion. Used for the connectivity
 /// test that fires when the user clicks "test" in Settings → AI.
 pub async fn send(

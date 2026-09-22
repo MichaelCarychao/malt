@@ -268,6 +268,40 @@ where
     pump_anthropic_sse(resp, stream_id, on_text).await
 }
 
+// Anthropic Models API response shape (GET /v1/models).
+#[derive(Deserialize)]
+struct AnthropicModelsResponse {
+    data: Vec<AnthropicModelEntry>,
+}
+#[derive(Deserialize)]
+struct AnthropicModelEntry {
+    id: String,
+}
+
+/// Fetch Anthropic's live model list so the Settings picker stays
+/// current without shipping a malt update per model launch.
+pub async fn list_anthropic_models(api_key: &str) -> Result<Vec<String>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let resp = client
+        .get("https://api.anthropic.com/v1/models?limit=100")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .send()
+        .await
+        .map_err(|e| format!("network error: {e}"))?;
+    let status = resp.status();
+    let body = resp.text().await.map_err(|e| format!("read error: {e}"))?;
+    if !status.is_success() {
+        return Err(format!("HTTP {}: {}", status, body));
+    }
+    let parsed: AnthropicModelsResponse =
+        serde_json::from_str(&body).map_err(|e| format!("parse error: {e}"))?;
+    Ok(parsed.data.into_iter().map(|m| m.id).collect())
+}
+
 pub async fn test_call(api_key: &str) -> Result<String, String> {
     let req = MessagesRequest {
         model: DEFAULT_MODEL,

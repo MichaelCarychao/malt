@@ -4,6 +4,37 @@ All notable changes to malt are documented here. Versioning follows
 [semantic versioning](https://semver.org/) with pre-1.0 conventions: minor
 bumps for meaningful feature batches, patch bumps for fixes.
 
+## 0.6.0 — 2026-09-22
+
+Models that stay current, a front door for the method, and a README
+that finally says what malt is for.
+
+### New
+
+- **Live model discovery.** A "fetch models" button on every provider
+  card in Settings → AI pulls the provider's current model list from
+  its own API — the model field then autocompletes against it. No more
+  waiting for a malt update when a provider ships a new model.
+  (Obvious non-chat models — embeddings, audio, image — are filtered
+  out.)
+- **"Learn to write with AI."** A header button (dismissible with ×)
+  opens a guide to malt's turn-taking method: the write → propose →
+  keep/reshape/dismiss → steer loop, every shortcut, the other moves
+  (rewrite, brew + implement, two-pane prompting), and where each
+  shines. Also reachable any time from Settings → AI.
+
+### Changed
+
+- **Cloud model seeds refreshed to the September 2026 lineups** —
+  Anthropic (Haiku 4.5 default; Sonnet 5, Opus 5.5, Fable 5.1), OpenAI
+  (gpt-6-sol default; gpt-6-luna, gpt-6-astra), Gemini (3.8-flash,
+  3.5-flash-lite), Grok (4.6 default, 4.7), DeepSeek (unchanged).
+- **README rewritten around the turn-taking idea** — writing with a
+  model one paragraph at a time, local models documented first-class,
+  an honest "what the AI features send" section, nvALT spelled and
+  credited properly, and the status disclaimer trimmed and moved down.
+  GitHub repo description, website, and topics filled in.
+
 ## 0.5.7 — 2026-08-14
 
 No more silently cut-off brews.

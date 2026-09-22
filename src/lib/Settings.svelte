@@ -427,6 +427,28 @@
   function ownModels(p: ProviderInfo): string[] {
     return p.saved_models.filter((m) => !p.suggested_models.includes(m));
   }
+  // Live model discovery: fetch the provider's current model list from
+  // its API so the picker never goes stale between malt releases. The
+  // fetched ids feed a <datalist> on the model input (autocomplete).
+  let providerFetchedModels = $state<Record<string, string[]>>({});
+  let providerModelFetchBusy = $state<Record<string, boolean>>({});
+  let providerModelFetchErrors = $state<Record<string, string>>({});
+  async function fetchProviderModels(id: ProviderId) {
+    providerModelFetchBusy = { ...providerModelFetchBusy, [id]: true };
+    const { [id]: _e, ...restErr } = providerModelFetchErrors;
+    providerModelFetchErrors = restErr;
+    try {
+      const models = await invoke<string[]>("list_provider_models", { provider: id });
+      providerFetchedModels = { ...providerFetchedModels, [id]: models };
+      if (models.length === 0) {
+        providerModelFetchErrors = { ...providerModelFetchErrors, [id]: "the provider returned no chat models" };
+      }
+    } catch (e) {
+      providerModelFetchErrors = { ...providerModelFetchErrors, [id]: String(e) };
+    } finally {
+      providerModelFetchBusy = { ...providerModelFetchBusy, [id]: false };
+    }
+  }
   async function removeSavedModel(id: ProviderId, model: string) {
     try {
       await invoke("remove_saved_model", { provider: id, model });
@@ -1106,7 +1128,17 @@
 
       {#if activeTab === "ai"}
       <section>
-        <h3>ai providers</h3>
+        <div class="ai-head-row">
+          <h3>ai providers</h3>
+          <button
+            class="ai-btn"
+            onclick={() => {
+              window.dispatchEvent(new CustomEvent("malt:open-ai-guide"));
+              open = false;
+            }}
+            title="The turn-taking method, shortcuts, and use cases"
+          >✦ writing-with-AI guide</button>
+        </div>
         <p class="hint-text">
           malt can drive its AI features (ghost completion, brew,
           rewrite, auto-tag, link suggestions) through any of these.
@@ -1204,10 +1236,29 @@
                   type="text"
                   bind:value={providerModelInputs[p.id]}
                   placeholder={p.default_model}
+                  list={`malt-models-${p.id}`}
                   onblur={() => void saveProviderModel(p.id)}
                   onkeydown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
                 />
+                <datalist id={`malt-models-${p.id}`}>
+                  {#each providerFetchedModels[p.id] ?? [] as m (m)}
+                    <option value={m}></option>
+                  {/each}
+                </datalist>
+                <button
+                  class="ai-btn"
+                  onclick={() => void fetchProviderModels(p.id)}
+                  disabled={providerModelFetchBusy[p.id]}
+                  title="Fetch this provider's live model list — the model field then autocompletes against it"
+                >{providerModelFetchBusy[p.id]
+                  ? "fetching…"
+                  : (providerFetchedModels[p.id]?.length
+                      ? `${providerFetchedModels[p.id].length} models`
+                      : "fetch models")}</button>
               </div>
+              {#if providerModelFetchErrors[p.id]}
+                <div class="provider-test-result err">{providerModelFetchErrors[p.id]}</div>
+              {/if}
               <div class="provider-row provider-suggestions">
                 <span class="provider-row-label"></span>
                 {#each p.suggested_models as m (m)}
@@ -2326,6 +2377,15 @@
   .provider-suggestions {
     gap: 4px;
     flex-wrap: wrap;
+  }
+  .ai-head-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .ai-head-row h3 {
+    margin-bottom: 0;
   }
   /* Quick-swap chips: every model the user has typed, one click to
      switch, × to forget. */
