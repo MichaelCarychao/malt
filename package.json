@@ -1,7 +1,7 @@
 {
   "name": "malt",
   "version": "0.6.0",
-  "description": "A cross-platform AI-augmented nvalt successor. Plain .md files, instant search, AI-assisted tagging and linking.",
+  "description": "Open-source, keyboard-first writing app where you and a language model take turns, one paragraph at a time. A spiritual successor to nvALT.",
   "type": "module",
   "scripts": {
     "dev": "vite dev",
@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "release": "node scripts/release.mjs"
   },
   "license": "MIT",
   "dependencies": {
